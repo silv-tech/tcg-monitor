@@ -1,0 +1,52 @@
+[
+  {
+    "id": "ebgames",
+    "name": "EB Games",
+    "url": "https://www.ebgames.ca",
+    "adapter": "ebgames",
+    "intervalMs": 60000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#e31937"
+  },
+  {
+    "id": "costco",
+    "name": "Costco Canada",
+    "url": "https://www.costco.ca",
+    "adapter": "costco",
+    "intervalMs": 90000,
+    "proxyTier": "datacenter",
+    "enabled": true,
+    "color": "#e31837"
+  },
+  {
+    "id": "pokemoncenter",
+    "name": "Pokemon Center",
+    "url": "https://www.pokemoncenter.com",
+    "adapter": "pokemoncenter",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#ffcb05"
+  },
+  {
+    "id": "walmart",
+    "name": "Walmart Canada",
+    "url": "https://www.walmart.ca",
+    "adapter": "walmart",
+    "intervalMs": 60000,
+    "proxyTier": "residential",
+    "enabled": true,
+    "color": "#0071dc"
+  },
+  {
+    "id": "amazon",
+    "name": "Amazon Canada",
+    "url": "https://www.amazon.ca",
+    "adapter": "amazon",
+    "intervalMs": 60000,
+    "proxyTier": "residential",
+    "enabled": true,
+    "color": "#ff9900"
+  }
+]

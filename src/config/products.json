@@ -1,0 +1,24 @@
+{
+  "keywords": [
+    "pokemon", "pokemon tcg", "booster box", "elite trainer box", "etb",
+    "booster bundle", "pokemon tin", "pokemon collection",
+    "one piece card game", "one piece tcg",
+    "dragon ball super card game",
+    "naruto boruto card game"
+  ],
+  "categories": {
+    "pokemon": ["pokemon", "pikachu", "charizard", "pokémon"],
+    "onepiece": ["one piece"],
+    "dragonball": ["dragon ball"],
+    "naruto": ["naruto", "boruto"]
+  },
+  "productTypes": {
+    "booster-box": ["booster box", "booster display"],
+    "etb": ["elite trainer box", "etb"],
+    "tin": ["tin", "collector tin"],
+    "bundle": ["booster bundle", "bundle box"],
+    "collection": ["collection box", "premium collection", "special collection"],
+    "blister": ["blister pack", "3-pack", "sleeved booster"]
+  },
+  "tracked": []
+}
