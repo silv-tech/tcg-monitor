@@ -6,8 +6,9 @@
     "adapter": "ebgames",
     "intervalMs": 60000,
     "proxyTier": "none",
-    "enabled": true,
-    "color": "#e31937"
+    "enabled": false,
+    "color": "#e31937",
+    "_note": "Site in maintenance (Odoo rebuild). Disabled until it comes back."
   },
   {
     "id": "costco",
@@ -15,7 +16,7 @@
     "url": "https://www.costco.ca",
     "adapter": "costco",
     "intervalMs": 90000,
-    "proxyTier": "datacenter",
+    "proxyTier": "none",
     "enabled": true,
     "color": "#e31837"
   },
@@ -25,9 +26,10 @@
     "url": "https://www.pokemoncenter.com",
     "adapter": "pokemoncenter",
     "intervalMs": 45000,
-    "proxyTier": "none",
+    "proxyTier": "residential",
     "enabled": true,
-    "color": "#ffcb05"
+    "color": "#ffcb05",
+    "_note": "Imperva Incapsula — needs TLS fingerprinting or headless browser"
   },
   {
     "id": "walmart",
@@ -47,6 +49,43 @@
     "intervalMs": 60000,
     "proxyTier": "residential",
     "enabled": true,
-    "color": "#ff9900"
+    "color": "#ff9900",
+    "_note": "Akamai Bot Manager — needs TLS fingerprinting or headless browser"
+  },
+  {
+    "id": "401games",
+    "name": "401 Games",
+    "url": "https://store.401games.ca",
+    "adapter": "shopify",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#1a1a2e",
+    "collections": [],
+    "searchKeywords": ["pokemon", "booster box", "elite trainer box", "one piece", "dragon ball", "sealed"]
+  },
+  {
+    "id": "facetoface",
+    "name": "Face to Face Games",
+    "url": "https://www.facetofacegames.com",
+    "adapter": "shopify",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#2d5a27",
+    "collections": ["pokemon-sealed-products"],
+    "searchKeywords": ["pokemon", "booster box", "etb", "one piece", "dragon ball"]
+  },
+  {
+    "id": "hobbiesville",
+    "name": "Hobbiesville",
+    "url": "https://hobbiesville.com",
+    "adapter": "shopify",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#ff6600",
+    "collections": ["pokemon-sealed-products", "one-piece-sealed-products"],
+    "searchKeywords": ["pokemon", "booster", "elite trainer", "one piece", "dragon ball"]
   }
 ]

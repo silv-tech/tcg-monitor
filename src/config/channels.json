@@ -1,0 +1,57 @@
+{
+  "_comment": "Map categories and retailers to Discord channels and roles. Set channel IDs and role IDs after creating your Discord server.",
+  "tiers": {
+    "paid": {
+      "delay": 0,
+      "channels": {
+        "default": "",
+        "pokemon": "",
+        "onepiece": "",
+        "dragonball": "",
+        "naruto": ""
+      }
+    },
+    "free": {
+      "delay": 45000,
+      "channels": {
+        "default": "",
+        "pokemon": "",
+        "onepiece": "",
+        "dragonball": "",
+        "naruto": ""
+      }
+    }
+  },
+  "retailerChannels": {
+    "_comment": "Optional per-retailer channels (paid tier). If set, alerts go here instead of category channel.",
+    "walmart": "",
+    "amazon": "",
+    "costco": "",
+    "ebgames": "",
+    "pokemoncenter": ""
+  },
+  "roles": {
+    "_comment": "Role IDs to ping. Members subscribe to roles for games/retailers they want.",
+    "categories": {
+      "pokemon": "",
+      "onepiece": "",
+      "dragonball": "",
+      "naruto": ""
+    },
+    "retailers": {
+      "walmart": "",
+      "amazon": "",
+      "costco": "",
+      "ebgames": "",
+      "pokemoncenter": ""
+    },
+    "paidMember": "",
+    "allAlerts": ""
+  },
+  "adminChannel": "",
+  "webhooks": {
+    "_comment": "Webhook URLs as fallback if bot can't reach a channel. Format: category or retailer ID -> webhook URL.",
+    "paid_default": "",
+    "free_default": ""
+  }
+}

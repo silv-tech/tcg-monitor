@@ -1,5 +1,6 @@
 const logger = require('../monitoring/logger');
 const { httpGet } = require('../utils/http');
+const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl, recordRequest } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
 const { classifyCategory, classifyProductType } = require('../utils/helpers');
@@ -23,6 +24,18 @@ class BaseAdapter {
     const proxyUrl = this.getProxyUrl();
     try {
       const result = await httpGet(url, { ...opts, proxyUrl });
+      recordRequest(this.id, false);
+      return result;
+    } catch (err) {
+      recordRequest(this.id, true);
+      throw err;
+    }
+  }
+
+  async stealthFetch(url, opts = {}) {
+    const proxyUrl = this.getProxyUrl();
+    try {
+      const result = await stealthGet(url, { ...opts, proxyUrl });
       recordRequest(this.id, false);
       return result;
     } catch (err) {

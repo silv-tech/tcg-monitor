@@ -6,70 +6,114 @@ const { normalizePrice } = require('../utils/helpers');
 class CostcoAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
-    this.searchUrls = [
-      `${this.url}/ca/pokemon.html`,
-      `${this.url}/ca/CatalogSearch?dept=All&keyword=pokemon+tcg`,
-      `${this.url}/ca/CatalogSearch?dept=All&keyword=trading+card+game`,
+    // Costco's search API is behind Akamai — use sitemap discovery + product page monitoring
+    this.sitemapUrl = `${this.url}/sitemap_i_001.xml`;
+    this.tcgKeywords = [
+      'pokemon', 'pokémon', 'tcg', 'trading-card', 'trading+card',
+      'one-piece', 'lorcana', 'magic-the-gathering', 'yugioh', 'yu-gi-oh',
+      'dragon-ball', 'naruto', 'booster', 'elite-trainer',
     ];
+    this.knownProductIds = new Set();
+    this.lastSitemapScan = 0;
+    this.SITEMAP_INTERVAL = 6 * 60 * 60 * 1000; // Rescan sitemap every 6 hours
   }
 
   async fetchProducts() {
     const products = {};
 
-    for (const searchUrl of this.searchUrls) {
+    // Phase 1: Discover new product URLs from sitemap (every 6 hours)
+    if (Date.now() - this.lastSitemapScan > this.SITEMAP_INTERVAL) {
+      await this.scanSitemap();
+      this.lastSitemapScan = Date.now();
+    }
+
+    // Phase 2: Check each known product page for stock/price changes
+    for (const productId of this.knownProductIds) {
       try {
-        const html = await this.fetch(searchUrl, {
-          headers: {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-        });
-        const $ = cheerio.load(html);
-
-        $('.product, .product-tile, [data-product-id]').each((_, el) => {
-          try {
-            const $el = $(el);
-            const name = $el.find('.description, .product-title, h2 a, p.description a').first().text().trim();
-            if (!name) return;
-
-            const sku = $el.attr('data-product-id') ||
-              $el.find('[data-product-id]').attr('data-product-id') ||
-              name.replace(/\s+/g, '-').toLowerCase().slice(0, 50);
-
-            const href = $el.find('a[href*=".product."]').first().attr('href') ||
-              $el.find('a').first().attr('href') || '';
-            const url = href.startsWith('http') ? href : `${this.url}${href}`;
-
-            const priceText = $el.find('.price, .your-price span').first().text();
-            const price = normalizePrice(priceText);
-
-            const image = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src') || '';
-
-            const outOfStock = $el.find('.out-of-stock, .oos').length > 0 ||
-              $el.text().toLowerCase().includes('out of stock');
-
-            const product = this.classify({
-              sku,
-              name,
-              price,
-              currency: 'CAD',
-              url,
-              image: image.startsWith('http') ? image : `${this.url}${image}`,
-              inStock: !outOfStock,
-              canAddToCart: !outOfStock,
-              shipsToHome: true,
-            });
-
-            products[product.sku] = product;
-          } catch (err) {
-            logger.debug(`Costco: failed to parse product element: ${err.message}`);
-          }
-        });
+        const product = await this.fetchProductPage(productId);
+        if (product) {
+          products[product.sku] = product;
+        }
       } catch (err) {
-        logger.warn(`Costco: failed to fetch ${searchUrl}: ${err.message}`);
+        logger.debug(`Costco: failed to fetch product ${productId}: ${err.message}`);
       }
     }
 
     return products;
+  }
+
+  async scanSitemap() {
+    try {
+      const xml = await this.fetch(this.sitemapUrl, { timeoutMs: 30000 });
+      const $ = cheerio.load(xml, { xmlMode: true });
+
+      $('url > loc').each((_, el) => {
+        const url = $(el).text().trim().toLowerCase();
+        if (this.tcgKeywords.some(kw => url.includes(kw))) {
+          // Extract product ID from URL — format: /p/-/slug/ITEMID or /product-name.ITEMID.html
+          const idMatch = url.match(/\/(\d{5,})(?:\.html)?$/);
+          if (idMatch) {
+            this.knownProductIds.add(idMatch[1]);
+          }
+        }
+      });
+
+      logger.info(`Costco: sitemap scan found ${this.knownProductIds.size} TCG product IDs`);
+    } catch (err) {
+      logger.warn(`Costco: sitemap scan failed: ${err.message}`);
+    }
+  }
+
+  async fetchProductPage(productId) {
+    // The /p/-/x/ITEMID format works — slug is ignored by server
+    const url = `${this.url}/p/-/tcg/${productId}`;
+    const html = await this.fetch(url, { timeoutMs: 15000 });
+
+    const $ = cheerio.load(html);
+
+    // Parse JSON-LD structured data
+    let productData = null;
+    $('script[type="application/ld+json"]').each((_, el) => {
+      try {
+        const json = JSON.parse($(el).html());
+        if (json['@type'] === 'Product') {
+          productData = json;
+        }
+      } catch (e) {
+        // skip invalid JSON-LD
+      }
+    });
+
+    if (!productData) {
+      logger.debug(`Costco: no JSON-LD Product data for ${productId}`);
+      return null;
+    }
+
+    const availability = productData.offers?.availability || '';
+    const inStock = availability.includes('InStock');
+
+    return this.classify({
+      sku: productData.sku || productId,
+      name: productData.name,
+      price: typeof productData.offers?.price === 'number'
+        ? productData.offers.price
+        : normalizePrice(String(productData.offers?.price)),
+      currency: productData.offers?.priceCurrency || 'CAD',
+      url: productData.url || `${this.url}/p/-/tcg/${productId}`,
+      image: productData.image || '',
+      inStock,
+      canAddToCart: inStock,
+      shipsToHome: true,
+    });
+  }
+
+  // Allow manually adding product IDs (e.g. from admin dashboard)
+  addProductId(id) {
+    this.knownProductIds.add(id);
+  }
+
+  removeProductId(id) {
+    this.knownProductIds.delete(id);
   }
 }
 

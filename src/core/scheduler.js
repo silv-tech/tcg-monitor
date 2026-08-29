@@ -1,6 +1,7 @@
 const logger = require('../monitoring/logger');
 const state = require('./state');
 const { diffProducts } = require('./events');
+const { recordPollLatency } = require('./proxy');
 const { sleep } = require('../utils/helpers');
 
 class Scheduler {
@@ -21,10 +22,13 @@ class Scheduler {
   }
 
   async pollAdapter(adapter) {
+    const pollStart = Date.now();
     try {
       const newProducts = await adapter.run();
-      const oldProducts = await state.getAllProducts(adapter.id);
+      const pollMs = Date.now() - pollStart;
+      recordPollLatency(adapter.id, pollMs);
 
+      const oldProducts = await state.getAllProducts(adapter.id);
       const events = diffProducts(oldProducts, newProducts);
 
       // Save new state
@@ -35,12 +39,19 @@ class Scheduler {
       await state.clearErrors(adapter.id);
 
       if (events.length > 0) {
-        logger.info(`${adapter.name}: ${events.length} event(s) detected`);
+        // Stamp detection time on events for delivery latency tracking
+        const detectedAt = Date.now();
+        for (const event of events) {
+          event._detectedAt = detectedAt;
+        }
+        logger.info(`${adapter.name}: ${events.length} event(s) detected (poll: ${pollMs}ms)`);
         if (this.onEvents) {
           await this.onEvents(events);
         }
       }
     } catch (err) {
+      const pollMs = Date.now() - pollStart;
+      recordPollLatency(adapter.id, pollMs);
       const status = await state.recordError(adapter.id, err);
       logger.error(`${adapter.name}: poll error (${status.errors} consecutive)`, {
         error: err.message,

@@ -8,10 +8,11 @@ class WalmartAdapter extends BaseAdapter {
     super(config);
     // Walmart Canada search API
     this.searchUrls = [
-      `${this.url}/search?q=pokemon+tcg&c=6000200325631`,
-      `${this.url}/search?q=one+piece+card+game`,
-      `${this.url}/search?q=pokemon+elite+trainer+box`,
+      `${this.url}/search?q=pokemon+tcg`,
       `${this.url}/search?q=pokemon+booster+box`,
+      `${this.url}/search?q=pokemon+elite+trainer+box`,
+      `${this.url}/search?q=one+piece+card+game`,
+      `${this.url}/search?q=dragon+ball+super+card+game`,
     ];
   }
 
@@ -20,11 +21,8 @@ class WalmartAdapter extends BaseAdapter {
 
     for (const searchUrl of this.searchUrls) {
       try {
-        const html = await this.fetch(searchUrl, {
-          headers: {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-CA,en;q=0.9',
-          },
+        const html = await this.stealthFetch(searchUrl, {
+          timeoutMs: 20000,
         });
 
         // Walmart embeds product data in __NEXT_DATA__ or window.__PRELOADED_STATE__
@@ -99,21 +97,26 @@ class WalmartAdapter extends BaseAdapter {
 
   parseNextData(data, products) {
     try {
-      const results = data?.props?.pageProps?.initialData?.searchResult?.itemStacks?.[0]?.items || [];
-      for (const item of results) {
-        if (!item.name) continue;
-        const product = this.classify({
-          sku: item.usItemId || item.id || item.canonicalUrl?.split('/').pop(),
-          name: item.name,
-          price: item.priceInfo?.currentPrice?.price || normalizePrice(item.priceInfo?.currentPrice?.priceString),
-          currency: 'CAD',
-          url: item.canonicalUrl ? `${this.url}${item.canonicalUrl}` : this.url,
-          image: item.imageInfo?.thumbnailUrl || item.image || '',
-          inStock: item.availabilityStatusV2?.value === 'IN_STOCK' || item.availabilityStatus === 'IN_STOCK',
-          canAddToCart: item.canAddToCart !== false,
-          shipsToHome: item.fulfillmentBadge !== 'IN_STORE_ONLY',
-        });
-        products[product.sku] = product;
+      const stacks = data?.props?.pageProps?.initialData?.searchResult?.itemStacks || [];
+      for (const stack of stacks) {
+        const items = stack?.items || [];
+        for (const item of items) {
+          // Skip non-product entries (ads, placeholders)
+          if (!item.name || item.__typename === 'AdPlaceholder' || item.__typename === 'TileTakeOverProductPlaceholder') continue;
+
+          const product = this.classify({
+            sku: item.usItemId || item.id || item.canonicalUrl?.split('/').pop(),
+            name: item.name,
+            price: item.price || normalizePrice(item.priceInfo?.linePrice),
+            currency: 'CAD',
+            url: item.canonicalUrl ? `${this.url}${item.canonicalUrl}` : this.url,
+            image: item.imageInfo?.thumbnailUrl || item.image || '',
+            inStock: item.availabilityStatusV2?.value === 'IN_STOCK' || !item.isOutOfStock,
+            canAddToCart: item.canAddToCart !== false,
+            shipsToHome: !(item.fulfillmentTitle || '').includes('not_available'),
+          });
+          products[product.sku] = product;
+        }
       }
     } catch (err) {
       logger.debug(`Walmart: parseNextData error: ${err.message}`);

@@ -19,12 +19,8 @@ class AmazonAdapter extends BaseAdapter {
 
     for (const searchUrl of this.searchUrls) {
       try {
-        const html = await this.fetch(searchUrl, {
-          headers: {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-CA,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-          },
+        const html = await this.stealthFetch(searchUrl, {
+          timeoutMs: 20000,
         });
 
         const $ = cheerio.load(html);

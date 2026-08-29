@@ -17,7 +17,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       try {
         // Pokemon Center uses Algolia-powered search or internal API
         const searchUrl = `${this.url}/search?q=${encodeURIComponent(query)}`;
-        const html = await this.fetch(searchUrl);
+        const html = await this.stealthFetch(searchUrl, { timeoutMs: 25000 });
 
         // Try to extract JSON data from script tags (Next.js / SSR data)
         const jsonMatch = html.match(/__NEXT_DATA__\s*=\s*({.+?})\s*;?\s*<\/script>/s);

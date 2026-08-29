@@ -13,6 +13,7 @@ const CostcoAdapter = require('./adapters/costco');
 const PokemonCenterAdapter = require('./adapters/pokemoncenter');
 const WalmartAdapter = require('./adapters/walmart');
 const AmazonAdapter = require('./adapters/amazon');
+const ShopifyAdapter = require('./adapters/shopify');
 
 const ADAPTER_MAP = {
   ebgames: EBGamesAdapter,
@@ -20,6 +21,7 @@ const ADAPTER_MAP = {
   pokemoncenter: PokemonCenterAdapter,
   walmart: WalmartAdapter,
   amazon: AmazonAdapter,
+  shopify: ShopifyAdapter,
 };
 
 async function main() {
