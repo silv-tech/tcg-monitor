@@ -348,5 +348,29 @@
     "proxyTier": "none",
     "enabled": true,
     "color": "#00b894"
+  },
+  {
+    "id": "chimeragaming",
+    "name": "Chimera Gaming",
+    "url": "https://www.chimeragamingonline.com",
+    "adapter": "shopify",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#d63031",
+    "collections": ["pokemon-sealed", "pokemon-new-releases"],
+    "searchKeywords": ["pokemon", "booster box", "elite trainer box", "one piece", "dragon ball", "lorcana"]
+  },
+  {
+    "id": "untouchables",
+    "name": "Untouchables",
+    "url": "https://untouchables.ca",
+    "adapter": "shopify",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#0984e3",
+    "collections": ["pokemon-tcg", "pokemon-showcase"],
+    "searchKeywords": ["pokemon", "booster box", "elite trainer box", "one piece", "dragon ball", "lorcana"]
   }
 ]

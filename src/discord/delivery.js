@@ -1,7 +1,7 @@
 const fetch = require('node-fetch');
 const config = require('../config');
 const logger = require('../monitoring/logger');
-const { buildEmbed } = require('./embeds');
+const { buildAlertEmbed } = require('./embeds');
 const { filterDuplicates, markSent } = require('./dedup');
 const { recordAlertLatency } = require('../core/proxy');
 const { sleep } = require('../utils/helpers');
@@ -70,7 +70,6 @@ class DeliveryQueue {
   }
 
   async routeEvent(event, queuedAt) {
-    const embed = buildEmbed(event);
     const { product } = event;
     const category = product.category || 'default';
     const retailerId = this.retailerIdFromName(product.retailer);
@@ -81,7 +80,8 @@ class DeliveryQueue {
     // --- PAID TIER: send immediately ---
     const paidChannel = this.resolvePaidChannel(category, retailerId);
     if (paidChannel) {
-      await this.sendToChannel(paidChannel, embed, pings, 'paid');
+      const { embed, components } = buildAlertEmbed(event, 'paid');
+      await this.sendToChannel(paidChannel, embed, components, pings, 'paid');
       const latency = Date.now() - queuedAt;
       const e2eLatency = event._detectedAt ? Date.now() - event._detectedAt : latency;
       recordAlertLatency(e2eLatency);
@@ -94,7 +94,8 @@ class DeliveryQueue {
       const delay = channelsConfig?.tiers?.free?.delay || config.delivery.freeTierDelayMs;
       setTimeout(async () => {
         try {
-          await this.sendToChannel(freeChannel, embed, null, 'free');
+          const { embed, components } = buildAlertEmbed(event, 'free');
+          await this.sendToChannel(freeChannel, embed, components, null, 'free');
           logger.info(`Free alert sent (delayed ${delay}ms): ${event.type} — ${product.name}`);
         } catch (err) {
           logger.error(`Failed free tier delivery: ${err.message}`);
@@ -158,7 +159,7 @@ class DeliveryQueue {
     return map[retailerName] || retailerName.toLowerCase().replace(/\s+/g, '');
   }
 
-  async sendToChannel(channelId, embed, content, tier) {
+  async sendToChannel(channelId, embed, components, content, tier) {
     if (!channelId) return;
 
     // Try bot first
@@ -166,7 +167,10 @@ class DeliveryQueue {
       try {
         const channel = await this.fetchChannel(channelId);
         if (channel) {
-          await channel.send({ content: content || undefined, embeds: [embed] });
+          const payload = { embeds: [embed] };
+          if (content) payload.content = content;
+          if (components && components.length) payload.components = components;
+          await channel.send(payload);
           return;
         }
       } catch (err) {

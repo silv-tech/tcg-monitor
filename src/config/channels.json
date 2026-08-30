@@ -4,7 +4,7 @@
     "paid": {
       "delay": 0,
       "channels": {
-        "default": "",
+        "default": "1543432787808354404",
         "pokemon": "",
         "onepiece": "",
         "dragonball": "",
@@ -14,7 +14,7 @@
     "free": {
       "delay": 45000,
       "channels": {
-        "default": "",
+        "default": "1543432841323356170",
         "pokemon": "",
         "onepiece": "",
         "dragonball": "",
@@ -48,7 +48,7 @@
     "paidMember": "",
     "allAlerts": ""
   },
-  "adminChannel": "",
+  "adminChannel": "1543432883476242442",
   "webhooks": {
     "_comment": "Webhook URLs as fallback if bot can't reach a channel. Format: category or retailer ID -> webhook URL.",
     "paid_default": "",

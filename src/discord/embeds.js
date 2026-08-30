@@ -1,83 +1,98 @@
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { EVENT_TYPES } = require('../core/events');
 
-const EVENT_EMOJI = {
-  [EVENT_TYPES.RESTOCK]: '🟢',
-  [EVENT_TYPES.NEW_SKU]: '🆕',
-  [EVENT_TYPES.PRICE_CHANGE]: '💰',
-  [EVENT_TYPES.PREORDER_LIVE]: '📋',
-  [EVENT_TYPES.CART_AVAILABLE]: '🛒',
-  [EVENT_TYPES.SHIPPING_CHANGE]: '📦',
+// ─── Event config ────────────────────────────────────────────────
+const EVENT_CONFIG = {
+  [EVENT_TYPES.RESTOCK]: {
+    label: 'Restock',
+    color: 0x57f287,
+    button: 'Buy Now',
+  },
+  [EVENT_TYPES.NEW_SKU]: {
+    label: 'New Product',
+    color: 0x5865f2,
+    button: 'View Product',
+  },
+  [EVENT_TYPES.PRICE_CHANGE]: {
+    label: 'Price Drop',
+    color: 0xed4245,
+    button: 'Buy Now',
+  },
+  [EVENT_TYPES.PREORDER_LIVE]: {
+    label: 'Pre-Order Live',
+    color: 0xfe7434,
+    button: 'Pre-Order Now',
+  },
+  [EVENT_TYPES.CART_AVAILABLE]: {
+    label: 'Cart Available',
+    color: 0x3498db,
+    button: 'Add to Cart',
+  },
+  [EVENT_TYPES.SHIPPING_CHANGE]: {
+    label: 'Shipping Update',
+    color: 0x95a5a6,
+    button: 'View Product',
+  },
 };
 
-const EVENT_TITLE = {
-  [EVENT_TYPES.RESTOCK]: 'Back in Stock!',
-  [EVENT_TYPES.NEW_SKU]: 'New Product Found!',
-  [EVENT_TYPES.PRICE_CHANGE]: 'Price Change',
-  [EVENT_TYPES.PREORDER_LIVE]: 'Pre-Order Live!',
-  [EVENT_TYPES.CART_AVAILABLE]: 'Add to Cart Available!',
-  [EVENT_TYPES.SHIPPING_CHANGE]: 'Shipping Update',
-};
+// ─── Main builder ────────────────────────────────────────────────
 
-function buildEmbed(event) {
-  const { type, product, detail, oldValue, newValue } = event;
-  const emoji = EVENT_EMOJI[type] || '📢';
-  const title = EVENT_TITLE[type] || type;
+function buildAlertEmbed(event, tier) {
+  const { type, product, oldValue, newValue } = event;
+  const cfg = EVENT_CONFIG[type] || EVENT_CONFIG[EVENT_TYPES.RESTOCK];
 
   const embed = new EmbedBuilder()
-    .setTitle(`${emoji} ${title}`)
-    .setURL(product.url || null)
-    .setDescription(`**${product.name}**`)
-    .setColor(resolveColor(product))
-    .setTimestamp()
-    .setFooter({ text: `${product.retailer} • TCG Monitor` });
+    .setColor(cfg.color)
+    .setTimestamp();
 
-  if (product.image) {
-    embed.setThumbnail(product.image);
+  // ── Title: product name (clickable link) ──
+  embed.setTitle(product.name);
+  if (product.url) embed.setURL(product.url);
+
+  // ── Author: retailer + event type ──
+  embed.setAuthor({ name: `${product.retailer}  ·  ${cfg.label}` });
+
+  // ── Thumbnail ──
+  if (product.image) embed.setThumbnail(product.image);
+
+  // ── Price line ──
+  if (type === EVENT_TYPES.PRICE_CHANGE && oldValue != null && newValue != null) {
+    const saved = oldValue - newValue;
+    if (saved > 0) {
+      const pct = ((saved / oldValue) * 100).toFixed(0);
+      embed.setDescription(`~~$${oldValue.toFixed(2)}~~ **$${newValue.toFixed(2)} CAD** (-${pct}%)`);
+    } else {
+      embed.setDescription(`~~$${oldValue.toFixed(2)}~~ **$${newValue.toFixed(2)} CAD**`);
+    }
+  } else if (product.price != null) {
+    embed.setDescription(`**$${product.price.toFixed(2)} CAD**`);
   }
 
-  if (product.price != null) {
-    embed.addFields({ name: 'Price', value: `$${product.price.toFixed(2)} CAD`, inline: true });
+  // ── Footer: stock + tier ──
+  const stock = product.inStock ? 'In Stock' : 'Out of Stock';
+  const tierLabel = tier === 'paid' ? 'Premium' : 'Free';
+  embed.setFooter({ text: `${stock}  ·  ${tierLabel}  ·  TCG Monitor` });
+
+  // ── Button ──
+  const components = [];
+  if (product.url) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel(cfg.button)
+          .setURL(product.url)
+          .setStyle(ButtonStyle.Link)
+      )
+    );
   }
 
-  if (type === EVENT_TYPES.PRICE_CHANGE && oldValue != null) {
-    const diff = newValue - oldValue;
-    const arrow = diff < 0 ? '↓' : '↑';
-    embed.addFields({
-      name: 'Was',
-      value: `$${oldValue.toFixed(2)} CAD`,
-      inline: true,
-    });
-    embed.addFields({
-      name: 'Change',
-      value: `${arrow} $${Math.abs(diff).toFixed(2)}`,
-      inline: true,
-    });
-  }
+  return { embed, components };
+}
 
-  embed.addFields(
-    { name: 'Stock', value: product.inStock ? '✅ In Stock' : '❌ Out of Stock', inline: true },
-    { name: 'Retailer', value: product.retailer, inline: true }
-  );
-
-  if (product.category && product.category !== 'other') {
-    embed.addFields({ name: 'Category', value: product.category, inline: true });
-  }
-
-  embed.addFields({ name: '\u200b', value: `[Buy Now](${product.url})` });
-
+// Backward compat
+function buildEmbed(event) {
+  const { embed } = buildAlertEmbed(event, 'paid');
   return embed;
 }
 
-function resolveColor(product) {
-  const colorMap = {
-    'EB Games': 0xe31937,
-    'Costco Canada': 0xe31837,
-    'Pokemon Center': 0xffcb05,
-    'Walmart Canada': 0x0071dc,
-    'Amazon Canada': 0xff9900,
-  };
-  return colorMap[product.retailer] || 0x5865f2;
-}
-
-module.exports = { buildEmbed };
+module.exports = { buildEmbed, buildAlertEmbed };
