@@ -14,6 +14,9 @@ const PokemonCenterAdapter = require('./adapters/pokemoncenter');
 const WalmartAdapter = require('./adapters/walmart');
 const AmazonAdapter = require('./adapters/amazon');
 const ShopifyAdapter = require('./adapters/shopify');
+const BestBuyAdapter = require('./adapters/bestbuy');
+let closeBrowser;
+try { closeBrowser = require('./utils/browser').closeBrowser; } catch { closeBrowser = null; }
 
 const ADAPTER_MAP = {
   ebgames: EBGamesAdapter,
@@ -22,6 +25,7 @@ const ADAPTER_MAP = {
   walmart: WalmartAdapter,
   amazon: AmazonAdapter,
   shopify: ShopifyAdapter,
+  bestbuy: BestBuyAdapter,
 };
 
 async function main() {
@@ -70,6 +74,7 @@ async function main() {
     scheduler.stop();
     adminServer.close();
     await shutdownBot();
+    if (closeBrowser) await closeBrowser();
     await shutdownState();
     logger.info('Shutdown complete');
     process.exit(0);

@@ -12,36 +12,51 @@
     .header .status { font-size: 13px; padding: 4px 12px; border-radius: 12px; }
     .status.ok { background: #0d3b1a; color: #4ade80; }
     .status.bad { background: #3b0d0d; color: #f87171; }
-    .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .status.warn { background: #3b2f0d; color: #facc15; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
     .section { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-    .section h2 { font-size: 16px; color: #fff; margin-bottom: 14px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+    .section h2 { font-size: 16px; color: #fff; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .section h2 .badge { font-size: 11px; background: #333; color: #aaa; padding: 2px 8px; border-radius: 10px; font-weight: 400; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
     .card { background: #222; border: 1px solid #333; border-radius: 8px; padding: 14px; }
-    .card .name { font-weight: 600; color: #fff; margin-bottom: 6px; }
-    .card .meta { font-size: 13px; color: #888; }
-    .card .health { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-    .card .health.green { background: #4ade80; }
-    .card .health.red { background: #f87171; }
-    .card .health.yellow { background: #facc15; }
-    .toggle { cursor: pointer; padding: 4px 10px; border-radius: 4px; border: 1px solid #444; background: #333; color: #ccc; font-size: 12px; }
+    .card .name { font-weight: 600; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+    .card .meta { font-size: 13px; color: #888; line-height: 1.6; }
+    .card .meta .val { color: #ccc; }
+    .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .health-dot.green { background: #4ade80; }
+    .health-dot.red { background: #f87171; }
+    .health-dot.yellow { background: #facc15; }
+    .toggle { cursor: pointer; padding: 4px 10px; border-radius: 4px; border: 1px solid #444; background: #333; color: #ccc; font-size: 12px; margin-top: 6px; }
     .toggle:hover { background: #444; }
-    .stats { display: flex; gap: 20px; flex-wrap: wrap; }
-    .stat { text-align: center; }
-    .stat .num { font-size: 28px; font-weight: 700; color: #fff; }
-    .stat .label { font-size: 12px; color: #888; margin-top: 2px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
+    .stat { text-align: center; background: #222; border: 1px solid #333; border-radius: 8px; padding: 14px 8px; }
+    .stat .num { font-size: 26px; font-weight: 700; color: #fff; }
+    .stat .label { font-size: 11px; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat .sub { font-size: 11px; color: #666; margin-top: 2px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    th { text-align: left; padding: 8px; color: #888; border-bottom: 1px solid #333; }
+    th { text-align: left; padding: 8px; color: #888; border-bottom: 1px solid #333; font-weight: 500; }
     td { padding: 8px; border-bottom: 1px solid #222; }
     input, select { background: #222; border: 1px solid #444; color: #e0e0e0; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
     button { cursor: pointer; padding: 6px 14px; border-radius: 6px; border: none; font-size: 13px; font-weight: 500; }
     .btn-primary { background: #3b82f6; color: #fff; }
     .btn-primary:hover { background: #2563eb; }
-    .btn-danger { background: #ef4444; color: #fff; }
+    .btn-danger { background: #ef4444; color: #fff; font-size: 12px; padding: 4px 10px; }
     .btn-danger:hover { background: #dc2626; }
-    .form-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+    .form-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
     .api-key-bar { display: flex; gap: 8px; align-items: center; }
     .api-key-bar input { width: 240px; }
-    #log { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: #888; }
+    #log { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: #888; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+    .tab { padding: 6px 16px; border-radius: 6px; background: #222; color: #888; cursor: pointer; font-size: 13px; border: 1px solid #333; }
+    .tab.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .latency-bar { height: 6px; border-radius: 3px; background: #333; margin-top: 4px; overflow: hidden; }
+    .latency-bar .fill { height: 100%; border-radius: 3px; }
+    .fill.fast { background: #4ade80; }
+    .fill.medium { background: #facc15; }
+    .fill.slow { background: #f87171; }
+    .retailer-table td:first-child { font-weight: 500; color: #fff; }
   </style>
 </head>
 <body>
@@ -55,46 +70,91 @@
   </div>
 
   <div class="container">
+    <!-- System Stats -->
     <div class="section">
-      <h2>System Stats</h2>
-      <div class="stats" id="statsContainer">
-        <div class="stat"><div class="num" id="statRetailers">—</div><div class="label">Retailers</div></div>
+      <h2>System Overview</h2>
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat"><div class="num" id="statUptime">—</div><div class="label">Uptime</div><div class="sub" id="statUptimeSub"></div></div>
+        <div class="stat"><div class="num" id="statRetailers">—</div><div class="label">Retailers</div><div class="sub" id="statRetailersSub"></div></div>
         <div class="stat"><div class="num" id="statProducts">—</div><div class="label">Tracked</div></div>
-        <div class="stat"><div class="num" id="statRequests">—</div><div class="label">Requests</div></div>
-        <div class="stat"><div class="num" id="statBlocked">—</div><div class="label">Blocked</div></div>
+        <div class="stat"><div class="num" id="statRequests">—</div><div class="label">Requests</div><div class="sub" id="statReqRate"></div></div>
+        <div class="stat"><div class="num" id="statBlocked">—</div><div class="label">Blocked</div><div class="sub" id="statBlockRate"></div></div>
+        <div class="stat"><div class="num" id="statAvgPoll">—</div><div class="label">Avg Poll</div><div class="sub">latency (ms)</div></div>
+        <div class="stat"><div class="num" id="statAvgAlert">—</div><div class="label">Avg Alert</div><div class="sub">latency (ms)</div></div>
+        <div class="stat"><div class="num" id="statCost">—</div><div class="label">Proxy Cost</div><div class="sub">estimated USD</div></div>
       </div>
     </div>
 
-    <div class="section">
-      <h2>Retailers</h2>
-      <div class="grid" id="retailersGrid"></div>
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('retailers')">Retailers</div>
+      <div class="tab" onclick="switchTab('products')">Products</div>
+      <div class="tab" onclick="switchTab('performance')">Performance</div>
+      <div class="tab" onclick="switchTab('channels')">Channels</div>
     </div>
 
-    <div class="section">
-      <h2>Tracked Keywords</h2>
-      <div id="keywordsList"></div>
-      <div class="form-row">
-        <input type="text" id="newKeyword" placeholder="New keyword..." />
-        <button class="btn-primary" onclick="addKeyword()">Add</button>
+    <!-- Retailers Tab -->
+    <div id="tab-retailers" class="tab-content active">
+      <div class="section">
+        <h2>Retailers <span class="badge" id="retailerCount"></span></h2>
+        <div class="grid" id="retailersGrid"></div>
       </div>
     </div>
 
-    <div class="section">
-      <h2>Tracked SKUs</h2>
-      <table>
-        <thead><tr><th>SKU</th><th>Retailer</th><th>Name</th><th>Added</th><th></th></tr></thead>
-        <tbody id="skuTable"></tbody>
-      </table>
-      <div class="form-row">
-        <input type="text" id="newSku" placeholder="SKU" />
-        <input type="text" id="newSkuRetailer" placeholder="Retailer ID" />
-        <input type="text" id="newSkuName" placeholder="Name" />
-        <button class="btn-primary" onclick="addSku()">Add</button>
+    <!-- Products Tab -->
+    <div id="tab-products" class="tab-content">
+      <div class="section">
+        <h2>Tracked Keywords</h2>
+        <div id="keywordsList"></div>
+        <div class="form-row">
+          <input type="text" id="newKeyword" placeholder="New keyword..." />
+          <button class="btn-primary" onclick="addKeyword()">Add</button>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Tracked SKUs</h2>
+        <table>
+          <thead><tr><th>SKU</th><th>Retailer</th><th>Name</th><th>Added</th><th></th></tr></thead>
+          <tbody id="skuTable"></tbody>
+        </table>
+        <div class="form-row">
+          <input type="text" id="newSku" placeholder="SKU" />
+          <input type="text" id="newSkuRetailer" placeholder="Retailer ID" />
+          <input type="text" id="newSkuName" placeholder="Name" />
+          <button class="btn-primary" onclick="addSku()">Add</button>
+        </div>
       </div>
     </div>
 
+    <!-- Performance Tab -->
+    <div id="tab-performance" class="tab-content">
+      <div class="section">
+        <h2>Per-Retailer Performance</h2>
+        <table class="retailer-table">
+          <thead><tr><th>Retailer</th><th>Requests</th><th>Blocked</th><th>Block Rate</th><th>Avg Latency</th><th>Status</th></tr></thead>
+          <tbody id="perfTable"></tbody>
+        </table>
+      </div>
+      <div class="section">
+        <h2>Proxy Cost Breakdown</h2>
+        <table>
+          <thead><tr><th>Tier</th><th>Requests Est.</th><th>Cost (USD)</th></tr></thead>
+          <tbody id="costTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Channels Tab -->
+    <div id="tab-channels" class="tab-content">
+      <div class="section">
+        <h2>Channel Configuration</h2>
+        <pre id="channelsJson" style="background:#111;padding:12px;border-radius:8px;font-size:12px;max-height:400px;overflow-y:auto;white-space:pre-wrap;color:#aaa;">Loading...</pre>
+      </div>
+    </div>
+
+    <!-- Log -->
     <div class="section">
-      <h2>Log</h2>
+      <h2>Activity Log</h2>
       <div id="log">Waiting for connection...</div>
     </div>
   </div>

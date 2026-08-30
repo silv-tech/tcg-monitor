@@ -9,9 +9,10 @@ class CostcoAdapter extends BaseAdapter {
     // Costco's search API is behind Akamai — use sitemap discovery + product page monitoring
     this.sitemapUrl = `${this.url}/sitemap_i_001.xml`;
     this.tcgKeywords = [
-      'pokemon', 'pokémon', 'tcg', 'trading-card', 'trading+card',
-      'one-piece', 'lorcana', 'magic-the-gathering', 'yugioh', 'yu-gi-oh',
-      'dragon-ball', 'naruto', 'booster', 'elite-trainer',
+      'pokemon', 'pokmon', 'pokémon', 'tcg', 'trading-card', 'trading+card',
+      'trading%20card', 'one-piece', 'lorcana', 'magic-the-gathering',
+      'yugioh', 'yu-gi-oh', 'dragon-ball', 'naruto', 'booster',
+      'elite-trainer', 'trainer-box', 'collector', 'card-game',
     ];
     this.knownProductIds = new Set();
     this.lastSitemapScan = 0;
@@ -43,25 +44,32 @@ class CostcoAdapter extends BaseAdapter {
   }
 
   async scanSitemap() {
-    try {
-      const xml = await this.fetch(this.sitemapUrl, { timeoutMs: 30000 });
-      const $ = cheerio.load(xml, { xmlMode: true });
+    const sitemapUrls = [
+      `${this.url}/sitemap_i_001.xml`,
+      `${this.url}/sitemap_p_001.xml`,
+    ];
 
-      $('url > loc').each((_, el) => {
-        const url = $(el).text().trim().toLowerCase();
-        if (this.tcgKeywords.some(kw => url.includes(kw))) {
-          // Extract product ID from URL — format: /p/-/slug/ITEMID or /product-name.ITEMID.html
-          const idMatch = url.match(/\/(\d{5,})(?:\.html)?$/);
-          if (idMatch) {
-            this.knownProductIds.add(idMatch[1]);
+    for (const sitemapUrl of sitemapUrls) {
+      try {
+        const xml = await this.fetch(sitemapUrl, { timeoutMs: 30000 });
+        const $ = cheerio.load(xml, { xmlMode: true });
+
+        $('url > loc').each((_, el) => {
+          const url = $(el).text().trim().toLowerCase();
+          if (this.tcgKeywords.some(kw => url.includes(kw))) {
+            // Extract product ID from URL — /p/-/slug/ITEMID or /product-name.ITEMID.html
+            const idMatch = url.match(/\/(\d{5,})(?:\.html)?$/);
+            if (idMatch) {
+              this.knownProductIds.add(idMatch[1]);
+            }
           }
-        }
-      });
-
-      logger.info(`Costco: sitemap scan found ${this.knownProductIds.size} TCG product IDs`);
-    } catch (err) {
-      logger.warn(`Costco: sitemap scan failed: ${err.message}`);
+        });
+      } catch (err) {
+        logger.warn(`Costco: sitemap scan failed for ${sitemapUrl}: ${err.message}`);
+      }
     }
+
+    logger.info(`Costco: sitemap scan found ${this.knownProductIds.size} TCG product IDs`);
   }
 
   async fetchProductPage(productId) {

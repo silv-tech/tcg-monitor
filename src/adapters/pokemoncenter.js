@@ -17,7 +17,16 @@ class PokemonCenterAdapter extends BaseAdapter {
       try {
         // Pokemon Center uses Algolia-powered search or internal API
         const searchUrl = `${this.url}/search?q=${encodeURIComponent(query)}`;
-        const html = await this.stealthFetch(searchUrl, { timeoutMs: 25000 });
+        let html;
+        try {
+          html = await this.stealthFetch(searchUrl, { timeoutMs: 25000 });
+          if (html.includes('incapsula') || html.includes('_Incapsula_Resource') || html.length < 3000) {
+            throw new Error('Incapsula challenge detected');
+          }
+        } catch (stealthErr) {
+          logger.info(`Pokemon Center: stealth failed (${stealthErr.message}), trying browser fallback`);
+          html = await this.browserFetch(searchUrl, { timeoutMs: 30000, waitForSelector: '[data-testid="product-card"], .product-card' });
+        }
 
         // Try to extract JSON data from script tags (Next.js / SSR data)
         const jsonMatch = html.match(/__NEXT_DATA__\s*=\s*({.+?})\s*;?\s*<\/script>/s);

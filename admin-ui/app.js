@@ -17,13 +17,21 @@ function log(msg) {
   el.scrollTop = el.scrollHeight;
 }
 
+// Tab switching
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab-content#tab-${name}`).classList.add('active');
+  event.target.classList.add('active');
+
+  if (name === 'performance') loadPerformance();
+  if (name === 'channels') loadChannels();
+}
+
 async function loadAll() {
   apiKey = document.getElementById('apiKey').value;
   try {
-    await loadHealth();
-    await loadRetailers();
-    await loadProducts();
-    await loadStats();
+    await Promise.all([loadHealth(), loadRetailers(), loadProducts(), loadStats()]);
     log('Connected successfully');
   } catch (err) {
     log('Error: ' + err.message);
@@ -36,9 +44,18 @@ async function loadHealth() {
   try {
     const data = await api('/health');
     const el = document.getElementById('sysStatus');
-    el.textContent = data.status === 'ok' ? 'Healthy' : 'Degraded';
-    el.className = `status ${data.status === 'ok' ? 'ok' : 'bad'}`;
-    document.getElementById('statRetailers').textContent = data.retailers.length;
+    const healthy = data.retailers.filter(r => r.healthy).length;
+    const total = data.retailers.length;
+
+    if (data.status === 'ok') {
+      el.textContent = 'Healthy';
+      el.className = 'status ok';
+    } else {
+      el.textContent = 'Degraded';
+      el.className = 'status warn';
+    }
+    document.getElementById('statRetailers').textContent = total;
+    document.getElementById('statRetailersSub').textContent = `${healthy} healthy`;
   } catch {
     document.getElementById('sysStatus').textContent = 'Down';
     document.getElementById('sysStatus').className = 'status bad';
@@ -47,19 +64,35 @@ async function loadHealth() {
 
 async function loadRetailers() {
   const retailers = await api('/retailers');
+  const enabled = retailers.filter(r => r.enabled).length;
+  document.getElementById('retailerCount').textContent = `${enabled} active / ${retailers.length} total`;
+
   const grid = document.getElementById('retailersGrid');
-  grid.innerHTML = retailers.map(r => `
-    <div class="card">
-      <div class="name"><span class="health ${r.enabled ? 'green' : 'yellow'}"></span>${r.name}</div>
-      <div class="meta">
-        Interval: ${r.intervalMs / 1000}s &bull; Proxy: ${r.proxyTier}
-        <br>
-        <button class="toggle" onclick="toggleRetailer('${r.id}', ${!r.enabled})">
-          ${r.enabled ? 'Disable' : 'Enable'}
-        </button>
+  grid.innerHTML = retailers.map(r => {
+    const dotClass = r.enabled ? 'green' : 'yellow';
+    const adapter = r.adapter || '—';
+    const proxy = r.proxyTier === 'none' ? 'Direct' : r.proxyTier;
+    const interval = (r.intervalMs / 1000).toFixed(0);
+    const note = r._note ? `<div style="font-size:11px;color:#666;margin-top:4px;font-style:italic">${r._note}</div>` : '';
+    return `
+      <div class="card">
+        <div class="name">
+          <span class="health-dot ${dotClass}"></span>
+          <span style="border-left:3px solid ${r.color || '#555'};padding-left:8px">${r.name}</span>
+        </div>
+        <div class="meta">
+          Adapter: <span class="val">${adapter}</span> &bull;
+          Interval: <span class="val">${interval}s</span> &bull;
+          Proxy: <span class="val">${proxy}</span>
+          ${note}
+          <br>
+          <button class="toggle" onclick="toggleRetailer('${r.id}', ${!r.enabled})">
+            ${r.enabled ? 'Disable' : 'Enable'}
+          </button>
+        </div>
       </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 }
 
 async function toggleRetailer(id, enabled) {
@@ -72,7 +105,6 @@ async function loadProducts() {
   const data = await api('/products');
   document.getElementById('statProducts').textContent = data.tracked.length;
 
-  // Keywords
   const kwEl = document.getElementById('keywordsList');
   kwEl.innerHTML = data.keywords.map(kw => `
     <span style="display:inline-block;background:#333;padding:3px 10px;border-radius:12px;margin:3px;font-size:13px;">
@@ -80,7 +112,6 @@ async function loadProducts() {
     </span>
   `).join('');
 
-  // SKUs
   const tbody = document.getElementById('skuTable');
   tbody.innerHTML = data.tracked.map(t => `
     <tr>
@@ -95,8 +126,70 @@ async function loadProducts() {
 
 async function loadStats() {
   const stats = await api('/stats/proxy');
-  document.getElementById('statRequests').textContent = stats.requests;
-  document.getElementById('statBlocked').textContent = stats.blocked;
+
+  document.getElementById('statUptime').textContent = `${stats.uptimeHours}h`;
+  document.getElementById('statRequests').textContent = formatNum(stats.requests);
+  document.getElementById('statReqRate').textContent = `${stats.requestsPerMinute}/min`;
+  document.getElementById('statBlocked').textContent = formatNum(stats.blocked);
+
+  const blockRate = stats.requests > 0 ? ((stats.blocked / stats.requests) * 100).toFixed(1) : '0';
+  document.getElementById('statBlockRate').textContent = `${blockRate}% rate`;
+
+  document.getElementById('statAvgPoll').textContent = stats.latency.avgPollMs || '—';
+  document.getElementById('statAvgAlert').textContent = stats.latency.avgAlertMs || '—';
+  document.getElementById('statCost').textContent = `$${stats.cost.totalEstimatedUsd.toFixed(2)}`;
+}
+
+async function loadPerformance() {
+  const stats = await api('/stats/proxy');
+
+  // Per-retailer table
+  const perfBody = document.getElementById('perfTable');
+  const retailers = Object.entries(stats.byRetailer || {});
+  perfBody.innerHTML = retailers.map(([id, r]) => {
+    const blockRate = r.requests > 0 ? ((r.blocked / r.requests) * 100).toFixed(1) : '0';
+    const avgLatency = r.polls > 0 ? Math.round(r.totalLatencyMs / r.polls) : '—';
+    const latencyClass = avgLatency === '—' ? '' : avgLatency < 2000 ? 'fast' : avgLatency < 5000 ? 'medium' : 'slow';
+    const statusClass = r.blocked === 0 ? 'ok' : blockRate > 50 ? 'bad' : 'warn';
+    const statusText = r.blocked === 0 ? 'OK' : blockRate > 50 ? 'Degraded' : 'Partial';
+    return `
+      <tr>
+        <td>${id}</td>
+        <td>${r.requests}</td>
+        <td>${r.blocked}</td>
+        <td>${blockRate}%</td>
+        <td>
+          ${avgLatency}ms
+          ${avgLatency !== '—' ? `<div class="latency-bar"><div class="fill ${latencyClass}" style="width:${Math.min(avgLatency / 100, 100)}%"></div></div>` : ''}
+        </td>
+        <td><span class="status ${statusClass}">${statusText}</span></td>
+      </tr>
+    `;
+  }).join('');
+
+  if (retailers.length === 0) {
+    perfBody.innerHTML = '<tr><td colspan="6" style="color:#666;text-align:center">No data yet — polls haven\'t run</td></tr>';
+  }
+
+  // Cost breakdown table
+  const costBody = document.getElementById('costTable');
+  const tiers = stats.cost.byTier || {};
+  costBody.innerHTML = Object.entries(tiers).map(([tier, cost]) => `
+    <tr>
+      <td style="text-transform:capitalize">${tier}</td>
+      <td>${tier === 'none' ? 'N/A' : '—'}</td>
+      <td>$${cost.toFixed(4)}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadChannels() {
+  try {
+    const channels = await api('/channels');
+    document.getElementById('channelsJson').textContent = JSON.stringify(channels, null, 2);
+  } catch {
+    document.getElementById('channelsJson').textContent = 'Failed to load channel config';
+  }
 }
 
 async function addKeyword() {
@@ -131,6 +224,12 @@ async function removeSku(retailer, sku) {
   await api(`/products/tracked/${retailer}/${sku}`, { method: 'DELETE' });
   log(`Removed SKU: ${retailer}/${sku}`);
   await loadProducts();
+}
+
+function formatNum(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return String(n);
 }
 
 // Auto-refresh every 30s

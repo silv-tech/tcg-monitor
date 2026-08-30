@@ -19,9 +19,17 @@ class AmazonAdapter extends BaseAdapter {
 
     for (const searchUrl of this.searchUrls) {
       try {
-        const html = await this.stealthFetch(searchUrl, {
-          timeoutMs: 20000,
-        });
+        let html;
+        try {
+          html = await this.stealthFetch(searchUrl, { timeoutMs: 20000 });
+          // Check if we got a bot challenge page
+          if (html.includes('captcha') || html.includes('Robot Check') || html.length < 5000) {
+            throw new Error('Bot challenge detected, trying browser fallback');
+          }
+        } catch (stealthErr) {
+          logger.info(`Amazon: stealth HTTP failed (${stealthErr.message}), trying browser fallback`);
+          html = await this.browserFetch(searchUrl, { timeoutMs: 30000, waitForSelector: '[data-component-type="s-search-result"]' });
+        }
 
         const $ = cheerio.load(html);
 

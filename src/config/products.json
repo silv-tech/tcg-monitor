@@ -10,7 +10,10 @@
     "pokemon": ["pokemon", "pikachu", "charizard", "pokémon"],
     "onepiece": ["one piece"],
     "dragonball": ["dragon ball"],
-    "naruto": ["naruto", "boruto"]
+    "naruto": ["naruto", "boruto"],
+    "lorcana": ["lorcana"],
+    "yugioh": ["yugioh", "yu-gi-oh", "yu gi oh"],
+    "mtg": ["magic the gathering", "magic: the gathering", "mtg"]
   },
   "productTypes": {
     "booster-box": ["booster box", "booster display"],

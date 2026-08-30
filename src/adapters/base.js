@@ -5,6 +5,9 @@ const { getProxyUrl, recordRequest } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
 const { classifyCategory, classifyProductType } = require('../utils/helpers');
 
+let browserModule;
+try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
+
 class BaseAdapter {
   constructor(retailerConfig) {
     this.id = retailerConfig.id;
@@ -36,6 +39,21 @@ class BaseAdapter {
     const proxyUrl = this.getProxyUrl();
     try {
       const result = await stealthGet(url, { ...opts, proxyUrl });
+      recordRequest(this.id, false);
+      return result;
+    } catch (err) {
+      recordRequest(this.id, true);
+      throw err;
+    }
+  }
+
+  async browserFetch(url, opts = {}) {
+    if (!browserModule) {
+      throw new Error('Browser fallback unavailable — install playwright-core');
+    }
+    const proxyUrl = this.getProxyUrl();
+    try {
+      const result = await browserModule.browserFetch(url, { ...opts, proxyUrl });
       recordRequest(this.id, false);
       return result;
     } catch (err) {
