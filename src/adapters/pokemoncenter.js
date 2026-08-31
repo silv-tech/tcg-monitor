@@ -152,7 +152,9 @@ class PokemonCenterAdapter extends BaseAdapter {
       if (!this.tcgKeywords.some(kw => lowerSlug.includes(kw))) continue;
 
       const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      const caUrl = url.includes('/en-ca/') ? url : url.replace('/product/', '/en-ca/product/');
+      // Strip any existing locale prefix (e.g. /en-de/, /en-nz/) and force /en-ca/
+      const caUrl = url.replace(/\/en-[a-z]{2}\/product\//, '/en-ca/product/')
+        .replace(/^(https?:\/\/[^/]+)\/product\//, '$1/en-ca/product/');
 
       newProducts.set(sku, { url: caUrl, name });
     }

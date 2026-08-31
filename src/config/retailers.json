@@ -7,7 +7,8 @@
     "adapter": "walmart",
     "intervalMs": 60000,
     "proxyTier": "isp",
-    "enabled": true,
+    "enabled": false,
+    "_note": "Blocked by PerimeterX 'Verify Your Identity' — needs residential rotating proxies",
     "color": "#0071dc"
   },
   {
