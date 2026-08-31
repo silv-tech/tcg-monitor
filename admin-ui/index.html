@@ -280,6 +280,35 @@
     }
     .evt-toggle input:checked + .slider { background: #22c55e; }
     .evt-toggle input:checked + .slider::before { transform: translateX(18px); background: #fff; }
+
+    /* ── Tab Guide Popup ── */
+    .guide-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px);
+      display: none; align-items: center; justify-content: center; z-index: 300;
+    }
+    .guide-overlay.open { display: flex; animation: fadeIn 0.2s ease; }
+    .guide-box {
+      background: #18181b; border: 1px solid #27272a; border-radius: 14px;
+      width: 440px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      overflow: hidden;
+    }
+    .guide-header {
+      padding: 20px 24px 0; display: flex; align-items: center; gap: 10px;
+    }
+    .guide-icon {
+      width: 36px; height: 36px; border-radius: 10px; display: flex;
+      align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0;
+    }
+    .guide-header h3 { font-size: 16px; font-weight: 600; color: #fafafa; }
+    .guide-body { padding: 16px 24px 20px; }
+    .guide-body p { font-size: 13px; color: #a1a1aa; line-height: 1.7; }
+    .guide-body ul { margin: 10px 0 0 16px; font-size: 12px; color: #71717a; line-height: 1.8; }
+    .guide-body li { margin-bottom: 2px; }
+    .guide-body li strong { color: #d4d4d8; font-weight: 500; }
+    .guide-footer {
+      padding: 14px 24px; border-top: 1px solid #27272a;
+      display: flex; justify-content: flex-end;
+    }
   </style>
 </head>
 <body>
@@ -548,6 +577,20 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <!-- Tab Guide Popup -->
+  <div class="guide-overlay" id="guideOverlay" onclick="if(event.target===this)closeGuide()">
+    <div class="guide-box">
+      <div class="guide-header">
+        <div class="guide-icon" id="guideIcon"></div>
+        <h3 id="guideTitle"></h3>
+      </div>
+      <div class="guide-body" id="guideBody"></div>
+      <div class="guide-footer">
+        <button class="btn btn-primary" onclick="closeGuide()">Got it</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=2"></script>
 </body>
 </html>

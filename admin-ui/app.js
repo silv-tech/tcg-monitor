@@ -32,6 +32,84 @@ function log(msg) {
   el.scrollTop = el.scrollHeight;
 }
 
+// ─── Tab Guide (show-once popups) ────────────────────────────────
+const TAB_GUIDES = {
+  retailers: {
+    icon: '🏪', color: '#3b82f6',
+    title: 'Retailers',
+    html: `<p>This is your store control center. Every retailer the system monitors is listed here.</p>
+      <ul>
+        <li><strong>Enable / Disable</strong> — Turn polling on or off for a store without removing it</li>
+        <li><strong>Polling interval</strong> — Click the seconds value to adjust how often each store is checked (lower = faster alerts, higher = safer from bans)</li>
+        <li><strong>Circuit breaker</strong> — If a retailer errors 5 times in a row, it auto-pauses and retries every 5 minutes</li>
+        <li><strong>Scan & Resend</strong> — Push all currently-cached products to Discord as "Currently Listed" embeds (no pings, no dedup pollution)</li>
+      </ul>`,
+  },
+  products: {
+    icon: '📦', color: '#8b5cf6',
+    title: 'Products',
+    html: `<p>Control which products trigger alerts across all your retailers.</p>
+      <ul>
+        <li><strong>Keywords</strong> — Words matched against product names. If a product title contains the keyword, it's tracked (e.g. "Prismatic" matches "Prismatic Evolutions Booster")</li>
+        <li><strong>Tracked SKUs</strong> — Track specific product SKUs directly by retailer. Use this for exact items you want alerts on regardless of name</li>
+        <li><strong>Products Discovered</strong> — The stat card shows how many unique products are cached in Redis across all retailers</li>
+      </ul>`,
+  },
+  performance: {
+    icon: '📊', color: '#22c55e',
+    title: 'Performance',
+    html: `<p>Real-time health metrics for every active retailer.</p>
+      <ul>
+        <li><strong>Requests / Blocked</strong> — Total HTTP requests made vs how many got blocked by anti-bot</li>
+        <li><strong>Block Rate</strong> — Percentage of requests that failed. Under 10% is healthy, over 50% means the retailer is struggling</li>
+        <li><strong>Avg Latency</strong> — How long each poll takes. Green = fast, yellow = moderate, red = slow</li>
+        <li><strong>Proxy Cost</strong> — Estimated cost by proxy tier (ISP proxies cost per request, direct is free)</li>
+      </ul>`,
+  },
+  channels: {
+    icon: '💬', color: '#5865f2',
+    title: 'Channels',
+    html: `<p>Configure where alerts are sent in your Discord server.</p>
+      <ul>
+        <li><strong>Paid / Free Tiers</strong> — Set different channels and delays for premium vs free members</li>
+        <li><strong>Event Types</strong> — Toggle which alert types fire (Restock, New Product, Price Change, etc.). Turn off "New Product" before onboarding a new retailer to avoid the flood</li>
+        <li><strong>Retailer Overrides</strong> — Send a specific retailer's alerts to a dedicated channel</li>
+        <li><strong>Role Pings</strong> — Set which Discord roles get pinged per category or retailer</li>
+        <li><strong>Webhooks</strong> — Fallback delivery if the bot can't reach a channel</li>
+      </ul>`,
+  },
+  proxies: {
+    icon: '🛡️', color: '#f59e0b',
+    title: 'Proxies',
+    html: `<p>Monitor your ISP proxy pool health and assignments.</p>
+      <ul>
+        <li><strong>Proxy cards</strong> — Each card shows a proxy IP, its status (Active / Cooldown / Idle), request count, and block count</li>
+        <li><strong>Cooldown</strong> — When a proxy gets blocked, it auto-cools down for 30 minutes before being reused</li>
+        <li><strong>Assignment</strong> — Each retailer using ISP proxies gets a sticky proxy session. The table shows which retailers are using proxies and their stats</li>
+      </ul>`,
+  },
+};
+
+function showGuide(name) {
+  const guide = TAB_GUIDES[name];
+  if (!guide) return;
+  const seen = JSON.parse(localStorage.getItem('tcg_guides_seen') || '{}');
+  if (seen[name]) return;
+
+  document.getElementById('guideIcon').style.background = guide.color;
+  document.getElementById('guideIcon').textContent = guide.icon;
+  document.getElementById('guideTitle').textContent = guide.title;
+  document.getElementById('guideBody').innerHTML = guide.html;
+  document.getElementById('guideOverlay').classList.add('open');
+
+  seen[name] = true;
+  localStorage.setItem('tcg_guides_seen', JSON.stringify(seen));
+}
+
+function closeGuide() {
+  document.getElementById('guideOverlay').classList.remove('open');
+}
+
 // Tab switching
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -42,12 +120,15 @@ function switchTab(name) {
   if (name === 'performance') loadPerformance();
   if (name === 'channels') loadChannels();
   if (name === 'proxies') loadProxies();
+
+  showGuide(name);
 }
 
 async function loadAll() {
   try {
     await Promise.all([loadHealth(), loadRetailers(), loadProducts(), loadStats()]);
     log('Connected successfully');
+    showGuide('retailers'); // Show guide for default tab on first visit
   } catch (err) {
     log('Error: ' + err.message);
     const el = document.getElementById('sysStatus');
@@ -691,17 +772,17 @@ function formatNum(n) {
   return String(n);
 }
 
-// Live auto-refresh
+// Live auto-refresh — 10s for quick stats, 15s for retailers (keeps stat card in sync)
 setInterval(() => {
   if (apiKey) {
     loadHealth();
     loadStats();
+    loadRetailers();
   }
 }, 10000);
 
 setInterval(() => {
   if (apiKey) {
-    loadRetailers();
     loadProducts();
   }
 }, 30000);
