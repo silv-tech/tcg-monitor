@@ -6,9 +6,8 @@
     "url": "https://www.walmart.ca",
     "adapter": "walmart",
     "intervalMs": 60000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "_note": "Blocked by PerimeterX 'Verify Your Identity' — needs residential rotating proxies",
+    "proxyTier": "residential",
+    "enabled": true,
     "color": "#0071dc"
   },
   {
@@ -42,9 +41,8 @@
     "url": "https://www.amazon.ca",
     "adapter": "amazon",
     "intervalMs": 120000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "_note": "Blocked by Akamai Bot Manager — needs residential rotating proxies (DataImpulse ~$5/mo)"
+    "proxyTier": "residential",
+    "enabled": true
   },
   {
     "_phase": 1,
@@ -53,7 +51,7 @@
     "url": "https://www.pokemoncenter.com",
     "adapter": "pokemoncenter",
     "intervalMs": 300000,
-    "proxyTier": "none",
+    "proxyTier": "residential",
     "enabled": true,
     "color": "#ffcb05"
   },
