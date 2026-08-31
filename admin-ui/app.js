@@ -138,65 +138,77 @@ async function toggleRetailer(id, enabled) {
   await loadRetailers();
 }
 
-async function editInterval(id, currentMs) {
-  const currentSec = (currentMs / 1000).toFixed(0);
+// ─── Interval Modal ──────────────────────────────────────────────
+let _modalRetailerId = null;
+let _modalCurrentMs = null;
+
+function editInterval(id, currentMs) {
   const retailer = retailersList.find(r => r.id === id);
   const name = retailer ? retailer.name : id;
+  const currentSec = (currentMs / 1000).toFixed(0);
 
-  // Prompt for new value
-  const input = prompt(`Polling interval for ${name}\n\nCurrent: ${currentSec}s\nEnter new interval in seconds:`, currentSec);
-  if (input === null) return; // cancelled
+  _modalRetailerId = id;
+  _modalCurrentMs = currentMs;
 
-  const newSec = parseFloat(input);
-  if (isNaN(newSec) || newSec < 1) {
-    alert('Invalid interval. Must be at least 1 second.');
+  document.getElementById('modalTitle').textContent = name;
+  document.getElementById('modalSub').textContent = `Current interval: ${currentSec}s`;
+  const input = document.getElementById('modalIntervalInput');
+  input.value = currentSec;
+
+  updateRiskAssessment(parseFloat(currentSec));
+  document.getElementById('intervalModal').classList.add('open');
+
+  setTimeout(() => { input.focus(); input.select(); }, 50);
+
+  input.oninput = () => updateRiskAssessment(parseFloat(input.value));
+  input.onkeydown = (e) => { if (e.key === 'Enter') confirmInterval(); if (e.key === 'Escape') closeIntervalModal(); };
+}
+
+function updateRiskAssessment(sec) {
+  const el = document.getElementById('modalRisk');
+  if (isNaN(sec) || sec < 1) {
+    el.className = 'modal-risk danger';
+    el.innerHTML = '<strong>Invalid</strong> — Must be at least 1 second';
     return;
   }
+  if (sec < 5) {
+    el.className = 'modal-risk danger';
+    el.innerHTML = '<strong>DANGER</strong> — High risk of IP bans, may trigger anti-bot permanently, could blacklist proxies';
+  } else if (sec < 15) {
+    el.className = 'modal-risk warning';
+    el.innerHTML = '<strong>WARNING</strong> — Elevated risk of rate limiting, anti-bot systems may flag this pattern';
+  } else if (sec < 30) {
+    el.className = 'modal-risk caution';
+    el.innerHTML = '<strong>CAUTION</strong> — Generally safe with proxy rotation, monitor block rates after changing';
+  } else {
+    el.className = 'modal-risk safe';
+    el.innerHTML = '<strong>SAFE</strong> — This is a safe polling interval';
+  }
+}
+
+function closeIntervalModal() {
+  document.getElementById('intervalModal').classList.remove('open');
+  _modalRetailerId = null;
+  _modalCurrentMs = null;
+}
+
+async function confirmInterval() {
+  const input = document.getElementById('modalIntervalInput');
+  const newSec = parseFloat(input.value);
+
+  if (isNaN(newSec) || newSec < 1) return;
 
   const newMs = Math.round(newSec * 1000);
-  if (newMs === currentMs) return; // no change
+  if (newMs === _modalCurrentMs) { closeIntervalModal(); return; }
 
-  // Risk assessment
-  let riskLevel, riskColor, riskMsg;
-  if (newSec < 5) {
-    riskLevel = 'DANGER';
-    riskColor = '#ef4444';
-    riskMsg = `${newSec}s is extremely aggressive.\n\n` +
-      `• High risk of IP bans and rate limiting\n` +
-      `• May trigger anti-bot protection permanently\n` +
-      `• Could get your proxies blacklisted\n` +
-      `• Retailer may block all future requests`;
-  } else if (newSec < 15) {
-    riskLevel = 'WARNING';
-    riskColor = '#f97316';
-    riskMsg = `${newSec}s is very fast.\n\n` +
-      `• Elevated risk of rate limiting\n` +
-      `• Anti-bot systems may flag this pattern\n` +
-      `• Proxy rotation recommended at this speed`;
-  } else if (newSec < 30) {
-    riskLevel = 'CAUTION';
-    riskColor = '#eab308';
-    riskMsg = `${newSec}s is moderately aggressive.\n\n` +
-      `• Generally safe with proxy rotation\n` +
-      `• Monitor block rates after changing`;
-  } else {
-    riskLevel = 'SAFE';
-    riskColor = '#22c55e';
-    riskMsg = `${newSec}s is a safe polling interval.`;
-  }
-
-  // Confirm with risk warning
-  const confirmed = confirm(
-    `⚠ ${riskLevel}: Change ${name} interval?\n\n` +
-    `${currentSec}s → ${newSec}s\n\n` +
-    `${riskMsg}\n\n` +
-    `Proceed?`
-  );
-  if (!confirmed) return;
+  const retailer = retailersList.find(r => r.id === _modalRetailerId);
+  const name = retailer ? retailer.name : _modalRetailerId;
+  const currentSec = (_modalCurrentMs / 1000).toFixed(0);
 
   try {
-    await api(`/retailers/${id}`, { method: 'PATCH', body: JSON.stringify({ intervalMs: newMs }) });
-    log(`${name}: interval changed ${currentSec}s → ${newSec}s [${riskLevel}]`);
+    await api(`/retailers/${_modalRetailerId}`, { method: 'PATCH', body: JSON.stringify({ intervalMs: newMs }) });
+    log(`${name}: interval changed ${currentSec}s \u2192 ${newSec}s`);
+    closeIntervalModal();
     await loadRetailers();
   } catch (err) {
     log(`Failed to update interval for ${name}: ${err.message}`);
@@ -328,16 +340,46 @@ async function loadPerformance() {
   `).join('');
 }
 
+// ─── Event Type definitions ──────────────────────────────────────
+const EVENT_TYPES = [
+  { key: 'RESTOCK',         color: '#57f287', label: 'Restock',         desc: 'Product goes from out-of-stock to in-stock' },
+  { key: 'NEW_SKU',         color: '#5865f2', label: 'New Product',     desc: 'Product seen for the first time' },
+  { key: 'PRICE_CHANGE',    color: '#ed4245', label: 'Price Change',    desc: 'Product price differs from last check' },
+  { key: 'PREORDER_LIVE',   color: '#fe7434', label: 'Pre-Order Live',  desc: 'Pre-order becomes available' },
+  { key: 'CART_AVAILABLE',  color: '#3498db', label: 'Cart Available',  desc: 'Add-to-cart becomes available' },
+  { key: 'SHIPPING_CHANGE', color: '#95a5a6', label: 'Shipping Update', desc: 'Ships-to-home becomes available' },
+];
+
 // ─── Channels Tab ────────────────────────────────────────────────
 
 async function loadChannels() {
   try {
     channelsData = await api('/channels');
   } catch {
-    channelsData = { tiers: { paid: { delay: 0, channels: {} }, free: { delay: 45000, channels: {} } }, retailerChannels: {}, roles: { categories: {}, retailers: {} }, webhooks: {} };
+    channelsData = { tiers: { paid: { delay: 0, channels: {} }, free: { delay: 45000, channels: {} } }, retailerChannels: {}, roles: { categories: {}, retailers: {} }, webhooks: {}, enabledEvents: {} };
   }
 
   const c = channelsData;
+
+  // Event type toggles
+  const enabled = c.enabledEvents || {};
+  const evtGrid = document.getElementById('eventTypesGrid');
+  evtGrid.innerHTML = EVENT_TYPES.map(evt => {
+    const on = enabled[evt.key] !== false; // default to true if not set
+    return `
+      <div class="evt-card">
+        <div class="evt-dot" style="background:${evt.color}"></div>
+        <div class="evt-info">
+          <div class="evt-name">${evt.label}</div>
+          <div class="evt-desc">${evt.desc}</div>
+        </div>
+        <label class="evt-toggle">
+          <input type="checkbox" id="evt-${evt.key}" ${on ? 'checked' : ''} />
+          <span class="slider"></span>
+        </label>
+      </div>
+    `;
+  }).join('');
 
   // Tier delays
   setVal('ch-paid-delay', c.tiers?.paid?.delay || 0);
@@ -440,12 +482,20 @@ async function saveChannels() {
     if (el) retRoles[r.id] = el.value.trim();
   });
 
+  // Event type toggles
+  const enabledEvents = {};
+  EVENT_TYPES.forEach(evt => {
+    const el = document.getElementById(`evt-${evt.key}`);
+    enabledEvents[evt.key] = el ? el.checked : true;
+  });
+
   const config = {
     tiers: {
       paid: { delay: parseInt(getVal('ch-paid-delay')) || 0, channels: paidChannels },
       free: { delay: parseInt(getVal('ch-free-delay')) || 45000, channels: freeChannels },
     },
     retailerChannels,
+    enabledEvents,
     roles: {
       categories: catRoles,
       retailers: retRoles,

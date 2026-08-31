@@ -221,6 +221,65 @@
     ::-webkit-scrollbar-track { background: #09090b; }
     ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+      display: none; align-items: center; justify-content: center; z-index: 200;
+    }
+    .modal-overlay.open { display: flex; animation: fadeIn 0.15s ease; }
+    .modal {
+      background: #18181b; border: 1px solid #27272a; border-radius: 14px;
+      width: 400px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+    .modal-header { padding: 20px 24px 0; }
+    .modal-header h3 { font-size: 16px; font-weight: 600; color: #fafafa; }
+    .modal-header p { font-size: 12px; color: #71717a; margin-top: 4px; }
+    .modal-body { padding: 20px 24px; }
+    .modal-body .interval-input-row { display: flex; align-items: center; gap: 10px; }
+    .modal-body .interval-input {
+      flex: 1; background: #09090b; border: 1px solid #3f3f46; color: #fafafa;
+      padding: 10px 14px; border-radius: 8px; font-size: 20px; font-weight: 600;
+      font-family: inherit; text-align: center; width: 100%;
+    }
+    .modal-body .interval-input:focus { border-color: #3b82f6; outline: none; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+    .modal-body .unit { font-size: 14px; color: #71717a; font-weight: 500; }
+    .modal-risk {
+      margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+      font-size: 12px; line-height: 1.5; border: 1px solid;
+    }
+    .modal-risk.safe { background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.2); color: #4ade80; }
+    .modal-risk.caution { background: rgba(234,179,8,0.08); border-color: rgba(234,179,8,0.2); color: #facc15; }
+    .modal-risk.warning { background: rgba(249,115,22,0.08); border-color: rgba(249,115,22,0.2); color: #fb923c; }
+    .modal-risk.danger { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.2); color: #f87171; }
+    .modal-footer {
+      padding: 16px 24px; border-top: 1px solid #27272a;
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+
+    /* ── Event Type Toggle Cards ── */
+    .evt-card {
+      background: #09090b; border: 1px solid #27272a; border-radius: 10px;
+      padding: 14px 16px; display: flex; align-items: center; gap: 12px;
+      transition: border-color 0.15s;
+    }
+    .evt-card:hover { border-color: #3f3f46; }
+    .evt-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .evt-info { flex: 1; min-width: 0; }
+    .evt-name { font-size: 13px; font-weight: 600; color: #fafafa; }
+    .evt-desc { font-size: 11px; color: #52525b; margin-top: 2px; }
+    .evt-toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+    .evt-toggle input { opacity: 0; width: 0; height: 0; }
+    .evt-toggle .slider {
+      position: absolute; inset: 0; background: #27272a; border-radius: 22px;
+      cursor: pointer; transition: background 0.2s;
+    }
+    .evt-toggle .slider::before {
+      content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%;
+      background: #71717a; left: 3px; top: 3px; transition: all 0.2s;
+    }
+    .evt-toggle input:checked + .slider { background: #22c55e; }
+    .evt-toggle input:checked + .slider::before { transform: translateX(18px); background: #fff; }
   </style>
 </head>
 <body>
@@ -388,6 +447,12 @@
       </div>
 
       <div class="section" style="margin-top:16px">
+        <h2>Event Types <span class="badge">Filter</span></h2>
+        <p style="font-size:12px;color:#52525b;margin-bottom:14px">Toggle which event types fire alerts. Disabled events are silently dropped. Scan listings always pass through.</p>
+        <div class="grid" id="eventTypesGrid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))"></div>
+      </div>
+
+      <div class="section" style="margin-top:16px">
         <h2>Retailer Channel Overrides <span class="badge">Paid tier</span></h2>
         <p style="font-size:12px;color:#52525b;margin-bottom:14px">Alerts from this retailer go directly to this channel instead of the category channel.</p>
         <div id="retailerChannelsGrid" class="grid"></div>
@@ -459,6 +524,27 @@
     <div class="section" style="margin-top:8px">
       <h2>Activity Log</h2>
       <div class="log-box" id="log">Waiting for connection...</div>
+    </div>
+  </div>
+
+  <!-- Interval Edit Modal -->
+  <div class="modal-overlay" id="intervalModal" onclick="if(event.target===this)closeIntervalModal()">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modalTitle">Edit Polling Interval</h3>
+        <p id="modalSub"></p>
+      </div>
+      <div class="modal-body">
+        <div class="interval-input-row">
+          <input type="number" class="interval-input" id="modalIntervalInput" min="1" step="1" />
+          <span class="unit">seconds</span>
+        </div>
+        <div class="modal-risk" id="modalRisk"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeIntervalModal()">Cancel</button>
+        <button class="btn btn-primary" id="modalConfirmBtn" onclick="confirmInterval()">Save</button>
+      </div>
     </div>
   </div>
 

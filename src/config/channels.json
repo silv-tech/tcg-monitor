@@ -79,6 +79,14 @@
   },
   "watchlistChannel": "1543822084013166653",
   "adminChannel": "1543432883476242442",
+  "enabledEvents": {
+    "RESTOCK": true,
+    "NEW_SKU": true,
+    "PRICE_CHANGE": true,
+    "PREORDER_LIVE": true,
+    "CART_AVAILABLE": true,
+    "SHIPPING_CHANGE": true
+  },
   "webhooks": {
     "_comment": "Webhook URLs as fallback if bot can't reach a channel. Format: category or retailer ID -> webhook URL.",
     "paid_default": "",

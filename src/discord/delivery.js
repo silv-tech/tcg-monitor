@@ -38,6 +38,13 @@ class DeliveryQueue {
     if (!toSend.length) return;
 
     for (const event of toSend) {
+      // Skip events disabled by event type toggles (scan events always pass through)
+      if (!event._scanTier && channelsConfig?.enabledEvents) {
+        if (channelsConfig.enabledEvents[event.type] === false) {
+          logger.debug(`Event filtered by toggle: ${event.type} — ${event.product?.name || 'unknown'}`);
+          continue;
+        }
+      }
       this.queue.push({ event, queuedAt: Date.now() });
     }
 
