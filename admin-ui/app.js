@@ -70,8 +70,6 @@ async function loadHealth() {
       el.innerHTML = '<span class="pulse"></span> Degraded';
       el.className = 'status-pill warn';
     }
-    document.getElementById('statRetailers').textContent = total;
-    document.getElementById('statRetailersSub').textContent = `${healthy} healthy`;
   } catch {
     const el = document.getElementById('sysStatus');
     el.innerHTML = '<span class="pulse"></span> Down';
