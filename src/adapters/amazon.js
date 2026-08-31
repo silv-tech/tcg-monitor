@@ -33,23 +33,11 @@ class AmazonAdapter extends BaseAdapter {
       try {
         let html;
 
-        // Strategy 1: cookieFetch — solve Akamai challenge once, reuse cookies
-        try {
-          html = await this.cookieFetch(searchUrl, {
-            domain: this.domain,
-            seedUrl: `${this.url}/s?k=pokemon+tcg`,
-            challengeDetector: (h) => this._isChallenge(h),
-            timeoutMs: 25000,
-            waitForSelector: '[data-component-type="s-search-result"]',
-          });
-        } catch (cookieErr) {
-          // Strategy 2: Direct stealth HTTP (impit) — might work if cookies aren't needed
-          logger.info(`Amazon: cookieFetch failed (${cookieErr.message}), trying direct stealth`);
-          html = await this.stealthFetch(searchUrl, { timeoutMs: 20000 });
-          if (this._isChallenge(html)) {
-            throw new Error('Akamai challenge detected on all strategies');
-          }
-        }
+        // Go straight to browser — Akamai blocks all HTTP clients even with residential proxies
+        html = await this.browserFetch(searchUrl, {
+          timeoutMs: 30000,
+          waitForSelector: '[data-component-type="s-search-result"]',
+        });
 
         // Check if we got a challenge page from the browser
         if (this._isChallenge(html)) {

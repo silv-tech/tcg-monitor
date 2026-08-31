@@ -101,30 +101,15 @@ class PokemonCenterAdapter extends BaseAdapter {
   async scanSitemap() {
     let xml;
 
-    // Try cookieFetch first (solves Incapsula challenge via Playwright cookies)
+    // Go straight to browser — Incapsula blocks all HTTP clients even with residential proxies
     try {
-      xml = await this.cookieFetch(this.sitemapUrl, {
-        domain: this.domain,
-        seedUrl: this.seedUrl,
-        challengeDetector: (html) => this.isChallengePage(html),
-        timeoutMs: 30000,
-      });
-    } catch (cookieErr) {
-      // Try stealth HTTP as fallback
-      try {
-        xml = await this.stealthFetch(this.sitemapUrl, { timeoutMs: 30000 });
-      } catch (stealthErr) {
-        // Last resort: full browser rendering
-        try {
-          xml = await this.browserFetch(this.sitemapUrl, { timeoutMs: 45000 });
-        } catch (browserErr) {
-          if (this.sitemapProducts.size > 0) {
-            logger.warn(`Pokemon Center: all sitemap fetches failed, using ${this.sitemapProducts.size} cached products`);
-            return;
-          }
-          throw new Error(`Sitemap unreachable: cookie(${cookieErr.message}), stealth(${stealthErr.message}), browser(${browserErr.message})`);
-        }
+      xml = await this.browserFetch(this.sitemapUrl, { timeoutMs: 45000 });
+    } catch (browserErr) {
+      if (this.sitemapProducts.size > 0) {
+        logger.warn(`Pokemon Center: sitemap fetch failed, using ${this.sitemapProducts.size} cached products`);
+        return;
       }
+      throw new Error(`Sitemap unreachable: ${browserErr.message}`);
     }
 
     if (!xml || !xml.includes('<loc>') || this.isChallengePage(xml)) {
@@ -169,20 +154,11 @@ class PokemonCenterAdapter extends BaseAdapter {
   async checkProductAvailability(sku, meta) {
     let html;
 
+    // Go straight to browser — Incapsula blocks all HTTP clients even with residential proxies
     try {
-      html = await this.cookieFetch(meta.url, {
-        domain: this.domain,
-        seedUrl: this.seedUrl,
-        challengeDetector: (h) => this.isChallengePage(h),
-        timeoutMs: 20000,
-      });
+      html = await this.browserFetch(meta.url, { timeoutMs: 20000 });
     } catch {
-      // If cookieFetch fails, try stealth
-      try {
-        html = await this.stealthFetch(meta.url, { timeoutMs: 15000 });
-      } catch {
-        return null;
-      }
+      return null;
     }
 
     if (!html || this.isChallengePage(html)) return null;

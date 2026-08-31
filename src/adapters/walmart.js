@@ -27,35 +27,16 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   async fetchPage(searchUrl) {
-    // Try stealthFetch first (fast HTTP with TLS fingerprint)
+    // Go straight to browser — PerimeterX blocks all HTTP clients even with residential proxies
     try {
-      const html = await this.stealthFetch(searchUrl, { timeoutMs: 20000 });
-      if (!this.isChallengePage(html)) return html;
-      logger.info(`Walmart: stealthFetch returned challenge page for ${searchUrl.split('?')[1]}`);
-    } catch (err) {
-      logger.debug(`Walmart: stealthFetch failed: ${err.message}`);
-    }
-
-    // Try cookieFetch (Playwright solves challenge, caches cookies, then fast HTTP)
-    try {
-      const html = await this.cookieFetch(searchUrl, {
-        domain: this.domain,
-        seedUrl: this.url,
-        challengeDetector: (h) => this.isChallengePage(h),
-        timeoutMs: 25000,
+      const html = await this.browserFetch(searchUrl, {
+        timeoutMs: 30000,
+        waitForSelector: '[data-automation="product"], .product-tile, [data-product-id]',
       });
       if (!this.isChallengePage(html)) return html;
-      logger.info(`Walmart: cookieFetch returned challenge page`);
+      logger.warn(`Walmart: browser returned challenge page for ${searchUrl.split('?')[1]}`);
     } catch (err) {
-      logger.debug(`Walmart: cookieFetch failed: ${err.message}`);
-    }
-
-    // Last resort: full browser rendering
-    try {
-      const html = await this.browserFetch(searchUrl, { timeoutMs: 30000 });
-      return html;
-    } catch (err) {
-      logger.debug(`Walmart: browserFetch failed: ${err.message}`);
+      logger.warn(`Walmart: browserFetch failed for ${searchUrl.split('?')[1]}: ${err.message}`);
     }
 
     return null;
