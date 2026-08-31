@@ -4,6 +4,7 @@ const logger = require('../monitoring/logger');
 const delivery = require('./delivery');
 const state = require('../core/state');
 const { getStats } = require('../core/proxy');
+const { runScan } = require('../core/scan');
 
 let client;
 
@@ -35,6 +36,9 @@ async function createBot() {
       case 'test':
         await handleTest(interaction);
         break;
+      case 'scan':
+        await handleScan(interaction);
+        break;
     }
   });
 
@@ -54,6 +58,17 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName('test')
       .setDescription('Send a test alert'),
+    new SlashCommandBuilder()
+      .setName('scan')
+      .setDescription('Resend all cached products to Discord channels')
+      .addStringOption(opt =>
+        opt.setName('window')
+          .setDescription('Time window to scan')
+          .setRequired(true)
+          .addChoices(
+            { name: '12 hours', value: '12' },
+            { name: '24 hours', value: '24' },
+          )),
   ].map(cmd => cmd.toJSON());
 
   const rest = new REST().setToken(config.discord.token);
@@ -120,6 +135,32 @@ async function handleTest(interaction) {
 
   await delivery.deliver([testEvent]);
   await interaction.reply({ content: '✅ Test alert sent!', ephemeral: true });
+}
+
+async function handleScan(interaction) {
+  const hours = parseInt(interaction.options.getString('window'));
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const results = await runScan(hours);
+
+    const lines = results.retailers
+      .filter(r => r.sent > 0 || r.found > 0)
+      .map(r => `${r.sent > 0 ? '🟢' : '⚫'} **${r.name}** — ${r.sent}/${r.found} sent`);
+
+    await interaction.editReply({
+      content: [
+        `**Scan Complete** (${hours}h window)`,
+        '',
+        `Total: **${results.totalSent}** products sent to paid channels`,
+        '',
+        ...lines,
+      ].join('\n'),
+    });
+  } catch (err) {
+    await interaction.editReply({ content: `Scan failed: ${err.message}` });
+  }
 }
 
 function getClient() {

@@ -33,6 +33,11 @@ const EVENT_CONFIG = {
     color: 0x95a5a6,
     button: 'View Product',
   },
+  [EVENT_TYPES.LISTING]: {
+    label: 'Currently Listed',
+    color: 0x9b59b6,
+    button: 'View Product',
+  },
 };
 
 // ─── Main builder ────────────────────────────────────────────────
@@ -93,7 +98,7 @@ function buildAlertEmbed(event, tier) {
   embed.addFields({ name: 'Ships Home', value: shipIcon, inline: true });
 
   // ── Footer ──
-  const tierLabel = tier === 'paid' ? 'Premium' : 'Free';
+  const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
   embed.setFooter({ text: `TCG Monitor  ·  ${tierLabel}` });
 
   // ── Button ──

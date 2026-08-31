@@ -7,6 +7,7 @@ const EVENT_TYPES = {
   PREORDER_LIVE: 'PREORDER_LIVE',
   CART_AVAILABLE: 'CART_AVAILABLE',
   SHIPPING_CHANGE: 'SHIPPING_CHANGE',
+  LISTING: 'LISTING',
 };
 
 function detectEvents(oldProduct, newProduct) {

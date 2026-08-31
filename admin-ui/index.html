@@ -288,6 +288,21 @@
           <button class="btn btn-primary" onclick="addRetailer()">Add</button>
         </div>
       </div>
+      <div class="section">
+        <h2>Scan & Resend <span class="badge" style="background:rgba(155,89,182,0.15);color:#9b59b6;border:1px solid rgba(155,89,182,0.3)">Admin</span></h2>
+        <p style="font-size:12px;color:#71717a;margin-bottom:14px">Resend all currently-cached products to their paid Discord channels as purple "Currently Listed" embeds. No role pings, no dedup pollution.</p>
+        <div class="form-row">
+          <select id="scanWindow" style="width:140px">
+            <option value="12">Last 12 hours</option>
+            <option value="24">Last 24 hours</option>
+          </select>
+          <button class="btn btn-primary" id="scanBtn" onclick="triggerScan()" style="background:#9b59b6">Scan & Resend</button>
+        </div>
+        <div id="scanResults" style="margin-top:14px;display:none">
+          <div id="scanSummary" style="font-size:13px;color:#d4d4d8;margin-bottom:10px"></div>
+          <div id="scanBreakdown"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Products Tab -->

@@ -33,11 +33,11 @@ class DeliveryQueue {
     logger.info('Reloaded channel config');
   }
 
-  async deliver(events) {
-    const unique = await filterDuplicates(events);
-    if (!unique.length) return;
+  async deliver(events, { skipDedup } = {}) {
+    const toSend = skipDedup ? events : await filterDuplicates(events);
+    if (!toSend.length) return;
 
-    for (const event of unique) {
+    for (const event of toSend) {
       this.queue.push({ event, queuedAt: Date.now() });
     }
 
@@ -54,7 +54,10 @@ class DeliveryQueue {
       const { event, queuedAt } = this.queue.shift();
       try {
         await this.routeEvent(event, queuedAt);
-        await markSent(event);
+        // Don't pollute dedup for scan events — organic alerts must still fire
+        if (!event._scanTier) {
+          await markSent(event);
+        }
         // Rate limit: ~20 messages/sec to stay under Discord's limit
         await sleep(50);
       } catch (err) {
@@ -73,6 +76,16 @@ class DeliveryQueue {
     const { product } = event;
     const category = product.category || 'default';
     const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);
+
+    // --- SCAN: admin utility, paid channel only, no pings ---
+    if (event._scanTier === 'scan') {
+      const paidChannel = this.resolvePaidChannel(category, retailerId);
+      if (paidChannel) {
+        const { embed, components } = buildAlertEmbed(event, 'scan');
+        await this.sendToChannel(paidChannel, embed, components, null, 'paid');
+      }
+      return;
+    }
 
     // --- WATCHLIST: high-priority, send to dedicated channel + admin ---
     if (product._watchlist) {

@@ -122,7 +122,7 @@ async function loadRetailers() {
         </div>
         <div class="r-meta">
           <span>${adapter}</span>
-          <span>${interval}s</span>
+          <span class="r-interval" onclick="editInterval('${r.id}', ${r.intervalMs})" title="Click to edit polling interval" style="cursor:pointer;border-bottom:1px dashed #52525b">${interval}s</span>
           <span>${proxy}</span>
         </div>
         ${note}
@@ -136,6 +136,71 @@ async function toggleRetailer(id, enabled) {
   await api(`/retailers/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) });
   log(`${id} ${enabled ? 'enabled' : 'disabled'}`);
   await loadRetailers();
+}
+
+async function editInterval(id, currentMs) {
+  const currentSec = (currentMs / 1000).toFixed(0);
+  const retailer = retailersList.find(r => r.id === id);
+  const name = retailer ? retailer.name : id;
+
+  // Prompt for new value
+  const input = prompt(`Polling interval for ${name}\n\nCurrent: ${currentSec}s\nEnter new interval in seconds:`, currentSec);
+  if (input === null) return; // cancelled
+
+  const newSec = parseFloat(input);
+  if (isNaN(newSec) || newSec < 1) {
+    alert('Invalid interval. Must be at least 1 second.');
+    return;
+  }
+
+  const newMs = Math.round(newSec * 1000);
+  if (newMs === currentMs) return; // no change
+
+  // Risk assessment
+  let riskLevel, riskColor, riskMsg;
+  if (newSec < 5) {
+    riskLevel = 'DANGER';
+    riskColor = '#ef4444';
+    riskMsg = `${newSec}s is extremely aggressive.\n\n` +
+      `• High risk of IP bans and rate limiting\n` +
+      `• May trigger anti-bot protection permanently\n` +
+      `• Could get your proxies blacklisted\n` +
+      `• Retailer may block all future requests`;
+  } else if (newSec < 15) {
+    riskLevel = 'WARNING';
+    riskColor = '#f97316';
+    riskMsg = `${newSec}s is very fast.\n\n` +
+      `• Elevated risk of rate limiting\n` +
+      `• Anti-bot systems may flag this pattern\n` +
+      `• Proxy rotation recommended at this speed`;
+  } else if (newSec < 30) {
+    riskLevel = 'CAUTION';
+    riskColor = '#eab308';
+    riskMsg = `${newSec}s is moderately aggressive.\n\n` +
+      `• Generally safe with proxy rotation\n` +
+      `• Monitor block rates after changing`;
+  } else {
+    riskLevel = 'SAFE';
+    riskColor = '#22c55e';
+    riskMsg = `${newSec}s is a safe polling interval.`;
+  }
+
+  // Confirm with risk warning
+  const confirmed = confirm(
+    `⚠ ${riskLevel}: Change ${name} interval?\n\n` +
+    `${currentSec}s → ${newSec}s\n\n` +
+    `${riskMsg}\n\n` +
+    `Proceed?`
+  );
+  if (!confirmed) return;
+
+  try {
+    await api(`/retailers/${id}`, { method: 'PATCH', body: JSON.stringify({ intervalMs: newMs }) });
+    log(`${name}: interval changed ${currentSec}s → ${newSec}s [${riskLevel}]`);
+    await loadRetailers();
+  } catch (err) {
+    log(`Failed to update interval for ${name}: ${err.message}`);
+  }
 }
 
 async function removeRetailer(id, name) {
@@ -450,6 +515,54 @@ async function removeSku(retailer, sku) {
   await api(`/products/tracked/${retailer}/${sku}`, { method: 'DELETE' });
   log(`Removed SKU: ${retailer}/${sku}`);
   await loadProducts();
+}
+
+// ─── Scan & Resend ───────────────────────────────────────────────
+
+async function triggerScan() {
+  const hours = parseInt(document.getElementById('scanWindow').value);
+  const btn = document.getElementById('scanBtn');
+  const resultsDiv = document.getElementById('scanResults');
+  const summaryDiv = document.getElementById('scanSummary');
+  const breakdownDiv = document.getElementById('scanBreakdown');
+
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  resultsDiv.style.display = 'none';
+
+  try {
+    const results = await api('/scan', {
+      method: 'POST',
+      body: JSON.stringify({ hours }),
+    });
+
+    summaryDiv.textContent = `Sent ${results.totalSent} products across ${results.retailers.length} retailers (${hours}h window)`;
+
+    breakdownDiv.innerHTML = results.retailers.map(r => {
+      const pct = r.found > 0 ? Math.round((r.sent / r.found) * 100) : 0;
+      const barColor = r.sent > 0 ? '#9b59b6' : '#27272a';
+      return `
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;font-size:13px">
+          <span style="min-width:140px;color:#fafafa;font-weight:500">${r.name}</span>
+          <span style="min-width:80px;color:#a1a1aa">${r.sent}/${r.found}</span>
+          <div style="flex:1;height:4px;border-radius:2px;background:#27272a;overflow:hidden">
+            <div style="width:${pct}%;height:100%;border-radius:2px;background:${barColor};transition:width 0.3s"></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    resultsDiv.style.display = 'block';
+    log(`Scan complete: ${results.totalSent} products sent (${hours}h window)`);
+  } catch (err) {
+    log(`Scan failed: ${err.message}`);
+    summaryDiv.textContent = `Scan failed: ${err.message}`;
+    breakdownDiv.innerHTML = '';
+    resultsDiv.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Scan & Resend';
+  }
 }
 
 // ─── Proxies Tab ─────────────────────────────────────────────────

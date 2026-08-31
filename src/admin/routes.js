@@ -8,6 +8,7 @@ const scheduler = require('../core/scheduler');
 const logger = require('../monitoring/logger');
 
 const delivery = require('../discord/delivery');
+const { runScan } = require('../core/scan');
 
 const router = express.Router();
 
@@ -172,6 +173,21 @@ router.get('/stats/products', async (req, res) => {
 router.get('/state/:retailerId', async (req, res) => {
   const products = await state.getAllProducts(req.params.retailerId);
   res.json({ retailerId: req.params.retailerId, productCount: Object.keys(products).length, products });
+});
+
+// Manual scan — resend cached products to Discord
+router.post('/scan', async (req, res) => {
+  const hours = req.body.hours;
+  if (hours !== 12 && hours !== 24) {
+    return res.status(400).json({ error: 'hours must be 12 or 24' });
+  }
+  try {
+    const results = await runScan(hours);
+    logger.info(`Manual scan triggered via dashboard: ${hours}h, ${results.totalSent} products sent`);
+    res.json(results);
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
 });
 
 // Get channel config
