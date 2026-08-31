@@ -1,12 +1,17 @@
 require('dotenv').config();
 
-const INSECURE_KEYS = ['changeme', 'test', 'admin', 'password', ''];
+const INSECURE_VALUES = ['changeme', 'test', 'admin', 'password', ''];
 
 const apiKey = process.env.ADMIN_API_KEY || '';
+const adminUsername = process.env.ADMIN_USERNAME || '';
+const adminPassword = process.env.ADMIN_PASSWORD || '';
 
-// Validate required env vars on startup (P0-4)
-if (!apiKey || INSECURE_KEYS.includes(apiKey)) {
-  console.error('FATAL: ADMIN_API_KEY env var is unset or insecure. Set a strong, unique API key.');
+// Validate auth config on startup (P0-4)
+const hasApiKey = apiKey && !INSECURE_VALUES.includes(apiKey);
+const hasCredentials = adminUsername && adminPassword && !INSECURE_VALUES.includes(adminPassword);
+
+if (!hasApiKey && !hasCredentials) {
+  console.error('FATAL: Set ADMIN_USERNAME + ADMIN_PASSWORD (or ADMIN_API_KEY) for dashboard auth.');
   if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
@@ -28,6 +33,8 @@ module.exports = {
   admin: {
     port: parseInt(process.env.ADMIN_PORT) || 3500,
     apiKey: apiKey || 'changeme',
+    username: adminUsername,
+    password: adminPassword,
   },
   proxy: {
     residentialUrl: process.env.PROXY_RESIDENTIAL_URL,

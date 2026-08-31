@@ -1,5 +1,5 @@
 const BASE = window.location.origin + '/api';
-let apiKey = '';
+let sessionToken = '';
 let channelsData = null;
 let retailersList = [];
 
@@ -11,30 +11,29 @@ function esc(str) {
   return div.innerHTML;
 }
 
-// API key login — styled login screen, stored in localStorage (P0-2)
+// Session-based login — stored in localStorage
 (async function boot() {
-  const saved = localStorage.getItem('tcg_api_key');
+  const saved = localStorage.getItem('pw_session');
   if (saved) {
-    apiKey = saved;
+    sessionToken = saved;
     try {
-      await api('/retailers'); // Test the key
+      await api('/retailers'); // Test the token
       showDashboard();
       await loadAll();
       return;
     } catch {
-      localStorage.removeItem('tcg_api_key');
-      apiKey = '';
+      localStorage.removeItem('pw_session');
+      sessionToken = '';
     }
   }
   // Show login screen (already visible by default)
-  document.getElementById('loginKeyInput').focus();
+  document.getElementById('loginUsername').focus();
 })();
 
 function showDashboard() {
   document.getElementById('loginOverlay').classList.add('hidden');
   document.getElementById('dashHeader').classList.remove('dashboard-hidden');
   document.getElementById('dashContent').classList.remove('dashboard-hidden');
-  // Remove overlay from DOM after fade
   setTimeout(() => {
     const overlay = document.getElementById('loginOverlay');
     if (overlay) overlay.remove();
@@ -42,40 +41,50 @@ function showDashboard() {
 }
 
 async function submitLogin() {
-  const input = document.getElementById('loginKeyInput');
+  const userInput = document.getElementById('loginUsername');
+  const passInput = document.getElementById('loginPassword');
   const btn = document.getElementById('loginBtn');
   const error = document.getElementById('loginError');
-  const key = input.value.trim();
+  const username = userInput.value.trim();
+  const password = passInput.value;
 
-  if (!key) { error.textContent = 'Please enter an API key'; return; }
+  if (!username || !password) { error.textContent = 'Enter username and password'; return; }
 
   btn.disabled = true;
   btn.textContent = 'Signing in...';
   error.textContent = '';
 
-  apiKey = key;
   try {
-    await api('/retailers');
-    localStorage.setItem('tcg_api_key', key);
+    const res = await fetch(`${BASE}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) throw new Error('Invalid credentials');
+    const data = await res.json();
+    sessionToken = data.token;
+    localStorage.setItem('pw_session', sessionToken);
     showDashboard();
     await loadAll();
   } catch {
-    apiKey = '';
-    error.textContent = 'Invalid API key';
+    error.textContent = 'Invalid username or password';
     btn.disabled = false;
     btn.textContent = 'Sign In';
-    input.focus();
-    input.select();
+    passInput.value = '';
+    passInput.focus();
   }
 }
 
-// Enter key on login input
-document.getElementById('loginKeyInput').addEventListener('keydown', (e) => {
+// Enter key on login inputs
+document.getElementById('loginUsername').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('loginPassword').focus();
+});
+document.getElementById('loginPassword').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitLogin();
 });
 
 function headers() {
-  return { 'Content-Type': 'application/json', 'x-api-key': apiKey };
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` };
 }
 
 async function api(path, opts = {}) {
@@ -832,7 +841,7 @@ function formatNum(n) {
 
 // Live auto-refresh — 10s for quick stats, 15s for retailers (keeps stat card in sync)
 setInterval(() => {
-  if (apiKey) {
+  if (sessionToken) {
     loadHealth();
     loadStats();
     loadRetailers();
@@ -840,7 +849,7 @@ setInterval(() => {
 }, 10000);
 
 setInterval(() => {
-  if (apiKey) {
+  if (sessionToken) {
     loadProducts();
   }
 }, 30000);

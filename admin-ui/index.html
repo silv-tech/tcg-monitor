@@ -354,8 +354,9 @@
     <div class="login-box">
       <div class="login-logo">PW</div>
       <h2>Pulse Watch</h2>
-      <p>Enter your admin API key to continue</p>
-      <input type="password" class="login-field" id="loginKeyInput" placeholder="API key" autocomplete="off" />
+      <p>Sign in to access the dashboard</p>
+      <input type="text" class="login-field" id="loginUsername" placeholder="Username" autocomplete="username" style="margin-bottom:10px" />
+      <input type="password" class="login-field" id="loginPassword" placeholder="Password" autocomplete="current-password" />
       <button class="login-btn" id="loginBtn" onclick="submitLogin()">Sign In</button>
       <div class="login-error" id="loginError"></div>
     </div>
@@ -640,6 +641,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

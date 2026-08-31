@@ -37,15 +37,40 @@ setInterval(() => {
   }
 }, 300000);
 
-// ─── Timing-safe API key comparison (P0-3) ───────────────────────
-function isValidApiKey(provided) {
-  if (!provided) return false;
-  const expected = config.admin.apiKey;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+// ─── Timing-safe comparison helper (P0-3) ────────────────────────
+function timingSafeCompare(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
+
+// ─── Session tokens (in-memory) ──────────────────────────────────
+const sessions = new Map();
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+function createSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, Date.now() + SESSION_TTL);
+  return token;
+}
+
+function isValidSession(token) {
+  if (!token) return false;
+  const expiry = sessions.get(token);
+  if (!expiry) return false;
+  if (Date.now() > expiry) { sessions.delete(token); return false; }
+  return true;
+}
+
+// Clean expired sessions every 30 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, expiry] of sessions) {
+    if (now > expiry) sessions.delete(token);
+  }
+}, 30 * 60 * 1000);
 
 function createAdminServer() {
   const app = express();
@@ -53,16 +78,33 @@ function createAdminServer() {
   // P2-6: No open CORS — dashboard is served from same origin, no cross-origin needed
   app.use(express.json({ limit: '100kb' }));
 
-  // API key auth for admin routes
-  app.use('/api', (req, res, next) => {
-    // Health endpoint is public (used by uptime monitors)
-    if (req.path === '/health') return next();
+  // ─── Login endpoint (username/password → session token) ────────
+  app.post('/api/login', (req, res) => {
+    const { username, password } = req.body || {};
+    const validUser = timingSafeCompare(username, config.admin.username);
+    const validPass = timingSafeCompare(password, config.admin.password);
 
-    const key = req.headers['x-api-key'] || req.query.key;
-    if (!isValidApiKey(key)) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (validUser && validPass) {
+      const token = createSession();
+      return res.json({ token });
     }
-    next();
+    return res.status(401).json({ error: 'Invalid credentials' });
+  });
+
+  // Auth middleware — accepts session token OR legacy API key
+  app.use('/api', (req, res, next) => {
+    if (req.path === '/health' || req.path === '/login') return next();
+
+    // Check session token first (dashboard)
+    const authHeader = req.headers['authorization'] || '';
+    const sessionToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (isValidSession(sessionToken)) return next();
+
+    // Fallback to API key (health-check script, programmatic access)
+    const apiKey = req.headers['x-api-key'] || req.query.key;
+    if (timingSafeCompare(apiKey, config.admin.apiKey)) return next();
+
+    return res.status(401).json({ error: 'Unauthorized' });
   });
 
   // Rate limit write operations
