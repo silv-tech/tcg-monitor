@@ -21,7 +21,7 @@ const proxiesPath = path.join(__dirname, '../config/proxies.json');
 router.get('/health', async (req, res) => {
   const health = await checkHealth();
   const allHealthy = health.every(r => r.healthy);
-  res.status(allHealthy ? 200 : 503).json({ status: allHealthy ? 'ok' : 'degraded', retailers: health });
+  res.json({ status: allHealthy ? 'ok' : 'degraded', retailers: health });
 });
 
 // List retailers
