@@ -64,17 +64,61 @@ async function browserFetch(url, opts = {}) {
 
   const b = await getBrowser(proxyUrl);
   const context = await b.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
     locale: 'en-CA',
     timezoneId: 'America/Toronto',
     viewport: { width: 1920, height: 1080 },
+    extraHTTPHeaders: {
+      'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+    },
   });
 
-  // Anti-detection: hide Playwright markers
+  // Anti-detection: hide Playwright/headless markers
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
     delete window.__playwright;
     delete window.__pw_manual;
+
+    // Chrome runtime mock
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) window.chrome.runtime = { id: undefined };
+
+    // Permissions API — match real Chrome behavior
+    const origQuery = window.Permissions?.prototype?.query;
+    if (origQuery) {
+      window.Permissions.prototype.query = function (params) {
+        if (params.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return origQuery.call(this, params);
+      };
+    }
+
+    // Plugin/MimeType arrays — real Chrome has at least 2 plugins
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const arr = [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+        ];
+        arr.item = i => arr[i];
+        arr.namedItem = n => arr.find(p => p.name === n);
+        arr.refresh = () => {};
+        return arr;
+      },
+    });
+
+    // Languages
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-CA', 'en-US', 'en'] });
+
+    // Connection
+    if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false }),
+      });
+    }
   });
 
   const page = await context.newPage();
@@ -95,8 +139,8 @@ async function browserFetch(url, opts = {}) {
       await page.waitForSelector(waitForSelector, { timeout: timeoutMs });
     }
 
-    // Small delay to let JS execute
-    await page.waitForTimeout(1500);
+    // Let JS execute — challenge pages need time to resolve
+    await page.waitForTimeout(3000);
 
     let result;
     if (extractJson) {

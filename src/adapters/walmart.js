@@ -29,12 +29,10 @@ class WalmartAdapter extends BaseAdapter {
   async fetchPage(searchUrl) {
     // Go straight to browser — PerimeterX blocks all HTTP clients even with residential proxies
     try {
-      const html = await this.browserFetch(searchUrl, {
-        timeoutMs: 30000,
-        waitForSelector: '[data-automation="product"], .product-tile, [data-product-id]',
-      });
+      const html = await this.browserFetch(searchUrl, { timeoutMs: 35000 });
       if (!this.isChallengePage(html)) return html;
-      logger.warn(`Walmart: browser returned challenge page for ${searchUrl.split('?')[1]}`);
+      const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || 'unknown';
+      logger.warn(`Walmart: browser returned challenge (title: "${title}", ${html.length} bytes) for ${searchUrl.split('?')[1]}`);
     } catch (err) {
       logger.warn(`Walmart: browserFetch failed for ${searchUrl.split('?')[1]}: ${err.message}`);
     }
