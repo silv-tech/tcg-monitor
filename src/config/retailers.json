@@ -26,10 +26,11 @@
     "name": "Costco Canada",
     "url": "https://www.costco.ca",
     "adapter": "costco",
-    "intervalMs": 90000,
+    "intervalMs": 45000,
     "proxyTier": "none",
     "enabled": true,
-    "color": "#e31837"
+    "color": "#e31837",
+    "watchlist": ["4201042492", "2007494"]
   },
   {
     "id": "pokemoncenter",

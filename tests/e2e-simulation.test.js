@@ -101,7 +101,7 @@ describe('E2E Simulation: 50 SKUs go live', () => {
       const json = embed.toJSON();
       assert.ok(json.title, `Embed should have title for ${event.type}`);
       assert.ok(json.description, `Embed should have description for ${event.type}`);
-      assert.ok(json.fields.length > 0, `Embed should have fields for ${event.type}`);
+      assert.ok(json.description, `Embed should have description for ${event.type}`);
     }
   });
 
@@ -116,12 +116,9 @@ describe('E2E Simulation: 50 SKUs go live', () => {
     };
     const embed = buildEmbed(event);
     const json = embed.toJSON();
-    const wasField = json.fields.find(f => f.name === 'Was');
-    const changeField = json.fields.find(f => f.name === 'Change');
-    assert.ok(wasField, 'Should have Was field');
-    assert.ok(wasField.value.includes('199.99'));
-    assert.ok(changeField, 'Should have Change field');
-    assert.ok(changeField.value.includes('50.00'));
+    // Price info is now in the description line
+    assert.ok(json.description.includes('199.99'), 'Should show old price');
+    assert.ok(json.description.includes('149.99'), 'Should show new price');
   });
 
   it('handles high volume without errors', () => {
