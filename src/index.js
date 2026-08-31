@@ -29,7 +29,7 @@ const ADAPTER_MAP = {
 };
 
 async function main() {
-  logger.info('TCG Monitor starting...');
+  logger.info('Pulse Watch starting...');
 
   // 1. Start Discord bot
   if (config.discord.token) {
@@ -110,7 +110,7 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  logger.info('TCG Monitor running');
+  logger.info('Pulse Watch running');
 }
 
 // P2-1: Prevent unhandled errors from crashing the entire process

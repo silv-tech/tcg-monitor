@@ -99,7 +99,7 @@ function buildAlertEmbed(event, tier) {
 
   // ── Footer ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
-  embed.setFooter({ text: `TCG Monitor  ·  ${tierLabel}` });
+  embed.setFooter({ text: `Pulse Watch  ·  ${tierLabel}` });
 
   // ── Button ──
   const components = [];

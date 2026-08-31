@@ -110,7 +110,7 @@ async function handleStatus(interaction) {
 
   await interaction.editReply({
     content: [
-      '**TCG Monitor Status**',
+      '**Pulse Watch Status**',
       '',
       ...statusLines,
       '',
