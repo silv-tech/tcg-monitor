@@ -13,6 +13,13 @@ const { runScan } = require('../core/scan');
 const router = express.Router();
 
 const retailersPath = path.join(__dirname, '../config/retailers.json');
+
+// Merge base retailers.json with Redis overrides (enabled, intervalMs persist across deploys)
+async function getRetailersWithOverrides() {
+  const base = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+  const overrides = await state.getRetailerOverrides();
+  return base.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+}
 const productsPath = path.join(__dirname, '../config/products.json');
 const channelsPath = path.join(__dirname, '../config/channels.json');
 const proxiesPath = path.join(__dirname, '../config/proxies.json');
@@ -24,23 +31,24 @@ router.get('/health', async (req, res) => {
   res.json({ status: allHealthy ? 'ok' : 'degraded', retailers: health });
 });
 
-// List retailers
-router.get('/retailers', (req, res) => {
-  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+// List retailers (base + Redis overrides merged)
+router.get('/retailers', async (req, res) => {
+  const retailers = await getRetailersWithOverrides();
   res.json(retailers);
 });
 
-// Toggle / update retailer
-router.patch('/retailers/:id', (req, res) => {
-  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
-  const idx = retailers.findIndex(r => r.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Retailer not found' });
+// Toggle / update retailer — saves overrides to Redis (persists across deploys)
+router.patch('/retailers/:id', async (req, res) => {
+  const retailers = await getRetailersWithOverrides();
+  const retailer = retailers.find(r => r.id === req.params.id);
+  if (!retailer) return res.status(404).json({ error: 'Retailer not found' });
 
-  if (req.body.enabled !== undefined) retailers[idx].enabled = req.body.enabled;
-  if (req.body.intervalMs !== undefined) retailers[idx].intervalMs = req.body.intervalMs;
+  const changes = {};
+  if (req.body.enabled !== undefined) changes.enabled = req.body.enabled;
+  if (req.body.intervalMs !== undefined) changes.intervalMs = req.body.intervalMs;
 
-  fs.writeFileSync(retailersPath, JSON.stringify(retailers, null, 2));
-  res.json(retailers[idx]);
+  await state.setRetailerOverride(req.params.id, changes);
+  res.json({ ...retailer, ...changes });
 });
 
 // Add new retailer
@@ -153,7 +161,7 @@ router.get('/stats/circuits', (req, res) => {
 // Product count from Redis (actual discovered products across all retailers)
 router.get('/stats/products', async (req, res) => {
   try {
-    const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+    const retailers = await getRetailersWithOverrides();
     const enabled = retailers.filter(r => r.enabled);
     let totalProducts = 0;
     const byRetailer = {};

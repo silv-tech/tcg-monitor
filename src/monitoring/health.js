@@ -1,10 +1,17 @@
+const fs = require('fs');
+const path = require('path');
 const state = require('../core/state');
 const logger = require('../monitoring/logger');
-const retailers = require('../config/retailers.json');
 
+const retailersPath = path.join(__dirname, '../config/retailers.json');
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes without check = stale
 
 async function checkHealth() {
+  // Merge base config with Redis overrides so enabled state is accurate
+  const base = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+  const overrides = await state.getRetailerOverrides();
+  const retailers = base.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+
   const results = [];
 
   for (const retailer of retailers) {

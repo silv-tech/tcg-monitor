@@ -19,7 +19,9 @@ async function runScan(hoursBack = 12) {
   const results = { totalProducts: 0, totalSent: 0, retailers: [] };
 
   try {
-    const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+    const base = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+    const overrides = await state.getRetailerOverrides();
+    const retailers = base.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
     const enabled = retailers.filter(r => r.enabled);
 
     for (const retailer of enabled) {

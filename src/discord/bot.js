@@ -81,7 +81,9 @@ async function registerCommands() {
 
 async function handleStatus(interaction) {
   const proxyStats = getStats();
-  const retailers = require('../config/retailers.json');
+  const baseRetailers = require('../config/retailers.json');
+  const overrides = await state.getRetailerOverrides();
+  const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
   const statusLines = [];
 
   for (const r of retailers) {
@@ -105,7 +107,9 @@ async function handleStatus(interaction) {
 }
 
 async function handleRetailers(interaction) {
-  const retailers = require('../config/retailers.json');
+  const baseRetailers = require('../config/retailers.json');
+  const overrides = await state.getRetailerOverrides();
+  const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
   const lines = retailers.map(r =>
     `${r.enabled ? '✅' : '❌'} **${r.name}** — ${r.intervalMs / 1000}s interval, proxy: ${r.proxyTier}`
   );

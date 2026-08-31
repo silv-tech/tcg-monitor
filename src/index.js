@@ -39,8 +39,10 @@ async function main() {
     logger.warn('No DISCORD_TOKEN — running without Discord');
   }
 
-  // 2. Register adapters from config
-  const retailers = require('./config/retailers.json');
+  // 2. Register adapters from config (merge Redis overrides so enabled/interval state persists)
+  const baseRetailers = require('./config/retailers.json');
+  const overrides = await require('./core/state').getRetailerOverrides();
+  const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
   for (const retailer of retailers) {
     const AdapterClass = ADAPTER_MAP[retailer.adapter];
     if (!AdapterClass) {

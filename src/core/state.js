@@ -88,6 +88,26 @@ async function clearErrors(retailerId) {
   await setRetailerStatus(retailerId, { errors: 0, lastError: null, healthy: true });
 }
 
+// ─── Retailer overrides (persist across deploys) ─────────────────
+const OVERRIDES_KEY = `${PREFIX}retailer_overrides`;
+
+async function getRetailerOverrides() {
+  const data = await getRedis().get(OVERRIDES_KEY);
+  return data ? JSON.parse(data) : {};
+}
+
+async function setRetailerOverride(retailerId, changes) {
+  const overrides = await getRetailerOverrides();
+  overrides[retailerId] = { ...(overrides[retailerId] || {}), ...changes };
+  await getRedis().set(OVERRIDES_KEY, JSON.stringify(overrides));
+}
+
+async function deleteRetailerOverride(retailerId) {
+  const overrides = await getRetailerOverrides();
+  delete overrides[retailerId];
+  await getRedis().set(OVERRIDES_KEY, JSON.stringify(overrides));
+}
+
 async function shutdown() {
   if (redis) {
     await redis.quit();
@@ -107,5 +127,8 @@ module.exports = {
   setRetailerStatus,
   recordError,
   clearErrors,
+  getRetailerOverrides,
+  setRetailerOverride,
+  deleteRetailerOverride,
   shutdown,
 };
