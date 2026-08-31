@@ -1,3 +1,5 @@
 node_modules/
 .env
 *.log
+src/config/proxies.json
+src/config/channels.json

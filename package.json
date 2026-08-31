@@ -17,6 +17,7 @@
     "got-scraping": "^4.2.1",
     "http-cookie-agent": "^6.0.7",
     "https-proxy-agent": "^9.1.0",
+    "impit": "^0.14.4",
     "ioredis": "^5.4.1",
     "node-fetch": "^2.7.0",
     "tough-cookie": "^5.0.0",

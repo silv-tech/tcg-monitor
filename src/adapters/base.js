@@ -1,7 +1,7 @@
 const logger = require('../monitoring/logger');
 const { httpGet } = require('../utils/http');
 const { stealthGet } = require('../utils/stealth-http');
-const { getProxyUrl, recordRequest } = require('../core/proxy');
+const { getProxyUrl, getNextIspProxy, recordRequest, markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
 const { classifyCategory, classifyProductType } = require('../utils/helpers');
 
@@ -19,30 +19,48 @@ class BaseAdapter {
     this.enabled = retailerConfig.enabled;
   }
 
-  getProxyUrl() {
-    return getProxyUrl(this.proxyTier);
+  getProxy() {
+    // Returns { url, proxyObj } — proxyObj is the pool entry for ISP proxies (null otherwise)
+    if (this.proxyTier === 'isp') {
+      const proxyObj = getNextIspProxy(this.id);
+      return { url: proxyObj ? proxyObj.url : null, proxyObj };
+    }
+    return { url: getProxyUrl(this.proxyTier, this.id), proxyObj: null };
+  }
+
+  _isProxyBlock(err) {
+    const msg = err.message || '';
+    return msg.includes('403') || msg.includes('503') || msg.includes('Blocked')
+      || msg.includes('blocked') || msg.includes('CAPTCHA') || msg.includes('captcha')
+      || msg.includes('Access Denied') || msg.includes('connection refused')
+      || msg.includes('ECONNREFUSED') || msg.includes('socket hang up');
   }
 
   async fetch(url, opts = {}) {
-    const proxyUrl = this.getProxyUrl();
+    const { url: proxyUrl, proxyObj } = this.getProxy();
+    const stickyKey = this.proxyTier === 'isp' ? this.id : null;
     try {
-      const result = await httpGet(url, { ...opts, proxyUrl });
-      recordRequest(this.id, false);
+      const result = await httpGet(url, { ...opts, proxyUrl, stickyKey });
+      recordRequest(this.id, false, this.proxyTier);
+      if (proxyObj) markProxySuccess(proxyObj);
       return result;
     } catch (err) {
-      recordRequest(this.id, true);
+      recordRequest(this.id, true, this.proxyTier);
+      if (proxyObj && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
       throw err;
     }
   }
 
   async stealthFetch(url, opts = {}) {
-    const proxyUrl = this.getProxyUrl();
+    const { url: proxyUrl, proxyObj } = this.getProxy();
     try {
       const result = await stealthGet(url, { ...opts, proxyUrl });
-      recordRequest(this.id, false);
+      recordRequest(this.id, false, this.proxyTier);
+      if (proxyObj) markProxySuccess(proxyObj);
       return result;
     } catch (err) {
-      recordRequest(this.id, true);
+      recordRequest(this.id, true, this.proxyTier);
+      if (proxyObj && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
       throw err;
     }
   }
@@ -51,13 +69,15 @@ class BaseAdapter {
     if (!browserModule) {
       throw new Error('Browser fallback unavailable — install playwright-core');
     }
-    const proxyUrl = this.getProxyUrl();
+    const { url: proxyUrl, proxyObj } = this.getProxy();
     try {
       const result = await browserModule.browserFetch(url, { ...opts, proxyUrl });
-      recordRequest(this.id, false);
+      recordRequest(this.id, false, this.proxyTier);
+      if (proxyObj) markProxySuccess(proxyObj);
       return result;
     } catch (err) {
-      recordRequest(this.id, true);
+      recordRequest(this.id, true, this.proxyTier);
+      if (proxyObj && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
       throw err;
     }
   }
@@ -66,6 +86,7 @@ class BaseAdapter {
     product.category = classifyCategory(product.name, productsConfig.categories);
     product.productType = classifyProductType(product.name, productsConfig.productTypes);
     product.retailer = this.name;
+    product.retailerId = this.id;
     product.lastSeen = Date.now();
     return product;
   }

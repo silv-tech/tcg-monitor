@@ -72,7 +72,33 @@ class DeliveryQueue {
   async routeEvent(event, queuedAt) {
     const { product } = event;
     const category = product.category || 'default';
-    const retailerId = this.retailerIdFromName(product.retailer);
+    const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);
+
+    // --- WATCHLIST: high-priority, send to dedicated channel + admin ---
+    if (product._watchlist) {
+      const watchCh = channelsConfig?.watchlistChannel;
+      const adminCh = channelsConfig?.adminChannel || config.discord.adminChannelId;
+      const { embed, components } = buildAlertEmbed(event, 'paid');
+
+      // Send to watchlist channel (or admin if no watchlist channel set)
+      const targetCh = watchCh || adminCh;
+      if (targetCh) {
+        await this.sendToChannel(targetCh, embed, components, '🚨 **WATCHLIST ALERT** 🚨', 'paid');
+        logger.info(`WATCHLIST alert sent: ${event.type} — ${product.name} (${product.sku})`);
+      } else {
+        logger.error(`WATCHLIST alert generated but no target channel configured! SKU: ${product.sku}, Name: ${product.name}`);
+      }
+
+      // Also send to paid channel as normal
+      const paidChannel = this.resolvePaidChannel(category, retailerId);
+      if (paidChannel && paidChannel !== targetCh) {
+        await this.sendToChannel(paidChannel, embed, components, null, 'paid');
+      }
+
+      const latency = Date.now() - queuedAt;
+      recordAlertLatency(event._detectedAt ? Date.now() - event._detectedAt : latency);
+      return; // Skip free tier for watchlist — this is premium intel
+    }
 
     // Build role pings
     const pings = this.buildPings(category, retailerId);
@@ -151,6 +177,7 @@ class DeliveryQueue {
   retailerIdFromName(retailerName) {
     const map = {
       'EB Games': 'ebgames',
+      'Best Buy Canada': 'bestbuy',
       'Costco Canada': 'costco',
       'Pokemon Center': 'pokemoncenter',
       'Walmart Canada': 'walmart',

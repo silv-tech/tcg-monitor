@@ -3,109 +3,250 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TCG Monitor — Admin</title>
+  <title>TCG Monitor</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
-    .header { background: #1a1a1a; border-bottom: 1px solid #333; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
-    .header h1 { font-size: 20px; color: #fff; }
-    .header .status { font-size: 13px; padding: 4px 12px; border-radius: 12px; }
-    .status.ok { background: #0d3b1a; color: #4ade80; }
-    .status.bad { background: #3b0d0d; color: #f87171; }
-    .status.warn { background: #3b2f0d; color: #facc15; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-    .section { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-    .section h2 { font-size: 16px; color: #fff; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-    .section h2 .badge { font-size: 11px; background: #333; color: #aaa; padding: 2px 8px; border-radius: 10px; font-weight: 400; }
-    .section h3 { font-size: 14px; color: #ccc; margin: 16px 0 10px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
-    .card { background: #222; border: 1px solid #333; border-radius: 8px; padding: 14px; }
-    .card .name { font-weight: 600; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
-    .card .meta { font-size: 13px; color: #888; line-height: 1.6; }
-    .card .meta .val { color: #ccc; }
-    .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .health-dot.green { background: #4ade80; }
-    .health-dot.red { background: #f87171; }
-    .health-dot.yellow { background: #facc15; }
-    .toggle { cursor: pointer; padding: 4px 10px; border-radius: 4px; border: 1px solid #444; background: #333; color: #ccc; font-size: 12px; margin-top: 6px; }
-    .toggle:hover { background: #444; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
-    .stat { text-align: center; background: #222; border: 1px solid #333; border-radius: 8px; padding: 14px 8px; }
-    .stat .num { font-size: 26px; font-weight: 700; color: #fff; }
-    .stat .label { font-size: 11px; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat .sub { font-size: 11px; color: #666; margin-top: 2px; }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    th { text-align: left; padding: 8px; color: #888; border-bottom: 1px solid #333; font-weight: 500; }
-    td { padding: 8px; border-bottom: 1px solid #222; }
-    input, select { background: #222; border: 1px solid #444; color: #e0e0e0; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
-    input:focus, select:focus { border-color: #3b82f6; outline: none; }
-    button { cursor: pointer; padding: 6px 14px; border-radius: 6px; border: none; font-size: 13px; font-weight: 500; }
+    body { font-family: 'Inter', -apple-system, sans-serif; background: #09090b; color: #e4e4e7; min-height: 100vh; }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(180deg, #18181b 0%, #09090b 100%);
+      border-bottom: 1px solid #27272a;
+      padding: 0 32px;
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px; color: #fff;
+    }
+    .brand h1 { font-size: 18px; font-weight: 600; color: #fafafa; letter-spacing: -0.3px; }
+    .brand h1 span { color: #71717a; font-weight: 400; margin-left: 4px; }
+
+    .connect-bar { display: flex; gap: 8px; align-items: center; }
+    .connect-bar input {
+      background: #18181b; border: 1px solid #27272a; color: #e4e4e7;
+      padding: 8px 14px; border-radius: 8px; font-size: 13px; width: 200px;
+      font-family: inherit; transition: border-color 0.2s;
+    }
+    .connect-bar input:focus { border-color: #3b82f6; outline: none; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+    .connect-bar input::placeholder { color: #52525b; }
+
+    .btn {
+      cursor: pointer; border: none; border-radius: 8px; font-family: inherit;
+      font-size: 13px; font-weight: 500; padding: 8px 16px; transition: all 0.15s;
+    }
     .btn-primary { background: #3b82f6; color: #fff; }
-    .btn-primary:hover { background: #2563eb; }
+    .btn-primary:hover { background: #2563eb; transform: translateY(-1px); }
     .btn-success { background: #22c55e; color: #fff; }
     .btn-success:hover { background: #16a34a; }
-    .btn-danger { background: #ef4444; color: #fff; font-size: 12px; padding: 4px 10px; }
-    .btn-danger:hover { background: #dc2626; }
-    .form-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
-    .api-key-bar { display: flex; gap: 8px; align-items: center; }
-    .api-key-bar input { width: 240px; }
-    #log { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: #888; }
-    .tabs { display: flex; gap: 4px; margin-bottom: 14px; }
-    .tab { padding: 6px 16px; border-radius: 6px; background: #222; color: #888; cursor: pointer; font-size: 13px; border: 1px solid #333; }
-    .tab.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+    .btn-danger { background: transparent; color: #ef4444; border: 1px solid #3f3f46; font-size: 12px; padding: 4px 10px; }
+    .btn-danger:hover { background: #ef4444; color: #fff; }
+    .btn-ghost { background: transparent; color: #a1a1aa; border: 1px solid #27272a; }
+    .btn-ghost:hover { background: #27272a; color: #fff; }
+
+    .status-pill { font-size: 12px; padding: 4px 12px; border-radius: 20px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    .status-pill .pulse { width: 8px; height: 8px; border-radius: 50%; }
+    .status-pill.ok { background: rgba(34,197,94,0.1); color: #4ade80; border: 1px solid rgba(34,197,94,0.2); }
+    .status-pill.ok .pulse { background: #4ade80; animation: pulse 2s infinite; }
+    .status-pill.bad { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
+    .status-pill.bad .pulse { background: #f87171; }
+    .status-pill.warn { background: rgba(234,179,8,0.1); color: #facc15; border: 1px solid rgba(234,179,8,0.2); }
+    .status-pill.warn .pulse { background: #facc15; }
+    .status-pill.off { background: #18181b; color: #52525b; border: 1px solid #27272a; }
+    .status-pill.off .pulse { background: #52525b; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* ── Layout ── */
+    .container { max-width: 1280px; margin: 0 auto; padding: 24px 32px; }
+
+    /* ── Stats Grid ── */
+    .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    @media (max-width: 900px) { .stats-row { grid-template-columns: repeat(2, 1fr); } }
+    .stat-card {
+      background: #18181b; border: 1px solid #27272a; border-radius: 12px;
+      padding: 20px; transition: border-color 0.2s;
+    }
+    .stat-card:hover { border-color: #3f3f46; }
+    .stat-card .label { font-size: 12px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; color: #fafafa; letter-spacing: -1px; }
+    .stat-card .sub { font-size: 12px; color: #52525b; margin-top: 4px; }
+    .stat-card .value.accent { color: #3b82f6; }
+    .stat-card .value.green { color: #4ade80; }
+    .stat-card .value.warn { color: #facc15; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 2px; margin-bottom: 24px; border-bottom: 1px solid #27272a; }
+    .tab {
+      padding: 10px 20px; font-size: 14px; font-weight: 500; color: #71717a;
+      cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s;
+      font-family: inherit;
+    }
+    .tab:hover { color: #a1a1aa; }
+    .tab.active { color: #fafafa; border-bottom-color: #3b82f6; }
     .tab-content { display: none; }
-    .tab-content.active { display: block; }
-    .latency-bar { height: 6px; border-radius: 3px; background: #333; margin-top: 4px; overflow: hidden; }
-    .latency-bar .fill { height: 100%; border-radius: 3px; }
+    .tab-content.active { display: block; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ── Section ── */
+    .section {
+      background: #18181b; border: 1px solid #27272a; border-radius: 12px;
+      padding: 24px; margin-bottom: 16px;
+    }
+    .section h2 { font-size: 15px; font-weight: 600; color: #fafafa; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .section h2 .badge { font-size: 11px; background: #27272a; color: #a1a1aa; padding: 3px 10px; border-radius: 20px; font-weight: 500; }
+    .section h3 { font-size: 13px; font-weight: 500; color: #a1a1aa; margin: 20px 0 10px; }
+
+    /* ── Retailer Grid ── */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+    .r-card {
+      background: #09090b; border: 1px solid #27272a; border-radius: 10px;
+      padding: 16px; transition: all 0.15s; position: relative; overflow: hidden;
+    }
+    .r-card:hover { border-color: #3f3f46; background: #0f0f12; }
+    .r-card .color-bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+    .r-card .r-header { display: flex; align-items: center; justify-content: space-between; margin-left: 12px; }
+    .r-card .r-name { font-weight: 600; font-size: 14px; color: #fafafa; display: flex; align-items: center; gap: 8px; }
+    .r-card .r-meta { font-size: 12px; color: #71717a; margin-top: 8px; margin-left: 12px; display: flex; gap: 16px; }
+    .r-card .r-meta span { display: flex; align-items: center; gap: 4px; }
+    .r-card .r-note { font-size: 11px; color: #52525b; margin-top: 6px; margin-left: 12px; font-style: italic; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot-green { background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.4); }
+    .dot-yellow { background: #facc15; }
+    .dot-red { background: #f87171; }
+
+    .toggle-btn {
+      cursor: pointer; padding: 4px 12px; border-radius: 6px; font-size: 11px;
+      font-weight: 500; font-family: inherit; border: 1px solid #27272a;
+      background: transparent; color: #a1a1aa; transition: all 0.15s;
+    }
+    .toggle-btn:hover { background: #27272a; color: #fff; }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 10px 12px; color: #71717a; font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #27272a; }
+    td { padding: 10px 12px; border-bottom: 1px solid rgba(39,39,42,0.5); color: #d4d4d8; }
+    tr:hover td { background: rgba(39,39,42,0.2); }
+    td:first-child { color: #fafafa; font-weight: 500; }
+
+    /* ── Forms ── */
+    input, select {
+      background: #09090b; border: 1px solid #27272a; color: #e4e4e7;
+      padding: 8px 12px; border-radius: 8px; font-size: 13px; font-family: inherit;
+      transition: all 0.15s;
+    }
+    input:focus, select:focus { border-color: #3b82f6; outline: none; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+    input::placeholder { color: #3f3f46; }
+
+    .form-row { display: flex; gap: 8px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
+
+    /* ── Keywords ── */
+    .keyword-tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #27272a; padding: 4px 12px; border-radius: 20px; margin: 3px;
+      font-size: 13px; color: #d4d4d8; border: 1px solid #3f3f46;
+    }
+    .keyword-tag .remove { cursor: pointer; color: #71717a; transition: color 0.15s; font-size: 16px; line-height: 1; }
+    .keyword-tag .remove:hover { color: #f87171; }
+
+    /* ── Channel Routing ── */
+    .routing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 768px) { .routing-grid { grid-template-columns: 1fr; } }
+    .routing-card { background: #09090b; border: 1px solid #27272a; border-radius: 10px; padding: 20px; }
+    .routing-card h4 { color: #fafafa; font-size: 14px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .tier-badge { font-size: 10px; padding: 3px 10px; border-radius: 20px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .tier-paid { background: rgba(59,130,246,0.15); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2); }
+    .tier-free { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.2); }
+
+    .field-group { margin-bottom: 14px; }
+    .field-group label { display: block; font-size: 11px; color: #71717a; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500; }
+    .field-group input { width: 100%; }
+    .hint { font-size: 11px; color: #3f3f46; margin-top: 3px; }
+
+    .routing-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .routing-row label { min-width: 100px; font-size: 13px; color: #a1a1aa; font-weight: 500; }
+    .routing-row input { flex: 1; }
+
+    .save-bar { display: flex; justify-content: flex-end; gap: 12px; align-items: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #27272a; }
+    .saved-indicator { font-size: 13px; color: #4ade80; display: none; align-items: center; gap: 6px; font-weight: 500; }
+    .saved-indicator.show { display: flex; }
+
+    /* ── Latency bars ── */
+    .latency-bar { height: 4px; border-radius: 2px; background: #27272a; margin-top: 4px; overflow: hidden; }
+    .latency-bar .fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
     .fill.fast { background: #4ade80; }
     .fill.medium { background: #facc15; }
     .fill.slow { background: #f87171; }
-    .retailer-table td:first-child { font-weight: 500; color: #fff; }
 
-    /* Channel routing styles */
-    .routing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    @media (max-width: 768px) { .routing-grid { grid-template-columns: 1fr; } }
-    .routing-card { background: #222; border: 1px solid #333; border-radius: 8px; padding: 16px; }
-    .routing-card h4 { color: #fff; font-size: 14px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
-    .routing-card .tier-badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-    .tier-paid { background: #1a365d; color: #63b3ed; }
-    .tier-free { background: #234e2a; color: #68d391; }
-    .field-group { margin-bottom: 12px; }
-    .field-group label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .field-group input { width: 100%; }
-    .field-group .hint { font-size: 11px; color: #555; margin-top: 2px; }
-    .routing-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-    .routing-row label { min-width: 100px; font-size: 13px; color: #aaa; }
-    .routing-row input { flex: 1; }
-    .save-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #333; }
-    .saved-indicator { font-size: 12px; color: #4ade80; display: none; align-items: center; gap: 4px; }
-    .saved-indicator.show { display: flex; }
+    /* ── Proxy cards ── */
+    .proxy-card {
+      background: #09090b; border: 1px solid #27272a; border-radius: 10px;
+      padding: 16px; position: relative; overflow: hidden; transition: all 0.15s;
+    }
+    .proxy-card:hover { border-color: #3f3f46; }
+    .proxy-card.healthy { border-left: 3px solid #4ade80; }
+    .proxy-card.blocked { border-left: 3px solid #f87171; }
+    .proxy-card.idle { border-left: 3px solid #52525b; }
+    .proxy-card .proxy-ip { font-size: 14px; font-weight: 600; color: #fafafa; font-family: 'SF Mono','Fira Code','Consolas',monospace; }
+    .proxy-card .proxy-status { font-size: 12px; margin-top: 6px; display: flex; gap: 16px; color: #71717a; }
+    .proxy-card .proxy-status span { display: flex; align-items: center; gap: 4px; }
+    .proxy-card .proxy-status .val { color: #d4d4d8; font-weight: 500; }
+    .proxy-card .proxy-cooldown { font-size: 11px; color: #f87171; margin-top: 6px; font-weight: 500; }
+    .proxy-bar { height: 4px; border-radius: 2px; background: #27272a; margin-top: 10px; overflow: hidden; }
+    .proxy-bar .fill { height: 100%; border-radius: 2px; background: #4ade80; transition: width 0.5s; }
+
+    /* ── Activity Log ── */
+    .log-box {
+      background: #09090b; border: 1px solid #27272a; border-radius: 10px;
+      padding: 16px; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px; max-height: 180px; overflow-y: auto; white-space: pre-wrap;
+      color: #52525b; line-height: 1.8;
+    }
+    .log-box::-webkit-scrollbar { width: 6px; }
+    .log-box::-webkit-scrollbar-track { background: transparent; }
+    .log-box::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #09090b; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>TCG Monitor</h1>
-    <div class="api-key-bar">
-      <input type="password" id="apiKey" placeholder="API Key" />
-      <button class="btn-primary" onclick="loadAll()">Connect</button>
-      <span id="sysStatus" class="status">—</span>
+    <div class="brand">
+      <div class="brand-icon">TC</div>
+      <h1>TCG Monitor <span>Admin</span></h1>
+    </div>
+    <div class="connect-bar">
+      <span id="sysStatus" class="status-pill off"><span class="pulse"></span> Connecting...</span>
     </div>
   </div>
 
   <div class="container">
-    <!-- System Stats -->
-    <div class="section">
-      <h2>System Overview</h2>
-      <div class="stats-grid" id="statsGrid">
-        <div class="stat"><div class="num" id="statUptime">—</div><div class="label">Uptime</div><div class="sub" id="statUptimeSub"></div></div>
-        <div class="stat"><div class="num" id="statRetailers">—</div><div class="label">Retailers</div><div class="sub" id="statRetailersSub"></div></div>
-        <div class="stat"><div class="num" id="statProducts">—</div><div class="label">Tracked</div></div>
-        <div class="stat"><div class="num" id="statRequests">—</div><div class="label">Requests</div><div class="sub" id="statReqRate"></div></div>
-        <div class="stat"><div class="num" id="statBlocked">—</div><div class="label">Blocked</div><div class="sub" id="statBlockRate"></div></div>
-        <div class="stat"><div class="num" id="statAvgPoll">—</div><div class="label">Avg Poll</div><div class="sub">latency (ms)</div></div>
-        <div class="stat"><div class="num" id="statAvgAlert">—</div><div class="label">Avg Alert</div><div class="sub">latency (ms)</div></div>
-        <div class="stat"><div class="num" id="statCost">—</div><div class="label">Proxy Cost</div><div class="sub">estimated USD</div></div>
-      </div>
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-card"><div class="label">Uptime</div><div class="value" id="statUptime">--</div><div class="sub" id="statUptimeSub"></div></div>
+      <div class="stat-card"><div class="label">Retailers</div><div class="value accent" id="statRetailers">--</div><div class="sub" id="statRetailersSub"></div></div>
+      <div class="stat-card"><div class="label">Products Discovered</div><div class="value" id="statProducts">--</div><div class="sub" id="statProductsSub"></div></div>
+      <div class="stat-card"><div class="label">Requests</div><div class="value" id="statRequests">--</div><div class="sub" id="statReqRate"></div></div>
+    </div>
+    <div class="stats-row">
+      <div class="stat-card"><div class="label">Blocked</div><div class="value warn" id="statBlocked">--</div><div class="sub" id="statBlockRate"></div></div>
+      <div class="stat-card"><div class="label">Avg Poll Latency</div><div class="value" id="statAvgPoll">--</div><div class="sub">ms</div></div>
+      <div class="stat-card"><div class="label">Avg Alert Latency</div><div class="value green" id="statAvgAlert">--</div><div class="sub">ms</div></div>
+      <div class="stat-card"><div class="label">Proxy Cost</div><div class="value" id="statCost">--</div><div class="sub">estimated USD</div></div>
     </div>
 
     <!-- Tabs -->
@@ -114,13 +255,38 @@
       <div class="tab" onclick="switchTab('products')">Products</div>
       <div class="tab" onclick="switchTab('performance')">Performance</div>
       <div class="tab" onclick="switchTab('channels')">Channels</div>
+      <div class="tab" onclick="switchTab('proxies')">Proxies</div>
     </div>
 
     <!-- Retailers Tab -->
     <div id="tab-retailers" class="tab-content active">
       <div class="section">
-        <h2>Retailers <span class="badge" id="retailerCount"></span></h2>
-        <div class="grid" id="retailersGrid"></div>
+        <h2>Retailers <span class="badge" id="retailerCount">--</span></h2>
+        <div class="grid" id="retailersGrid">
+          <div style="color:#52525b;text-align:center;padding:40px;grid-column:1/-1">Connect to view retailers</div>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Add Retailer</h2>
+        <div class="form-row">
+          <input type="text" id="newRetailerId" placeholder="ID (e.g. bestbuy)" style="width:120px" />
+          <input type="text" id="newRetailerName" placeholder="Display Name" style="width:160px" />
+          <input type="text" id="newRetailerUrl" placeholder="https://..." style="flex:1" />
+          <select id="newRetailerAdapter">
+            <option value="shopify">Shopify</option>
+            <option value="walmart">Walmart</option>
+            <option value="amazon">Amazon</option>
+            <option value="costco">Costco</option>
+            <option value="bestbuy">Best Buy</option>
+            <option value="pokemoncenter">Pokemon Center</option>
+            <option value="ebgames">EB Games</option>
+          </select>
+          <select id="newRetailerProxy">
+            <option value="none">No Proxy</option>
+            <option value="isp">ISP</option>
+          </select>
+          <button class="btn btn-primary" onclick="addRetailer()">Add</button>
+        </div>
       </div>
     </div>
 
@@ -130,8 +296,8 @@
         <h2>Tracked Keywords</h2>
         <div id="keywordsList"></div>
         <div class="form-row">
-          <input type="text" id="newKeyword" placeholder="New keyword..." />
-          <button class="btn-primary" onclick="addKeyword()">Add</button>
+          <input type="text" id="newKeyword" placeholder="Add keyword..." style="flex:1" />
+          <button class="btn btn-primary" onclick="addKeyword()">Add Keyword</button>
         </div>
       </div>
       <div class="section">
@@ -143,8 +309,8 @@
         <div class="form-row">
           <input type="text" id="newSku" placeholder="SKU" />
           <input type="text" id="newSkuRetailer" placeholder="Retailer ID" />
-          <input type="text" id="newSkuName" placeholder="Name" />
-          <button class="btn-primary" onclick="addSku()">Add</button>
+          <input type="text" id="newSkuName" placeholder="Product name" />
+          <button class="btn btn-primary" onclick="addSku()">Add SKU</button>
         </div>
       </div>
     </div>
@@ -153,7 +319,7 @@
     <div id="tab-performance" class="tab-content">
       <div class="section">
         <h2>Per-Retailer Performance</h2>
-        <table class="retailer-table">
+        <table>
           <thead><tr><th>Retailer</th><th>Requests</th><th>Blocked</th><th>Block Rate</th><th>Avg Latency</th><th>Status</th></tr></thead>
           <tbody id="perfTable"></tbody>
         </table>
@@ -161,15 +327,14 @@
       <div class="section">
         <h2>Proxy Cost Breakdown</h2>
         <table>
-          <thead><tr><th>Tier</th><th>Requests Est.</th><th>Cost (USD)</th></tr></thead>
+          <thead><tr><th>Tier</th><th>Requests</th><th>Cost (USD)</th></tr></thead>
           <tbody id="costTable"></tbody>
         </table>
       </div>
     </div>
 
-    <!-- Channels Tab (Routing Config) -->
+    <!-- Channels Tab -->
     <div id="tab-channels" class="tab-content">
-      <!-- Tier Config -->
       <div class="routing-grid">
         <div class="routing-card">
           <h4><span class="tier-badge tier-paid">Paid</span> Premium Tier</h4>
@@ -178,17 +343,16 @@
             <input type="number" id="ch-paid-delay" value="0" min="0" step="1000" />
             <div class="hint">0 = instant delivery</div>
           </div>
-          <h4 style="margin-top:16px">Category Channels</h4>
+          <h3>Category Channels</h3>
           <div class="routing-row"><label>Default</label><input type="text" id="ch-paid-default" placeholder="Channel ID" /></div>
-          <div class="routing-row"><label>Pokemon</label><input type="text" id="ch-paid-pokemon" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>One Piece</label><input type="text" id="ch-paid-onepiece" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Dragon Ball</label><input type="text" id="ch-paid-dragonball" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Naruto</label><input type="text" id="ch-paid-naruto" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Lorcana</label><input type="text" id="ch-paid-lorcana" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Yu-Gi-Oh</label><input type="text" id="ch-paid-yugioh" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>MTG</label><input type="text" id="ch-paid-mtg" placeholder="Channel ID (optional)" /></div>
+          <div class="routing-row"><label>Pokemon</label><input type="text" id="ch-paid-pokemon" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>One Piece</label><input type="text" id="ch-paid-onepiece" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Dragon Ball</label><input type="text" id="ch-paid-dragonball" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Naruto</label><input type="text" id="ch-paid-naruto" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Lorcana</label><input type="text" id="ch-paid-lorcana" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Yu-Gi-Oh</label><input type="text" id="ch-paid-yugioh" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>MTG</label><input type="text" id="ch-paid-mtg" placeholder="Channel ID" /></div>
         </div>
-
         <div class="routing-card">
           <h4><span class="tier-badge tier-free">Free</span> Free Tier</h4>
           <div class="field-group">
@@ -196,26 +360,24 @@
             <input type="number" id="ch-free-delay" value="45000" min="0" step="1000" />
             <div class="hint">Delay after paid tier gets the alert</div>
           </div>
-          <h4 style="margin-top:16px">Category Channels</h4>
+          <h3>Category Channels</h3>
           <div class="routing-row"><label>Default</label><input type="text" id="ch-free-default" placeholder="Channel ID" /></div>
-          <div class="routing-row"><label>Pokemon</label><input type="text" id="ch-free-pokemon" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>One Piece</label><input type="text" id="ch-free-onepiece" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Dragon Ball</label><input type="text" id="ch-free-dragonball" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Naruto</label><input type="text" id="ch-free-naruto" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Lorcana</label><input type="text" id="ch-free-lorcana" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>Yu-Gi-Oh</label><input type="text" id="ch-free-yugioh" placeholder="Channel ID (optional)" /></div>
-          <div class="routing-row"><label>MTG</label><input type="text" id="ch-free-mtg" placeholder="Channel ID (optional)" /></div>
+          <div class="routing-row"><label>Pokemon</label><input type="text" id="ch-free-pokemon" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>One Piece</label><input type="text" id="ch-free-onepiece" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Dragon Ball</label><input type="text" id="ch-free-dragonball" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Naruto</label><input type="text" id="ch-free-naruto" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Lorcana</label><input type="text" id="ch-free-lorcana" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>Yu-Gi-Oh</label><input type="text" id="ch-free-yugioh" placeholder="Channel ID" /></div>
+          <div class="routing-row"><label>MTG</label><input type="text" id="ch-free-mtg" placeholder="Channel ID" /></div>
         </div>
       </div>
 
-      <!-- Retailer Overrides -->
       <div class="section" style="margin-top:16px">
-        <h2>Retailer Channel Overrides <span class="badge">Paid tier only</span></h2>
-        <p style="font-size:12px;color:#666;margin-bottom:12px">If set, alerts from this retailer go to this channel instead of the category channel.</p>
+        <h2>Retailer Channel Overrides <span class="badge">Paid tier</span></h2>
+        <p style="font-size:12px;color:#52525b;margin-bottom:14px">Alerts from this retailer go directly to this channel instead of the category channel.</p>
         <div id="retailerChannelsGrid" class="grid"></div>
       </div>
 
-      <!-- Role Pings -->
       <div class="section">
         <h2>Role Pings</h2>
         <div class="routing-grid">
@@ -232,14 +394,13 @@
           <div class="routing-card">
             <h4>Retailer Roles</h4>
             <div id="retailerRolesGrid"></div>
-            <h4 style="margin-top:16px">Global Roles</h4>
+            <h4 style="margin-top:20px">Global Roles</h4>
             <div class="routing-row"><label>Paid Member</label><input type="text" id="role-paidMember" placeholder="Role ID" /></div>
             <div class="routing-row"><label>All Alerts</label><input type="text" id="role-allAlerts" placeholder="Role ID" /></div>
           </div>
         </div>
       </div>
 
-      <!-- Webhooks & Admin -->
       <div class="section">
         <h2>Webhooks & Admin</h2>
         <div class="routing-grid">
@@ -250,23 +411,39 @@
           </div>
           <div class="routing-card">
             <h4>Admin</h4>
-            <div class="field-group"><label>Admin Channel</label><input type="text" id="ch-admin" placeholder="Channel ID" /></div>
-            <div class="hint">Receives system alerts, errors, health reports</div>
+            <div class="field-group"><label>Watchlist Channel</label><input type="text" id="ch-watchlist" placeholder="High-priority watchlist alerts" /></div>
+            <div class="field-group"><label>Admin Channel</label><input type="text" id="ch-admin" placeholder="System alerts & errors" /></div>
           </div>
         </div>
       </div>
 
-      <!-- Save Bar -->
       <div class="save-bar">
-        <span class="saved-indicator" id="savedMsg">Saved</span>
-        <button class="btn-success" onclick="saveChannels()" style="padding:10px 28px;font-size:14px">Save Channel Config</button>
+        <span class="saved-indicator" id="savedMsg">Saved successfully</span>
+        <button class="btn btn-success" onclick="saveChannels()" style="padding:10px 32px;font-size:14px">Save Config</button>
       </div>
     </div>
 
-    <!-- Log -->
-    <div class="section">
+    <!-- Proxies Tab -->
+    <div id="tab-proxies" class="tab-content">
+      <div class="section">
+        <h2>ISP Proxy Pool <span class="badge" id="proxyPoolCount">--</span></h2>
+        <p style="font-size:12px;color:#52525b;margin-bottom:14px">Canadian ISP proxies with sticky sessions per retailer. 30-min auto-cooldown on block.</p>
+        <div class="grid" id="proxyGrid"></div>
+      </div>
+      <div class="section">
+        <h2>Proxy Assignment</h2>
+        <p style="font-size:12px;color:#52525b;margin-bottom:14px">Which retailers are using ISP proxies and their current stats.</p>
+        <table>
+          <thead><tr><th>Retailer</th><th>Proxy Tier</th><th>Requests</th><th>Blocked</th><th>Block Rate</th><th>Status</th></tr></thead>
+          <tbody id="proxyRetailerTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Activity Log -->
+    <div class="section" style="margin-top:8px">
       <h2>Activity Log</h2>
-      <div id="log">Waiting for connection...</div>
+      <div class="log-box" id="log">Waiting for connection...</div>
     </div>
   </div>
 

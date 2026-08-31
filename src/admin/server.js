@@ -13,8 +13,8 @@ function createAdminServer() {
 
   // API key auth for admin routes
   app.use('/api', (req, res, next) => {
-    // Health endpoint is public
-    if (req.path === '/health') return next();
+    // Public endpoints (no auth needed)
+    if (req.path === '/health' || req.path === '/bootstrap') return next();
 
     const key = req.headers['x-api-key'] || req.query.key;
     if (key !== config.admin.apiKey) {
@@ -24,6 +24,11 @@ function createAdminServer() {
   });
 
   app.use('/api', routes);
+
+  // Inject API key into dashboard so it auto-connects
+  app.get('/api/bootstrap', (req, res) => {
+    res.json({ key: config.admin.apiKey });
+  });
 
   // Serve admin UI
   app.use(express.static(path.join(__dirname, '../../admin-ui')));

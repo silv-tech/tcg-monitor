@@ -6,9 +6,8 @@
     "adapter": "ebgames",
     "intervalMs": 60000,
     "proxyTier": "none",
-    "enabled": false,
-    "color": "#e31937",
-    "_note": "Site in maintenance (Odoo rebuild). Disabled until it comes back."
+    "enabled": true,
+    "color": "#e31937"
   },
   {
     "id": "bestbuy",
@@ -27,7 +26,7 @@
     "url": "https://www.costco.ca",
     "adapter": "costco",
     "intervalMs": 45000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": true,
     "color": "#e31837",
     "watchlist": ["4201042492", "2007494"]
@@ -38,10 +37,9 @@
     "url": "https://www.pokemoncenter.com",
     "adapter": "pokemoncenter",
     "intervalMs": 45000,
-    "proxyTier": "residential",
+    "proxyTier": "isp",
     "enabled": true,
-    "color": "#ffcb05",
-    "_note": "Imperva Incapsula — needs TLS fingerprinting or headless browser"
+    "color": "#ffcb05"
   },
   {
     "id": "walmart",
@@ -49,7 +47,7 @@
     "url": "https://www.walmart.ca",
     "adapter": "walmart",
     "intervalMs": 60000,
-    "proxyTier": "residential",
+    "proxyTier": "isp",
     "enabled": true,
     "color": "#0071dc"
   },
@@ -59,10 +57,9 @@
     "url": "https://www.amazon.ca",
     "adapter": "amazon",
     "intervalMs": 60000,
-    "proxyTier": "residential",
+    "proxyTier": "isp",
     "enabled": true,
-    "color": "#ff9900",
-    "_note": "Akamai Bot Manager — needs TLS fingerprinting or headless browser"
+    "color": "#ff9900"
   },
   {
     "id": "401games",

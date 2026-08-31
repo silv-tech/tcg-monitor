@@ -1,21 +1,38 @@
 const logger = require('../monitoring/logger');
 const { sleep } = require('./helpers');
 
-let gotScraping;
+let impitModule;
 
-async function getGotScraping() {
-  if (!gotScraping) {
-    // got-scraping is ESM-only, must use dynamic import
-    const mod = await import('got-scraping');
-    gotScraping = mod.gotScraping;
+async function getImpit() {
+  if (!impitModule) {
+    // impit is ESM-only, must use dynamic import
+    impitModule = await import('impit');
   }
-  return gotScraping;
+  return impitModule.Impit;
+}
+
+// Cache Impit instances per proxy URL to reuse connections
+const impitCache = new Map();
+
+async function getImpitInstance(proxyUrl) {
+  const cacheKey = proxyUrl || '__direct__';
+  if (impitCache.has(cacheKey)) return impitCache.get(cacheKey);
+
+  const Impit = await getImpit();
+  const instance = new Impit({
+    browser: 'chrome',
+    proxyUrl: proxyUrl || undefined,
+    ignoreTlsErrors: false,
+  });
+
+  impitCache.set(cacheKey, instance);
+  return instance;
 }
 
 /**
- * Stealth HTTP GET with browser-like TLS fingerprinting.
- * Uses got-scraping which randomizes JA3/JA4 fingerprints to mimic real browsers.
- * Use this for sites with Akamai, Incapsula, PerimeterX, or Cloudflare bot detection.
+ * Stealth HTTP GET with real browser TLS fingerprinting.
+ * Uses impit (Apify) which spoofs JA3/JA4 fingerprints via Rust/BoringSSL
+ * to match real Chrome. Bypasses Imperva Incapsula, Akamai, Cloudflare.
  */
 async function stealthGet(url, opts = {}) {
   const {
@@ -27,48 +44,60 @@ async function stealthGet(url, opts = {}) {
     headers = {},
   } = opts;
 
-  const got = await getGotScraping();
-
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await got({
-        url,
-        proxyUrl: proxyUrl || undefined,
-        timeout: { request: timeoutMs },
+      const impit = await getImpitInstance(proxyUrl);
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      const response = await impit.fetch(url, {
         headers: {
-          'accept-language': 'en-CA,en-US;q=0.9,en;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Cache-Control': 'no-cache',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
           ...headers,
         },
-        // Use Chrome-like fingerprint
-        headerGeneratorOptions: {
-          browsers: [{ name: 'chrome', minVersion: 120, maxVersion: 127 }],
-          devices: ['desktop'],
-          operatingSystems: ['windows'],
-          locales: ['en-CA', 'en-US'],
-        },
-        responseType: json ? 'json' : 'text',
-        retry: { limit: 0 }, // We handle retries ourselves
+        signal: controller.signal,
       });
 
-      if (response.statusCode === 429) {
-        const retryAfter = parseInt(response.headers['retry-after'] || '5') * 1000;
+      clearTimeout(timeout);
+
+      if (response.status === 429) {
+        const retryAfter = parseInt(response.headers.get('retry-after') || '5') * 1000;
         logger.warn(`Stealth: rate limited on ${url}, waiting ${retryAfter}ms`);
         await sleep(retryAfter);
         continue;
       }
 
-      if (response.statusCode === 403 || response.statusCode === 503) {
-        logger.warn(`Stealth: blocked (${response.statusCode}) on ${url}, attempt ${attempt}/${maxRetries}`);
+      if (response.status === 403 || response.status === 503) {
+        logger.warn(`Stealth: blocked (${response.status}) on ${url}, attempt ${attempt}/${maxRetries}`);
+        // Clear cached instance on block — next attempt gets a fresh connection
+        const cacheKey = proxyUrl || '__direct__';
+        impitCache.delete(cacheKey);
         if (attempt < maxRetries) {
           await sleep(retryDelayMs * attempt);
           continue;
         }
-        throw new Error(`Blocked after ${maxRetries} stealth attempts: ${response.statusCode}`);
+        throw new Error(`Blocked after ${maxRetries} stealth attempts: ${response.status}`);
       }
 
-      return response.body;
+      if (json) {
+        return await response.json();
+      }
+      return await response.text();
     } catch (err) {
       if (err.message?.includes('Blocked after')) throw err;
+
+      // Clear cached instance on error
+      const cacheKey = proxyUrl || '__direct__';
+      impitCache.delete(cacheKey);
 
       logger.warn(`Stealth: error on ${url}: ${err.message}, attempt ${attempt}/${maxRetries}`);
       if (attempt === maxRetries) throw err;

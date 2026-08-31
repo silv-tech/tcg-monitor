@@ -1,11 +1,10 @@
 const BaseAdapter = require('./base');
 const cheerio = require('cheerio');
-const fetch = require('node-fetch');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { recordRequest } = require('../core/proxy');
-
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
+const { httpGet } = require('../utils/http');
+const { getNextIspProxy, recordRequest, markProxySuccess, markProxyBlocked } = require('../core/proxy');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 class CostcoAdapter extends BaseAdapter {
   constructor(config) {
@@ -27,22 +26,39 @@ class CostcoAdapter extends BaseAdapter {
     }
   }
 
-  // Direct fetch that handles 404 gracefully (no throw, no connection pool issues)
+  // Proxy-aware fetch that handles 404 gracefully (no throw on 404)
   async directFetch(url) {
+    const fetch = require('node-fetch');
+    const proxyObj = this.proxyTier === 'isp' ? getNextIspProxy(this.id) : null;
+    const proxyUrl = proxyObj ? proxyObj.url : null;
+    const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const res = await fetch(url, {
-        headers: { 'User-Agent': UA, 'Accept-Language': 'en-CA,en;q=0.9' },
+        headers: {
+          'User-Agent': this._stickyUA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-CA,en;q=0.9',
+        },
+        agent,
         signal: controller.signal,
       });
       clearTimeout(timer);
+      if (proxyObj) markProxySuccess(proxyObj);
       if (res.status === 404) return { status: 404, html: null };
+      if (res.status === 403 || res.status === 503) {
+        if (proxyObj) markProxyBlocked(proxyObj);
+        return { status: res.status, html: null };
+      }
       if (!res.ok) return { status: res.status, html: null };
       const html = await res.text();
       return { status: 200, html };
     } catch (err) {
       clearTimeout(timer);
+      if (proxyObj && (err.message?.includes('ECONNREFUSED') || err.message?.includes('socket hang up'))) {
+        markProxyBlocked(proxyObj);
+      }
       throw err;
     }
   }
@@ -121,7 +137,9 @@ class CostcoAdapter extends BaseAdapter {
     const url = `${this.url}/p/-/x/${productId}`;
     const { status, html } = await this.directFetch(url);
 
-    recordRequest(this.id, status !== 200);
+    // 404 = not live yet (expected for watchlist), don't count as blocked
+    const isBlocked = status === 403 || status === 503;
+    recordRequest(this.id, isBlocked, this.proxyTier);
 
     if (status === 404) {
       if (this.watchlist.has(productId)) {
@@ -133,7 +151,11 @@ class CostcoAdapter extends BaseAdapter {
     if (!html) return null;
 
     // JSON-LD first (fast, reliable). RSC fallback for edge cases.
-    return this.parseJsonLd(html, productId) || this.parseRSC(html, productId);
+    const product = this.parseJsonLd(html, productId) || this.parseRSC(html, productId);
+    if (!product && this.watchlist.has(productId)) {
+      logger.warn(`Costco: WATCHLIST item ${productId} returned 200 but failed to parse — page structure may have changed`);
+    }
+    return product;
   }
 
   // Parse JSON-LD — uses indexOf (pages are 2MB+, regex backtracks catastrophically)
@@ -163,7 +185,7 @@ class CostcoAdapter extends BaseAdapter {
     const availability = productData.offers?.availability || '';
     const inStock = availability.includes('InStock');
 
-    return this.classify({
+    const product = this.classify({
       sku: productData.sku || productId,
       name: productData.name,
       price:
@@ -177,6 +199,8 @@ class CostcoAdapter extends BaseAdapter {
       canAddToCart: inStock,
       shipsToHome: true,
     });
+    if (this.watchlist.has(productId)) product._watchlist = true;
+    return product;
   }
 
   // Parse RSC data — fallback if JSON-LD absent
@@ -201,7 +225,7 @@ class CostcoAdapter extends BaseAdapter {
 
     if (!nameMatch) return null;
 
-    return this.classify({
+    const product = this.classify({
       sku: productId,
       name: nameMatch[1],
       price: priceMatch ? parseFloat(priceMatch[1]) : 0,
@@ -212,6 +236,8 @@ class CostcoAdapter extends BaseAdapter {
       canAddToCart: true,
       shipsToHome: chunk.includes('ShipIt'),
     });
+    if (this.watchlist.has(productId)) product._watchlist = true;
+    return product;
   }
 
   addProductId(id) {

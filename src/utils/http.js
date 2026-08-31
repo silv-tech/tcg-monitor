@@ -12,11 +12,20 @@ const DEFAULT_HEADERS = {
 };
 
 const UA_LIST = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
 ];
+
+// Sticky UA per caller — same retailer always uses same UA string
+const stickyUAMap = new Map();
+function getUA(key) {
+  if (key && stickyUAMap.has(key)) return stickyUAMap.get(key);
+  const ua = UA_LIST[Math.floor(Math.random() * UA_LIST.length)];
+  if (key) stickyUAMap.set(key, ua);
+  return ua;
+}
 
 function randomUA() {
   return UA_LIST[Math.floor(Math.random() * UA_LIST.length)];
@@ -30,9 +39,11 @@ async function httpGet(url, opts = {}) {
     retryDelayMs = 2000,
     timeoutMs = 15000,
     json = false,
+    stickyKey = null,
   } = opts;
 
   const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+  const ua = stickyKey ? getUA(stickyKey) : randomUA();
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
@@ -42,7 +53,7 @@ async function httpGet(url, opts = {}) {
       const res = await fetch(url, {
         headers: {
           ...DEFAULT_HEADERS,
-          'User-Agent': randomUA(),
+          'User-Agent': ua,
           ...headers,
         },
         agent,

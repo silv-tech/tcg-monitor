@@ -3,6 +3,19 @@ let apiKey = '';
 let channelsData = null;
 let retailersList = [];
 
+// Auto-connect on page load
+(async function boot() {
+  try {
+    const res = await fetch(`${BASE}/bootstrap`);
+    const { key } = await res.json();
+    apiKey = key;
+    await loadAll();
+  } catch {
+    log('Auto-connect failed — server may be starting up. Retrying in 3s...');
+    setTimeout(boot, 3000);
+  }
+})();
+
 function headers() {
   return { 'Content-Type': 'application/json', 'x-api-key': apiKey };
 }
@@ -28,17 +41,18 @@ function switchTab(name) {
 
   if (name === 'performance') loadPerformance();
   if (name === 'channels') loadChannels();
+  if (name === 'proxies') loadProxies();
 }
 
 async function loadAll() {
-  apiKey = document.getElementById('apiKey').value;
   try {
     await Promise.all([loadHealth(), loadRetailers(), loadProducts(), loadStats()]);
     log('Connected successfully');
   } catch (err) {
     log('Error: ' + err.message);
-    document.getElementById('sysStatus').textContent = 'Error';
-    document.getElementById('sysStatus').className = 'status bad';
+    const el = document.getElementById('sysStatus');
+    el.innerHTML = '<span class="pulse"></span> Error';
+    el.className = 'status-pill bad';
   }
 }
 
@@ -50,48 +64,69 @@ async function loadHealth() {
     const total = data.retailers.length;
 
     if (data.status === 'ok') {
-      el.textContent = 'Healthy';
-      el.className = 'status ok';
+      el.innerHTML = '<span class="pulse"></span> Healthy';
+      el.className = 'status-pill ok';
     } else {
-      el.textContent = 'Degraded';
-      el.className = 'status warn';
+      el.innerHTML = '<span class="pulse"></span> Degraded';
+      el.className = 'status-pill warn';
     }
     document.getElementById('statRetailers').textContent = total;
     document.getElementById('statRetailersSub').textContent = `${healthy} healthy`;
   } catch {
-    document.getElementById('sysStatus').textContent = 'Down';
-    document.getElementById('sysStatus').className = 'status bad';
+    const el = document.getElementById('sysStatus');
+    el.innerHTML = '<span class="pulse"></span> Down';
+    el.className = 'status-pill bad';
   }
 }
 
 async function loadRetailers() {
-  retailersList = await api('/retailers');
+  const [retailers, circuits] = await Promise.all([
+    api('/retailers'),
+    api('/stats/circuits').catch(() => ({})),
+  ]);
+  retailersList = retailers;
   const enabled = retailersList.filter(r => r.enabled).length;
   document.getElementById('retailerCount').textContent = `${enabled} active / ${retailersList.length} total`;
 
   const grid = document.getElementById('retailersGrid');
   grid.innerHTML = retailersList.map(r => {
-    const dotClass = r.enabled ? 'green' : 'yellow';
+    const cb = circuits[r.id];
+    const isCircuitOpen = cb && cb.state === 'open';
+    const dotClass = !r.enabled ? 'dot-yellow' : isCircuitOpen ? 'dot-red' : 'dot-green';
     const adapter = r.adapter || '—';
     const proxy = r.proxyTier === 'none' ? 'Direct' : r.proxyTier;
     const interval = (r.intervalMs / 1000).toFixed(0);
-    const note = r._note ? `<div style="font-size:11px;color:#666;margin-top:4px;font-style:italic">${r._note}</div>` : '';
+    const note = r._note ? `<div class="r-note">${r._note}</div>` : '';
+
+    // Circuit breaker status note
+    let cbNote = '';
+    if (isCircuitOpen) {
+      cbNote = `<div class="r-note" style="color:#f87171">Auto-paused (${cb.errors} errors, ${cb.downtimeMin}min). Recovery probe every 5 min.</div>`;
+    } else if (cb && cb.errors > 0) {
+      cbNote = `<div class="r-note" style="color:#facc15">${cb.errors} consecutive error${cb.errors > 1 ? 's' : ''} — trips at 5</div>`;
+    }
+
     return `
-      <div class="card">
-        <div class="name">
-          <span class="health-dot ${dotClass}"></span>
-          <span style="border-left:3px solid ${r.color || '#555'};padding-left:8px">${r.name}</span>
+      <div class="r-card">
+        <div class="color-bar" style="background:${r.color || '#3f3f46'}"></div>
+        <div class="r-header">
+          <div class="r-name"><span class="dot ${dotClass}"></span>${r.name}</div>
+          <div style="display:flex;gap:6px">
+            <button class="toggle-btn" onclick="toggleRetailer('${r.id}', ${!r.enabled})">
+              ${r.enabled ? 'Disable' : 'Enable'}
+            </button>
+            <button class="toggle-btn" style="color:#ef4444;border-color:#3f3f46" onclick="removeRetailer('${r.id}','${r.name.replace(/'/g, "\\'")}')">
+              Remove
+            </button>
+          </div>
         </div>
-        <div class="meta">
-          Adapter: <span class="val">${adapter}</span> &bull;
-          Interval: <span class="val">${interval}s</span> &bull;
-          Proxy: <span class="val">${proxy}</span>
-          ${note}
-          <br>
-          <button class="toggle" onclick="toggleRetailer('${r.id}', ${!r.enabled})">
-            ${r.enabled ? 'Disable' : 'Enable'}
-          </button>
+        <div class="r-meta">
+          <span>${adapter}</span>
+          <span>${interval}s</span>
+          <span>${proxy}</span>
         </div>
+        ${note}
+        ${cbNote}
       </div>
     `;
   }).join('');
@@ -103,14 +138,59 @@ async function toggleRetailer(id, enabled) {
   await loadRetailers();
 }
 
+async function removeRetailer(id, name) {
+  if (!confirm(`Remove "${name}" from the retailer list? This can be re-added later.`)) return;
+  try {
+    await api(`/retailers/${id}`, { method: 'DELETE' });
+    log(`Removed retailer: ${name}`);
+    await loadRetailers();
+  } catch (err) {
+    log(`Failed to remove ${name}: ${err.message}`);
+  }
+}
+
+async function addRetailer() {
+  const id = document.getElementById('newRetailerId').value.trim();
+  const name = document.getElementById('newRetailerName').value.trim();
+  const url = document.getElementById('newRetailerUrl').value.trim();
+  const adapter = document.getElementById('newRetailerAdapter').value;
+  const proxyTier = document.getElementById('newRetailerProxy').value;
+  if (!id || !name || !url) { log('Retailer ID, name, and URL are required'); return; }
+
+  try {
+    await api('/retailers', {
+      method: 'POST',
+      body: JSON.stringify({ id, name, url, adapter, proxyTier }),
+    });
+    log(`Added retailer: ${name} (${id})`);
+    // Clear form
+    document.getElementById('newRetailerId').value = '';
+    document.getElementById('newRetailerName').value = '';
+    document.getElementById('newRetailerUrl').value = '';
+    await loadRetailers();
+  } catch (err) {
+    log(`Failed to add retailer: ${err.message}`);
+  }
+}
+
 async function loadProducts() {
-  const data = await api('/products');
-  document.getElementById('statProducts').textContent = data.tracked.length;
+  const [data, prodStats] = await Promise.all([
+    api('/products'),
+    api('/stats/products').catch(() => ({ total: 0, byRetailer: {} })),
+  ]);
+
+  // Show actual discovered product count from Redis, not the empty tracked[] array
+  document.getElementById('statProducts').textContent = prodStats.total;
+  const retailers = Object.entries(prodStats.byRetailer);
+  const sub = document.getElementById('statProductsSub');
+  if (sub) sub.textContent = retailers.length > 0
+    ? `across ${retailers.length} retailer${retailers.length > 1 ? 's' : ''}`
+    : 'discovering...';
 
   const kwEl = document.getElementById('keywordsList');
   kwEl.innerHTML = data.keywords.map(kw => `
-    <span style="display:inline-block;background:#333;padding:3px 10px;border-radius:12px;margin:3px;font-size:13px;">
-      ${kw} <span style="cursor:pointer;color:#f87171;margin-left:4px;" onclick="removeKeyword('${kw}')">&times;</span>
+    <span class="keyword-tag">
+      ${kw} <span class="remove" onclick="removeKeyword('${kw}')">&times;</span>
     </span>
   `).join('');
 
@@ -163,7 +243,7 @@ async function loadPerformance() {
           ${avgLatency}ms
           ${avgLatency !== '—' ? `<div class="latency-bar"><div class="fill ${latencyClass}" style="width:${Math.min(avgLatency / 100, 100)}%"></div></div>` : ''}
         </td>
-        <td><span class="status ${statusClass}">${statusText}</span></td>
+        <td><span class="status-pill ${statusClass}" style="display:inline-flex"><span class="pulse"></span> ${statusText}</span></td>
       </tr>
     `;
   }).join('');
@@ -225,9 +305,9 @@ async function loadChannels() {
   const retGrid = document.getElementById('retailerChannelsGrid');
   const enabledRetailers = retailersList.filter(r => r.enabled);
   retGrid.innerHTML = enabledRetailers.map(r => `
-    <div class="card" style="padding:10px">
+    <div class="routing-card" style="padding:12px">
       <div class="routing-row" style="margin:0">
-        <label style="min-width:120px;font-weight:500;color:#fff">${r.name}</label>
+        <label style="min-width:120px;font-weight:500;color:#fafafa">${r.name}</label>
         <input type="text" id="rch-${r.id}" value="${retCh[r.id] || ''}" placeholder="Channel ID (optional)" />
       </div>
     </div>
@@ -261,7 +341,8 @@ async function loadChannels() {
   setVal('wh-paid', c.webhooks?.paid_default || '');
   setVal('wh-free', c.webhooks?.free_default || '');
 
-  // Admin
+  // Watchlist + Admin
+  setVal('ch-watchlist', c.watchlistChannel || '');
   setVal('ch-admin', c.adminChannel || '');
 }
 
@@ -306,6 +387,7 @@ async function saveChannels() {
       paidMember: getVal('role-paidMember'),
       allAlerts: getVal('role-allAlerts'),
     },
+    watchlistChannel: getVal('ch-watchlist'),
     adminChannel: getVal('ch-admin'),
     webhooks: {
       paid_default: getVal('wh-paid'),
@@ -370,16 +452,91 @@ async function removeSku(retailer, sku) {
   await loadProducts();
 }
 
+// ─── Proxies Tab ─────────────────────────────────────────────────
+
+async function loadProxies() {
+  const stats = await api('/stats/proxy');
+  const pool = stats.proxyPool || [];
+
+  const healthy = pool.filter(p => p.healthy && p.requests > 0).length;
+  const blocked = pool.filter(p => p.blocked > 0 && !p.healthy).length;
+  const idle = pool.filter(p => p.requests === 0 && p.healthy).length;
+  document.getElementById('proxyPoolCount').textContent = `${healthy} active / ${blocked} cooldown / ${idle} idle`;
+
+  const grid = document.getElementById('proxyGrid');
+  const maxReqs = Math.max(1, ...pool.map(p => p.requests));
+
+  grid.innerHTML = pool.map(p => {
+    const ip = p.url.split('@')[1] || p.url;
+    const state = p.blocked > 0 && !p.healthy ? 'blocked' : p.requests > 0 ? 'healthy' : 'idle';
+    const cooldownMin = Math.ceil(p.cooldownRemaining / 60000);
+    const cooldownText = cooldownMin > 0 ? `<div class="proxy-cooldown">Cooldown: ${cooldownMin} min remaining</div>` : '';
+    const barWidth = (p.requests / maxReqs * 100).toFixed(0);
+    const assignLabel = p.assignedTo
+      ? `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#27272a;color:#a1a1aa;font-weight:500;text-transform:uppercase;letter-spacing:0.5px">${p.assignedTo}</span>`
+      : '<span style="font-size:10px;color:#3f3f46">unassigned</span>';
+
+    return `
+      <div class="proxy-card ${state}">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="proxy-ip">#${p.index} ${ip}</div>
+          <span class="status-pill ${state === 'blocked' ? 'bad' : state === 'healthy' ? 'ok' : 'off'}" style="font-size:11px;padding:2px 8px">
+            <span class="pulse"></span> ${state === 'blocked' ? 'Cooldown' : state === 'healthy' ? 'Active' : 'Idle'}
+          </span>
+        </div>
+        <div class="proxy-status">
+          <span>Assigned: ${assignLabel}</span>
+          <span>Requests: <span class="val">${p.requests}</span></span>
+          <span>Blocked: <span class="val">${p.blocked}</span></span>
+        </div>
+        ${cooldownText}
+        <div class="proxy-bar"><div class="fill" style="width:${barWidth}%;${state === 'blocked' ? 'background:#f87171' : ''}"></div></div>
+      </div>
+    `;
+  }).join('');
+
+  // Proxy retailer assignment table
+  const ispRetailers = retailersList.filter(r => r.proxyTier === 'isp');
+  const tbody = document.getElementById('proxyRetailerTable');
+  tbody.innerHTML = ispRetailers.map(r => {
+    const d = stats.byRetailer?.[r.id] || { requests: 0, blocked: 0 };
+    const blockRate = d.requests > 0 ? ((d.blocked / d.requests) * 100).toFixed(1) : '0';
+    const statusClass = d.blocked === 0 ? 'ok' : parseFloat(blockRate) > 50 ? 'bad' : 'warn';
+    const statusText = d.blocked === 0 ? 'Clean' : parseFloat(blockRate) > 50 ? 'Struggling' : 'Partial';
+    return `
+      <tr>
+        <td>${r.name}</td>
+        <td><span style="color:#60a5fa;font-weight:500">ISP</span></td>
+        <td>${d.requests}</td>
+        <td>${d.blocked}</td>
+        <td>${blockRate}%</td>
+        <td><span class="status-pill ${statusClass}" style="display:inline-flex;font-size:11px;padding:2px 8px"><span class="pulse"></span> ${statusText}</span></td>
+      </tr>
+    `;
+  }).join('');
+
+  if (ispRetailers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#52525b;text-align:center">No retailers using ISP proxies</td></tr>';
+  }
+}
+
 function formatNum(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return String(n);
 }
 
-// Auto-refresh every 30s
+// Live auto-refresh
 setInterval(() => {
   if (apiKey) {
     loadHealth();
     loadStats();
+  }
+}, 10000);
+
+setInterval(() => {
+  if (apiKey) {
+    loadRetailers();
+    loadProducts();
   }
 }, 30000);

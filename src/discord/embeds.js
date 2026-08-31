@@ -45,33 +45,56 @@ function buildAlertEmbed(event, tier) {
     .setColor(cfg.color)
     .setTimestamp();
 
+  // ── Author: retailer branding ──
+  embed.setAuthor({ name: product.retailer });
+
   // ── Title: product name (clickable link) ──
   embed.setTitle(product.name);
   if (product.url) embed.setURL(product.url);
 
-  // ── Author: retailer + event type ──
-  embed.setAuthor({ name: `${product.retailer}  ·  ${cfg.label}` });
-
   // ── Thumbnail ──
   if (product.image) embed.setThumbnail(product.image);
 
-  // ── Price line ──
+  // ── Inline fields (Zephyr style) ──
+
+  // Price field
   if (type === EVENT_TYPES.PRICE_CHANGE && oldValue != null && newValue != null) {
     const saved = oldValue - newValue;
     if (saved > 0) {
       const pct = ((saved / oldValue) * 100).toFixed(0);
-      embed.setDescription(`~~$${oldValue.toFixed(2)}~~ **$${newValue.toFixed(2)} CAD** (-${pct}%)`);
+      embed.addFields({ name: 'Price', value: `~~$${oldValue.toFixed(2)}~~ **$${newValue.toFixed(2)} CAD** (-${pct}%)`, inline: true });
     } else {
-      embed.setDescription(`~~$${oldValue.toFixed(2)}~~ **$${newValue.toFixed(2)} CAD**`);
+      embed.addFields({ name: 'Price', value: `$${newValue.toFixed(2)} CAD`, inline: true });
     }
-  } else if (product.price != null) {
-    embed.setDescription(`**$${product.price.toFixed(2)} CAD**`);
+  } else if (product.price != null && product.price > 0) {
+    embed.addFields({ name: 'Price', value: `$${product.price.toFixed(2)} CAD`, inline: true });
+  } else {
+    embed.addFields({ name: 'Price', value: 'TBD', inline: true });
   }
 
-  // ── Footer: stock + tier ──
-  const stock = product.inStock ? 'In Stock' : 'Out of Stock';
+  // Type field
+  embed.addFields({ name: 'Type', value: cfg.label, inline: true });
+
+  // SKU field
+  if (product.sku) {
+    embed.addFields({ name: 'SKU', value: String(product.sku), inline: true });
+  }
+
+  // Stock indicator
+  const stockIcon = product.inStock ? '\u{1F7E2}' : '\u{1F534}';
+  embed.addFields({ name: 'Online Stock', value: stockIcon, inline: true });
+
+  // Cart status
+  const cartIcon = product.canAddToCart ? '\u{1F7E2}' : '\u{1F534}';
+  embed.addFields({ name: 'Add to Cart', value: cartIcon, inline: true });
+
+  // Ships to home
+  const shipIcon = product.shipsToHome ? '\u{1F7E2}' : '\u{1F534}';
+  embed.addFields({ name: 'Ships Home', value: shipIcon, inline: true });
+
+  // ── Footer ──
   const tierLabel = tier === 'paid' ? 'Premium' : 'Free';
-  embed.setFooter({ text: `${stock}  ·  ${tierLabel}  ·  TCG Monitor` });
+  embed.setFooter({ text: `TCG Monitor  ·  ${tierLabel}` });
 
   // ── Button ──
   const components = [];
