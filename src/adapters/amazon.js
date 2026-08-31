@@ -2,6 +2,7 @@ const BaseAdapter = require('./base');
 const cheerio = require('cheerio');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
+const { classifyError } = require('../core/failure-reasons');
 
 let cookieSession;
 try { cookieSession = require('../utils/cookie-session'); } catch { cookieSession = null; }
@@ -41,7 +42,7 @@ class AmazonAdapter extends BaseAdapter {
 
         // Check if we got a challenge page from the browser
         if (this._isChallenge(html)) {
-          logger.warn(`Amazon: browser also returned challenge page for ${searchUrl}`);
+          logger.warn(`Amazon: browser returned challenge page for ${searchUrl}`, { reason: 'bot_challenge' });
           continue;
         }
 
@@ -51,7 +52,7 @@ class AmazonAdapter extends BaseAdapter {
         if (resultCount === 0) {
           // Log diagnostic info
           const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || 'unknown';
-          logger.warn(`Amazon: 0 results on page. Title: "${title}", HTML: ${html.length} bytes`);
+          logger.warn(`Amazon: 0 results on page. Title: "${title}", HTML: ${html.length} bytes`, { reason: 'parse_error' });
           continue;
         }
 
@@ -108,7 +109,7 @@ class AmazonAdapter extends BaseAdapter {
           }
         });
       } catch (err) {
-        logger.warn(`Amazon: failed to fetch search: ${err.message}`);
+        logger.warn(`Amazon: failed to fetch search: ${err.message}`, { reason: classifyError(err) });
       }
     }
 

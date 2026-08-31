@@ -2,6 +2,7 @@ const BaseAdapter = require('./base');
 const cheerio = require('cheerio');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
+const { classifyError } = require('../core/failure-reasons');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -32,9 +33,9 @@ class WalmartAdapter extends BaseAdapter {
       const html = await this.browserFetch(searchUrl, { timeoutMs: 35000 });
       if (!this.isChallengePage(html)) return html;
       const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || 'unknown';
-      logger.warn(`Walmart: browser returned challenge (title: "${title}", ${html.length} bytes) for ${searchUrl.split('?')[1]}`);
+      logger.warn(`Walmart: browser returned challenge (title: "${title}", ${html.length} bytes) for ${searchUrl.split('?')[1]}`, { reason: 'bot_challenge' });
     } catch (err) {
-      logger.warn(`Walmart: browserFetch failed for ${searchUrl.split('?')[1]}: ${err.message}`);
+      logger.warn(`Walmart: browserFetch failed for ${searchUrl.split('?')[1]}: ${err.message}`, { reason: classifyError(err) });
     }
 
     return null;
@@ -119,7 +120,7 @@ class WalmartAdapter extends BaseAdapter {
         // If we got HTML but no products, log a diagnostic snippet
         if (Object.keys(products).length === beforeCount) {
           const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || 'unknown';
-          logger.warn(`Walmart: got HTML (${html.length} bytes, title: "${title}") but parsed 0 products from ${searchUrl.split('?')[1]}`);
+          logger.warn(`Walmart: got HTML (${html.length} bytes, title: "${title}") but parsed 0 products from ${searchUrl.split('?')[1]}`, { reason: 'parse_error' });
         }
       } catch (err) {
         logger.warn(`Walmart: failed to fetch ${searchUrl}: ${err.message}`);

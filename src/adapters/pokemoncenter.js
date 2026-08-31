@@ -1,6 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
+const { FAILURE_REASONS, classifyError } = require('../core/failure-reasons');
 
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
@@ -62,16 +63,21 @@ class PokemonCenterAdapter extends BaseAdapter {
     const batchSize = Math.min(this.CHECKS_PER_POLL, entries.length);
 
     let checked = 0;
+    const failureCounts = {};
     for (let i = 0; i < batchSize; i++) {
       const idx = (start + i) % entries.length;
       const [sku, meta] = entries[idx];
       try {
-        const avail = await this.checkProductAvailability(sku, meta);
-        if (avail) {
-          this.availabilityCache.set(sku, avail);
+        const { data, failReason } = await this.checkProductAvailability(sku, meta);
+        if (data) {
+          this.availabilityCache.set(sku, data);
           checked++;
+        } else if (failReason) {
+          failureCounts[failReason] = (failureCounts[failReason] || 0) + 1;
         }
       } catch (err) {
+        const reason = classifyError(err);
+        failureCounts[reason] = (failureCounts[reason] || 0) + 1;
         logger.debug(`Pokemon Center: check failed for ${sku}: ${err.message}`);
       }
     }
@@ -94,7 +100,10 @@ class PokemonCenterAdapter extends BaseAdapter {
       });
     }
 
-    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} checked this poll)`);
+    const failureSummary = Object.keys(failureCounts).length > 0
+      ? Object.entries(failureCounts).map(([r, c]) => `${r}:${c}`).join(', ')
+      : 'none';
+    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} checked) — failures: ${failureSummary}`);
     return products;
   }
 
@@ -157,22 +166,35 @@ class PokemonCenterAdapter extends BaseAdapter {
     // Go straight to browser — Incapsula blocks all HTTP clients even with residential proxies
     try {
       html = await this.browserFetch(meta.url, { timeoutMs: 20000 });
-    } catch {
-      return null;
+    } catch (err) {
+      const reason = classifyError(err);
+      logger.warn(`Pokemon Center: fetch failed for ${sku}`, { reason, url: meta.url, error: err.message });
+      return { data: null, failReason: reason };
     }
 
-    if (!html || this.isChallengePage(html)) return null;
+    if (!html) {
+      logger.debug(`Pokemon Center: empty response for ${sku}`);
+      return { data: null, failReason: FAILURE_REASONS.EMPTY_RESPONSE };
+    }
+    if (this.isChallengePage(html)) {
+      logger.debug(`Pokemon Center: challenge page for ${sku}`);
+      return { data: null, failReason: FAILURE_REASONS.BOT_CHALLENGE };
+    }
 
     // Try JSON-LD first (most reliable)
     const jsonLd = this.parseJsonLd(html);
-    if (jsonLd) return jsonLd;
+    if (jsonLd) return { data: jsonLd, failReason: null };
 
     // Try __NEXT_DATA__ embedded JSON
     const nextData = this.parseNextData(html);
-    if (nextData) return nextData;
+    if (nextData) return { data: nextData, failReason: null };
 
     // Fallback: HTML text markers
-    return this.parseHtmlMarkers(html);
+    const markers = this.parseHtmlMarkers(html);
+    if (markers) return { data: markers, failReason: null };
+
+    logger.debug(`Pokemon Center: no parseable data for ${sku}`);
+    return { data: null, failReason: FAILURE_REASONS.NO_MARKERS };
   }
 
   parseJsonLd(html) {
@@ -191,7 +213,7 @@ class PokemonCenterAdapter extends BaseAdapter {
             image: json.image || '',
           };
         }
-      } catch { /* skip malformed JSON-LD */ }
+      } catch (err) { logger.debug(`Pokemon Center: malformed JSON-LD: ${err.message}`); }
       idx = end;
     }
     return null;
@@ -213,7 +235,8 @@ class PokemonCenterAdapter extends BaseAdapter {
 
       if (inStock === null) return null;
       return { inStock: !!inStock, price: typeof price === 'number' ? price : normalizePrice(String(price || '')), image };
-    } catch {
+    } catch (err) {
+      logger.debug(`Pokemon Center: __NEXT_DATA__ parse failed: ${err.message}`);
       return null;
     }
   }
