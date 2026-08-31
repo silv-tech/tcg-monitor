@@ -211,7 +211,10 @@ class DeliveryQueue {
   }
 
   async sendToChannel(channelId, embed, components, content, tier) {
-    if (!channelId) return;
+    if (!channelId) {
+      logger.error('Alert dropped: no channel ID provided');
+      return;
+    }
 
     // Try bot first
     if (this.client) {
@@ -224,6 +227,7 @@ class DeliveryQueue {
           await channel.send(payload);
           return;
         }
+        logger.warn(`Bot cannot access channel ${channelId} — channel not found or missing permissions`);
       } catch (err) {
         logger.warn(`Bot send failed for ${channelId}: ${err.message}, trying webhook fallback`);
       }
@@ -233,7 +237,11 @@ class DeliveryQueue {
     const webhookUrl = this.resolveWebhook(tier);
     if (webhookUrl) {
       await this.sendWebhook(webhookUrl, embed, content);
+      return;
     }
+
+    // BOTH paths failed — alert is lost
+    logger.error(`ALERT DROPPED: Could not deliver to channel ${channelId} — bot send failed and no webhook configured for ${tier} tier`);
   }
 
   async fetchChannel(channelId) {
@@ -242,7 +250,8 @@ class DeliveryQueue {
       const channel = await this.client.channels.fetch(channelId);
       this.channelCache.set(channelId, channel);
       return channel;
-    } catch {
+    } catch (err) {
+      logger.warn(`Channel fetch failed for ${channelId}: ${err.message}`);
       return null;
     }
   }

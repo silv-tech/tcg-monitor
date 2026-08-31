@@ -64,6 +64,44 @@ async function main() {
     logger.info('Seeded products.json from Redis');
   }
 
+  // 2b. Verify bot can access configured retailer channels
+  if (config.discord.token) {
+    const client = getClient();
+    if (client) {
+      let channelsConfig;
+      try { channelsConfig = require('./config/channels.json'); } catch { channelsConfig = null; }
+      const retailerChannels = channelsConfig?.retailerChannels || {};
+      const entries = Object.entries(retailerChannels).filter(([, id]) => id);
+
+      if (entries.length > 0) {
+        let accessible = 0;
+        let failed = 0;
+        for (const [retailerId, channelId] of entries) {
+          try {
+            await client.channels.fetch(channelId);
+            accessible++;
+          } catch (err) {
+            failed++;
+            logger.error(`CHANNEL ACCESS DENIED: ${retailerId} → ${channelId} (${err.message}). Alerts for this retailer will be DROPPED.`);
+          }
+        }
+        logger.info(`Channel verification: ${accessible}/${entries.length} retailer channels accessible${failed > 0 ? `, ${failed} FAILED` : ''}`);
+      }
+
+      // Also check default channels
+      const paidDefault = channelsConfig?.tiers?.paid?.channels?.default;
+      const freeDefault = channelsConfig?.tiers?.free?.channels?.default;
+      if (paidDefault) {
+        try { await client.channels.fetch(paidDefault); }
+        catch { logger.error(`DEFAULT PAID channel ${paidDefault} not accessible — alerts may be lost!`); }
+      }
+      if (freeDefault) {
+        try { await client.channels.fetch(freeDefault); }
+        catch { logger.error(`DEFAULT FREE channel ${freeDefault} not accessible — alerts may be lost!`); }
+      }
+    }
+  }
+
   // 3. Register adapters from config (merge Redis overrides so enabled/interval state persists)
   const baseRetailers = require('./config/retailers.json');
   const overrides = await stateModule.getRetailerOverrides();
