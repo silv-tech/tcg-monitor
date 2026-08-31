@@ -9,11 +9,20 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 class CostcoAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
-    this.tcgKeywords = [
-      'pokemon', 'pokmon', 'pokémon', 'tcg', 'trading-card', 'trading+card',
-      'trading%20card', 'one-piece', 'lorcana', 'magic-the-gathering',
-      'yugioh', 'yu-gi-oh', 'dragon-ball', 'naruto', 'booster',
-      'elite-trainer', 'trainer-box', 'collector', 'card-game',
+    // Game-specific keywords (high confidence — any single match is enough)
+    this.tcgGameKeywords = [
+      'pokemon', 'pokmon', 'pokémon', 'tcg',
+      'trading-card', 'trading+card', 'trading%20card',
+      'lorcana', 'magic-the-gathering',
+      'yugioh', 'yu-gi-oh',
+    ];
+    // Product name validation — after parsing, product name must contain one of these
+    this.tcgNameKeywords = [
+      'pokemon', 'pokémon', 'tcg', 'trading card', 'booster box', 'booster pack',
+      'booster tin', 'booster bundle', 'elite trainer', 'etb', 'collection box',
+      'one piece card', 'lorcana', 'magic: the gathering', 'magic the gathering',
+      'yu-gi-oh', 'yugioh', 'dragon ball card', 'commander kit', 'commander deck',
+      'naruto card', 'deck', 'starter kit',
     ];
     this.knownProductIds = new Set();
     this.lastSitemapScan = 0;
@@ -121,7 +130,7 @@ class CostcoAdapter extends BaseAdapter {
 
       $('url > loc').each((_, el) => {
         const url = $(el).text().trim().toLowerCase();
-        if (this.tcgKeywords.some((kw) => url.includes(kw))) {
+        if (this.tcgGameKeywords.some((kw) => url.includes(kw))) {
           const newMatch = url.match(/\/(\d{5,})\s*$/);
           const oldMatch = url.match(/\.product\.(\d{5,})\.html/);
           const id = newMatch?.[1] || oldMatch?.[1];
@@ -154,6 +163,15 @@ class CostcoAdapter extends BaseAdapter {
     const product = this.parseJsonLd(html, productId) || this.parseRSC(html, productId);
     if (!product && this.watchlist.has(productId)) {
       logger.warn(`Costco: WATCHLIST item ${productId} returned 200 but failed to parse — page structure may have changed`);
+    }
+    // Validate product name matches TCG — skip false positives from sitemap
+    if (product && !this.watchlist.has(productId)) {
+      const lowerName = product.name.toLowerCase();
+      const isTcg = this.tcgNameKeywords.some(kw => lowerName.includes(kw));
+      if (!isTcg) {
+        logger.debug(`Costco: skipping non-TCG product "${product.name}" (${productId})`);
+        return null;
+      }
     }
     return product;
   }

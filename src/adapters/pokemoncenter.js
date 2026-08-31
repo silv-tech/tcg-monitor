@@ -1,120 +1,92 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { normalizePrice } = require('../utils/helpers');
 
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
-    // Pokemon Center uses a JSON API for search
-    this.apiBase = 'https://www.pokemoncenter.com/api';
-    this.searchQueries = ['tcg', 'booster', 'elite trainer box', 'tin', 'collection'];
+    this.sitemapUrl = 'https://www.pokemoncenter.com/sitemaps/products.xml';
+    // TCG sealed product keywords for filtering sitemap URLs
+    this.tcgKeywords = [
+      'pokemon-tcg-', '-tcg-',
+      'booster-box', 'booster-bundle', 'elite-trainer-box',
+      'collection-box', 'special-collection', 'premium-collection',
+      'build-and-battle', 'league-battle-deck', 'ultra-premium',
+      'poster-collection', 'tech-sticker-collection',
+      'combined-powers', 'super-premium',
+      'scarlet-violet', 'prismatic-evolutions',
+      'surging-sparks', 'stellar-crown', 'twilight-masquerade',
+      'shrouded-fable', 'paldean-fates', 'paradox-rift',
+      'temporal-forces', 'obsidian-flames', 'paldea-evolved',
+      'astral-radiance', 'brilliant-stars', 'lost-origin',
+      'silver-tempest', 'crown-zenith',
+    ];
   }
 
   async fetchProducts() {
     const products = {};
 
-    for (const query of this.searchQueries) {
-      try {
-        // Pokemon Center uses Algolia-powered search or internal API
-        const searchUrl = `${this.url}/search?q=${encodeURIComponent(query)}`;
-        let html;
-        try {
-          html = await this.stealthFetch(searchUrl, { timeoutMs: 25000 });
-          if (html.includes('incapsula') || html.includes('_Incapsula_Resource') || html.length < 3000) {
-            throw new Error('Incapsula challenge detected');
-          }
-        } catch (stealthErr) {
-          logger.info(`Pokemon Center: stealth failed (${stealthErr.message}), trying browser fallback`);
-          html = await this.browserFetch(searchUrl, { timeoutMs: 30000, waitForSelector: '[data-testid="product-card"], .product-card' });
-        }
-
-        // Try to extract JSON data from script tags (Next.js / SSR data)
-        const jsonMatch = html.match(/__NEXT_DATA__\s*=\s*({.+?})\s*;?\s*<\/script>/s);
-        if (jsonMatch) {
-          try {
-            const data = JSON.parse(jsonMatch[1]);
-            this.parseNextData(data, products);
-            continue;
-          } catch (e) {
-            // Fall through to HTML parsing
-          }
-        }
-
-        // Fallback: parse HTML with cheerio
-        const cheerio = require('cheerio');
-        const $ = cheerio.load(html);
-
-        $('[data-testid="product-card"], .product-card, .product-tile').each((_, el) => {
-          try {
-            const $el = $(el);
-            const name = $el.find('[data-testid="product-name"], .product-name, h3').first().text().trim();
-            if (!name) return;
-
-            const href = $el.find('a').first().attr('href') || '';
-            const url = href.startsWith('http') ? href : `${this.url}${href}`;
-            const sku = href.split('/').pop() || name.replace(/\s+/g, '-').toLowerCase().slice(0, 50);
-
-            const priceText = $el.find('[data-testid="product-price"], .price').first().text();
-            const price = normalizePrice(priceText);
-
-            const image = $el.find('img').first().attr('src') || '';
-
-            const outOfStock = $el.find('.out-of-stock, [data-testid="oos"]').length > 0 ||
-              $el.text().toLowerCase().includes('out of stock') ||
-              $el.text().toLowerCase().includes('sold out');
-
-            const product = this.classify({
-              sku,
-              name,
-              price,
-              currency: 'CAD',
-              url,
-              image,
-              inStock: !outOfStock,
-              canAddToCart: !outOfStock,
-              shipsToHome: true,
-            });
-
-            products[product.sku] = product;
-          } catch (err) {
-            logger.debug(`Pokemon Center: failed to parse element: ${err.message}`);
-          }
-        });
-      } catch (err) {
-        logger.warn(`Pokemon Center: failed search for "${query}": ${err.message}`);
-      }
-    }
-
-    if (Object.keys(products).length === 0 && this.searchQueries.length > 0) {
-      throw new Error('All searches returned 0 products — Incapsula may be blocking');
-    }
-
-    return products;
-  }
-
-  parseNextData(data, products) {
+    // Fetch the products sitemap — this endpoint has lighter DataDome protection
+    let xml;
     try {
-      const pageProps = data?.props?.pageProps;
-      if (!pageProps) return;
+      xml = await this.stealthFetch(this.sitemapUrl, { timeoutMs: 30000 });
+    } catch (stealthErr) {
+      logger.info(`Pokemon Center: stealth sitemap failed (${stealthErr.message}), trying browser`);
+      xml = await this.browserFetch(this.sitemapUrl, { timeoutMs: 45000 });
+    }
 
-      const items = pageProps.searchResults?.products || pageProps.products || [];
-      for (const item of items) {
+    // Verify we got actual XML, not a challenge page
+    if (!xml.includes('<loc>') || xml.includes('Pardon Our Interruption')) {
+      throw new Error('Sitemap returned challenge page — DataDome blocking');
+    }
+
+    // Parse product URLs from sitemap
+    const urlMatches = xml.match(/<loc>([^<]+)<\/loc>/g) || [];
+
+    for (const match of urlMatches) {
+      try {
+        const url = match.replace(/<\/?loc>/g, '');
+        if (!url.includes('/product/')) continue;
+
+        const parts = url.split('/');
+        const slug = parts[parts.length - 1] || '';
+        const sku = parts[parts.length - 2] || '';
+
+        if (!sku || !slug) continue;
+
+        // Filter for TCG-related products
+        const lowerSlug = slug.toLowerCase();
+        const isTcg = this.tcgKeywords.some(kw => lowerSlug.includes(kw));
+        if (!isTcg) continue;
+
+        // Convert slug to readable name
+        const name = slug
+          .replace(/-/g, ' ')
+          .replace(/\b\w/g, c => c.toUpperCase());
+
         const product = this.classify({
-          sku: item.sku || item.id || item.slug,
-          name: item.name || item.title,
-          price: typeof item.price === 'number' ? item.price : normalizePrice(item.price),
+          sku,
+          name,
+          price: null, // Sitemap doesn't include prices
           currency: 'CAD',
-          url: `${this.url}/product/${item.slug || item.sku}`,
-          image: item.image || item.images?.[0]?.url || '',
-          inStock: item.inStock !== false && item.availability !== 'OutOfStock',
-          canAddToCart: item.purchasable !== false,
+          url: url.includes('/en-ca/') ? url : url.replace('/product/', '/en-ca/product/'),
+          image: '',
+          inStock: true, // Present in sitemap = listed on site
+          canAddToCart: true,
           shipsToHome: true,
         });
+
         products[product.sku] = product;
+      } catch (err) {
+        // Skip malformed URLs
       }
-    } catch (err) {
-      logger.debug(`Pokemon Center: parseNextData failed: ${err.message}`);
     }
+
+    if (Object.keys(products).length === 0) {
+      throw new Error('Sitemap parsed 0 TCG products — may be blocked or format changed');
+    }
+
+    logger.info(`Pokemon Center: ${Object.keys(products).length} TCG products from sitemap (${urlMatches.length} total URLs)`);
+    return products;
   }
 }
 

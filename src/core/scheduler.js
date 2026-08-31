@@ -111,6 +111,16 @@ class Scheduler {
       for (const [sku, product] of Object.entries(newProducts)) {
         await state.setProduct(adapter.id, sku, product);
       }
+
+      // Clean up stale products no longer returned by the adapter
+      const staleSkus = Object.keys(oldProducts).filter(sku => !(sku in newProducts));
+      if (staleSkus.length > 0) {
+        for (const sku of staleSkus) {
+          await state.deleteProduct(adapter.id, sku);
+        }
+        logger.info(`${adapter.name}: cleaned up ${staleSkus.length} stale products from Redis`);
+      }
+
       await state.setLastCheck(adapter.id);
       await state.clearErrors(adapter.id);
 

@@ -2,10 +2,21 @@ const config = require('../config');
 const logger = require('../monitoring/logger');
 
 let proxiesConfig;
-try {
-  proxiesConfig = require('../config/proxies.json');
-} catch {
-  proxiesConfig = { isp: { proxies: [] } };
+// Load proxy config: env var (for production) > file (for local dev)
+if (process.env.ISP_PROXY_CONFIG) {
+  try {
+    proxiesConfig = JSON.parse(process.env.ISP_PROXY_CONFIG);
+    logger.info('Proxy config loaded from ISP_PROXY_CONFIG env var');
+  } catch (e) {
+    logger.warn(`Failed to parse ISP_PROXY_CONFIG: ${e.message}`);
+    proxiesConfig = { isp: { proxies: [] } };
+  }
+} else {
+  try {
+    proxiesConfig = require('../config/proxies.json');
+  } catch {
+    proxiesConfig = { isp: { proxies: [] } };
+  }
 }
 
 // Cost per request estimates (configurable via env)

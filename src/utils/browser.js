@@ -63,6 +63,13 @@ async function browserFetch(url, opts = {}) {
     viewport: { width: 1920, height: 1080 },
   });
 
+  // Anti-detection: hide Playwright markers
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    delete window.__playwright;
+    delete window.__pw_manual;
+  });
+
   const page = await context.newPage();
 
   // Block unnecessary resources to speed up loading

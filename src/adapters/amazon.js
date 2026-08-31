@@ -3,9 +3,13 @@ const cheerio = require('cheerio');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
 
+let cookieSession;
+try { cookieSession = require('../utils/cookie-session'); } catch { cookieSession = null; }
+
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
+    this.domain = 'www.amazon.ca';
     this.searchUrls = [
       `${this.url}/s?k=pokemon+tcg+booster+box&rh=n%3A6388804011`,
       `${this.url}/s?k=pokemon+elite+trainer+box`,
@@ -14,26 +18,55 @@ class AmazonAdapter extends BaseAdapter {
     ];
   }
 
+  _isChallenge(html) {
+    if (html.includes('captcha') || html.includes('Robot Check') || html.includes('Enter the characters')) return true;
+    if (html.length < 5000) return true;
+    // If the response is large but doesn't contain search results, we got a redirect/block page
+    if (!html.includes('s-search-result') && !html.includes('data-asin')) return true;
+    return false;
+  }
+
   async fetchProducts() {
     const products = {};
 
     for (const searchUrl of this.searchUrls) {
       try {
         let html;
+
+        // Strategy 1: cookieFetch — solve Akamai challenge once, reuse cookies
         try {
+          html = await this.cookieFetch(searchUrl, {
+            domain: this.domain,
+            seedUrl: `${this.url}/s?k=pokemon+tcg`,
+            challengeDetector: (h) => this._isChallenge(h),
+            timeoutMs: 25000,
+            waitForSelector: '[data-component-type="s-search-result"]',
+          });
+        } catch (cookieErr) {
+          // Strategy 2: Direct stealth HTTP (impit) — might work if cookies aren't needed
+          logger.info(`Amazon: cookieFetch failed (${cookieErr.message}), trying direct stealth`);
           html = await this.stealthFetch(searchUrl, { timeoutMs: 20000 });
-          // Check if we got a bot challenge page
-          if (html.includes('captcha') || html.includes('Robot Check') || html.length < 5000) {
-            throw new Error('Bot challenge detected, trying browser fallback');
+          if (this._isChallenge(html)) {
+            throw new Error('Akamai challenge detected on all strategies');
           }
-        } catch (stealthErr) {
-          logger.info(`Amazon: stealth HTTP failed (${stealthErr.message}), trying browser fallback`);
-          html = await this.browserFetch(searchUrl, { timeoutMs: 30000, waitForSelector: '[data-component-type="s-search-result"]' });
+        }
+
+        // Check if we got a challenge page from the browser
+        if (this._isChallenge(html)) {
+          logger.warn(`Amazon: browser also returned challenge page for ${searchUrl}`);
+          continue;
         }
 
         const $ = cheerio.load(html);
+        const resultCount = $('[data-component-type="s-search-result"]').length;
 
-        // Amazon search results
+        if (resultCount === 0) {
+          // Log diagnostic info
+          const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || 'unknown';
+          logger.warn(`Amazon: 0 results on page. Title: "${title}", HTML: ${html.length} bytes`);
+          continue;
+        }
+
         $('[data-component-type="s-search-result"]').each((_, el) => {
           try {
             const $el = $(el);
@@ -43,7 +76,7 @@ class AmazonAdapter extends BaseAdapter {
             const name = $el.find('h2 .a-text-normal, h2 a span').first().text().trim();
             if (!name) return;
 
-            // Skip sponsored/ad results without TCG relevance
+            // Skip non-TCG results
             const lowerName = name.toLowerCase();
             const isTCG = ['pokemon', 'tcg', 'card game', 'booster', 'trainer box', 'one piece'].some(
               kw => lowerName.includes(kw)
@@ -53,7 +86,6 @@ class AmazonAdapter extends BaseAdapter {
             const href = $el.find('h2 a').first().attr('href') || '';
             const url = href.startsWith('http') ? href : `${this.url}${href}`;
 
-            // Price parsing — Amazon has multiple price formats
             const priceWhole = $el.find('.a-price .a-price-whole').first().text().replace(',', '');
             const priceFraction = $el.find('.a-price .a-price-fraction').first().text();
             let price = null;
@@ -63,8 +95,6 @@ class AmazonAdapter extends BaseAdapter {
 
             const image = $el.find('.s-image').first().attr('src') || '';
 
-            // Stock status
-            const deliveryText = $el.find('.a-row.s-align-children-center').text().toLowerCase();
             const outOfStock = $el.find('.a-color-error').text().toLowerCase().includes('currently unavailable') ||
               $el.text().toLowerCase().includes('currently unavailable');
 

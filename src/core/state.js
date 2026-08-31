@@ -31,6 +31,11 @@ async function setProduct(retailerId, sku, product) {
   await getRedis().set(key, JSON.stringify(product), 'EX', SKU_TTL);
 }
 
+async function deleteProduct(retailerId, sku) {
+  const key = `${PREFIX}product:${hashSku(retailerId, sku)}`;
+  await getRedis().del(key);
+}
+
 async function getAllProducts(retailerId) {
   const pattern = `${PREFIX}product:${retailerId}:*`;
   const keys = await getRedis().keys(pattern);
@@ -94,6 +99,7 @@ module.exports = {
   getRedis,
   getProduct,
   setProduct,
+  deleteProduct,
   getAllProducts,
   getLastCheck,
   setLastCheck,

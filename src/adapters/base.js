@@ -8,6 +8,9 @@ const { classifyCategory, classifyProductType } = require('../utils/helpers');
 let browserModule;
 try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
 
+let cookieSessionModule;
+try { cookieSessionModule = require('../utils/cookie-session'); } catch { cookieSessionModule = null; }
+
 class BaseAdapter {
   constructor(retailerConfig) {
     this.id = retailerConfig.id;
@@ -79,6 +82,83 @@ class BaseAdapter {
       recordRequest(this.id, true, this.proxyTier);
       if (proxyObj && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
       throw err;
+    }
+  }
+
+  /**
+   * Cookie-assisted stealth fetch: uses Playwright once to solve JS challenges,
+   * caches cookies for 15 min, then uses impit + cookies for fast HTTP polling.
+   * Falls back to full browser rendering if cookie approach fails.
+   */
+  async cookieFetch(url, opts = {}) {
+    const { domain, seedUrl, challengeDetector, timeoutMs = 25000, waitForSelector } = opts;
+
+    if (!cookieSessionModule) {
+      throw new Error('Cookie session module unavailable');
+    }
+
+    const { url: proxyUrl, proxyObj } = this.getProxy();
+
+    // Step 1: Try impit + cached/fresh session cookies
+    try {
+      const cookieString = await cookieSessionModule.getSessionCookies(domain, seedUrl, { proxyUrl });
+
+      const result = await stealthGet(url, {
+        proxyUrl,
+        timeoutMs,
+        maxRetries: 1,
+        headers: { 'Cookie': cookieString },
+      });
+
+      // Check if we still got a challenge page
+      if (challengeDetector && challengeDetector(result)) {
+        logger.info(`${this.name}: cookies expired, refreshing session...`);
+        cookieSessionModule.invalidateSession(domain);
+
+        // Retry with fresh cookies
+        const freshCookies = await cookieSessionModule.getSessionCookies(domain, seedUrl, {
+          proxyUrl,
+          forceRefresh: true,
+        });
+
+        const retryResult = await stealthGet(url, {
+          proxyUrl,
+          timeoutMs,
+          maxRetries: 1,
+          headers: { 'Cookie': freshCookies },
+        });
+
+        if (challengeDetector && challengeDetector(retryResult)) {
+          throw new Error('Challenge persists after cookie refresh');
+        }
+
+        recordRequest(this.id, false, this.proxyTier);
+        if (proxyObj) markProxySuccess(proxyObj);
+        return retryResult;
+      }
+
+      recordRequest(this.id, false, this.proxyTier);
+      if (proxyObj) markProxySuccess(proxyObj);
+      return result;
+    } catch (cookieErr) {
+      logger.info(`${this.name}: cookie fetch failed (${cookieErr.message}), trying full browser...`);
+
+      // Step 2: Full browser fallback — renders the whole page with Playwright
+      try {
+        const html = await cookieSessionModule.browserFetchWithCookies(url, {
+          proxyUrl,
+          timeoutMs: 30000,
+          waitForSelector,
+        });
+
+        recordRequest(this.id, false, this.proxyTier);
+        if (proxyObj) markProxySuccess(proxyObj);
+        return html;
+      } catch (browserErr) {
+        recordRequest(this.id, true, this.proxyTier);
+        if (proxyObj && this._isProxyBlock(browserErr)) markProxyBlocked(proxyObj);
+        throw new Error(`${this.name}: all fetch methods failed — cookie: ${cookieErr.message}, browser: ${browserErr.message}`);
+      }
     }
   }
 
