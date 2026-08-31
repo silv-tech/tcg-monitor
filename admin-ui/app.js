@@ -1,5 +1,7 @@
 const BASE = window.location.origin + '/api';
 let apiKey = '';
+let channelsData = null;
+let retailersList = [];
 
 function headers() {
   return { 'Content-Type': 'application/json', 'x-api-key': apiKey };
@@ -63,12 +65,12 @@ async function loadHealth() {
 }
 
 async function loadRetailers() {
-  const retailers = await api('/retailers');
-  const enabled = retailers.filter(r => r.enabled).length;
-  document.getElementById('retailerCount').textContent = `${enabled} active / ${retailers.length} total`;
+  retailersList = await api('/retailers');
+  const enabled = retailersList.filter(r => r.enabled).length;
+  document.getElementById('retailerCount').textContent = `${enabled} active / ${retailersList.length} total`;
 
   const grid = document.getElementById('retailersGrid');
-  grid.innerHTML = retailers.map(r => {
+  grid.innerHTML = retailersList.map(r => {
     const dotClass = r.enabled ? 'green' : 'yellow';
     const adapter = r.adapter || '—';
     const proxy = r.proxyTier === 'none' ? 'Direct' : r.proxyTier;
@@ -143,7 +145,6 @@ async function loadStats() {
 async function loadPerformance() {
   const stats = await api('/stats/proxy');
 
-  // Per-retailer table
   const perfBody = document.getElementById('perfTable');
   const retailers = Object.entries(stats.byRetailer || {});
   perfBody.innerHTML = retailers.map(([id, r]) => {
@@ -171,7 +172,6 @@ async function loadPerformance() {
     perfBody.innerHTML = '<tr><td colspan="6" style="color:#666;text-align:center">No data yet — polls haven\'t run</td></tr>';
   }
 
-  // Cost breakdown table
   const costBody = document.getElementById('costTable');
   const tiers = stats.cost.byTier || {};
   costBody.innerHTML = Object.entries(tiers).map(([tier, cost]) => `
@@ -183,14 +183,158 @@ async function loadPerformance() {
   `).join('');
 }
 
+// ─── Channels Tab ────────────────────────────────────────────────
+
 async function loadChannels() {
   try {
-    const channels = await api('/channels');
-    document.getElementById('channelsJson').textContent = JSON.stringify(channels, null, 2);
+    channelsData = await api('/channels');
   } catch {
-    document.getElementById('channelsJson').textContent = 'Failed to load channel config';
+    channelsData = { tiers: { paid: { delay: 0, channels: {} }, free: { delay: 45000, channels: {} } }, retailerChannels: {}, roles: { categories: {}, retailers: {} }, webhooks: {} };
+  }
+
+  const c = channelsData;
+
+  // Tier delays
+  setVal('ch-paid-delay', c.tiers?.paid?.delay || 0);
+  setVal('ch-free-delay', c.tiers?.free?.delay || 45000);
+
+  // Paid category channels
+  const paidCh = c.tiers?.paid?.channels || {};
+  setVal('ch-paid-default', paidCh.default || '');
+  setVal('ch-paid-pokemon', paidCh.pokemon || '');
+  setVal('ch-paid-onepiece', paidCh.onepiece || '');
+  setVal('ch-paid-dragonball', paidCh.dragonball || '');
+  setVal('ch-paid-naruto', paidCh.naruto || '');
+  setVal('ch-paid-lorcana', paidCh.lorcana || '');
+  setVal('ch-paid-yugioh', paidCh.yugioh || '');
+  setVal('ch-paid-mtg', paidCh.mtg || '');
+
+  // Free category channels
+  const freeCh = c.tiers?.free?.channels || {};
+  setVal('ch-free-default', freeCh.default || '');
+  setVal('ch-free-pokemon', freeCh.pokemon || '');
+  setVal('ch-free-onepiece', freeCh.onepiece || '');
+  setVal('ch-free-dragonball', freeCh.dragonball || '');
+  setVal('ch-free-naruto', freeCh.naruto || '');
+  setVal('ch-free-lorcana', freeCh.lorcana || '');
+  setVal('ch-free-yugioh', freeCh.yugioh || '');
+  setVal('ch-free-mtg', freeCh.mtg || '');
+
+  // Retailer channel overrides
+  const retCh = c.retailerChannels || {};
+  const retGrid = document.getElementById('retailerChannelsGrid');
+  const enabledRetailers = retailersList.filter(r => r.enabled);
+  retGrid.innerHTML = enabledRetailers.map(r => `
+    <div class="card" style="padding:10px">
+      <div class="routing-row" style="margin:0">
+        <label style="min-width:120px;font-weight:500;color:#fff">${r.name}</label>
+        <input type="text" id="rch-${r.id}" value="${retCh[r.id] || ''}" placeholder="Channel ID (optional)" />
+      </div>
+    </div>
+  `).join('');
+
+  // Category roles
+  const catRoles = c.roles?.categories || {};
+  setVal('role-cat-pokemon', catRoles.pokemon || '');
+  setVal('role-cat-onepiece', catRoles.onepiece || '');
+  setVal('role-cat-dragonball', catRoles.dragonball || '');
+  setVal('role-cat-naruto', catRoles.naruto || '');
+  setVal('role-cat-lorcana', catRoles.lorcana || '');
+  setVal('role-cat-yugioh', catRoles.yugioh || '');
+  setVal('role-cat-mtg', catRoles.mtg || '');
+
+  // Retailer roles
+  const retRoles = c.roles?.retailers || {};
+  const retRolesGrid = document.getElementById('retailerRolesGrid');
+  retRolesGrid.innerHTML = enabledRetailers.slice(0, 10).map(r => `
+    <div class="routing-row">
+      <label>${r.name}</label>
+      <input type="text" id="role-ret-${r.id}" value="${retRoles[r.id] || ''}" placeholder="Role ID" />
+    </div>
+  `).join('');
+
+  // Global roles
+  setVal('role-paidMember', c.roles?.paidMember || '');
+  setVal('role-allAlerts', c.roles?.allAlerts || '');
+
+  // Webhooks
+  setVal('wh-paid', c.webhooks?.paid_default || '');
+  setVal('wh-free', c.webhooks?.free_default || '');
+
+  // Admin
+  setVal('ch-admin', c.adminChannel || '');
+}
+
+async function saveChannels() {
+  const categories = ['pokemon', 'onepiece', 'dragonball', 'naruto', 'lorcana', 'yugioh', 'mtg'];
+
+  const paidChannels = { default: getVal('ch-paid-default') };
+  const freeChannels = { default: getVal('ch-free-default') };
+  categories.forEach(cat => {
+    paidChannels[cat] = getVal(`ch-paid-${cat}`);
+    freeChannels[cat] = getVal(`ch-free-${cat}`);
+  });
+
+  // Retailer channel overrides
+  const retailerChannels = {};
+  const enabledRetailers = retailersList.filter(r => r.enabled);
+  enabledRetailers.forEach(r => {
+    const el = document.getElementById(`rch-${r.id}`);
+    if (el) retailerChannels[r.id] = el.value.trim();
+  });
+
+  // Category roles
+  const catRoles = {};
+  categories.forEach(cat => { catRoles[cat] = getVal(`role-cat-${cat}`); });
+
+  // Retailer roles
+  const retRoles = {};
+  enabledRetailers.slice(0, 10).forEach(r => {
+    const el = document.getElementById(`role-ret-${r.id}`);
+    if (el) retRoles[r.id] = el.value.trim();
+  });
+
+  const config = {
+    tiers: {
+      paid: { delay: parseInt(getVal('ch-paid-delay')) || 0, channels: paidChannels },
+      free: { delay: parseInt(getVal('ch-free-delay')) || 45000, channels: freeChannels },
+    },
+    retailerChannels,
+    roles: {
+      categories: catRoles,
+      retailers: retRoles,
+      paidMember: getVal('role-paidMember'),
+      allAlerts: getVal('role-allAlerts'),
+    },
+    adminChannel: getVal('ch-admin'),
+    webhooks: {
+      paid_default: getVal('wh-paid'),
+      free_default: getVal('wh-free'),
+    },
+  };
+
+  try {
+    await api('/channels', { method: 'PUT', body: JSON.stringify(config) });
+    log('Channel config saved');
+    const msg = document.getElementById('savedMsg');
+    msg.classList.add('show');
+    setTimeout(() => msg.classList.remove('show'), 3000);
+  } catch (err) {
+    log('Failed to save channels: ' + err.message);
   }
 }
+
+function setVal(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = val;
+}
+
+function getVal(id) {
+  const el = document.getElementById(id);
+  return el ? el.value.trim() : '';
+}
+
+// ─── Products ────────────────────────────────────────────────────
 
 async function addKeyword() {
   const keyword = document.getElementById('newKeyword').value.trim();
