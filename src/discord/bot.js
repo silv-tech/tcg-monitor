@@ -47,6 +47,9 @@ async function createBot() {
   return client;
 }
 
+// Version bump this when command definitions change (P1-6)
+const COMMANDS_VERSION = '1';
+
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
@@ -71,15 +74,26 @@ async function registerCommands() {
           )),
   ].map(cmd => cmd.toJSON());
 
+  // Skip re-registration if commands haven't changed (saves Discord API calls)
+  const versionKey = 'tcg:commands_version';
+  const cached = await state.getRedis().get(versionKey);
+  if (cached === COMMANDS_VERSION) {
+    logger.info('Slash commands already registered (skipped)');
+    return;
+  }
+
   const rest = new REST().setToken(config.discord.token);
   await rest.put(
     Routes.applicationGuildCommands(client.user.id, config.discord.guildId),
     { body: commands }
   );
+  await state.getRedis().set(versionKey, COMMANDS_VERSION);
   logger.info('Slash commands registered');
 }
 
 async function handleStatus(interaction) {
+  await interaction.deferReply({ ephemeral: true }); // P1-7: prevent timeout with many retailers
+
   const proxyStats = getStats();
   const baseRetailers = require('../config/retailers.json');
   const overrides = await state.getRetailerOverrides();
@@ -94,7 +108,7 @@ async function handleStatus(interaction) {
     statusLines.push(`${health} **${r.name}** — last check: ${ago}, errors: ${s.errors}`);
   }
 
-  await interaction.reply({
+  await interaction.editReply({
     content: [
       '**TCG Monitor Status**',
       '',
@@ -102,18 +116,19 @@ async function handleStatus(interaction) {
       '',
       `📊 Proxy: ${proxyStats.requests} requests, ${proxyStats.blocked} blocked`,
     ].join('\n'),
-    ephemeral: true,
   });
 }
 
 async function handleRetailers(interaction) {
+  await interaction.deferReply({ ephemeral: true }); // P1-7: prevent timeout with many retailers
+
   const baseRetailers = require('../config/retailers.json');
   const overrides = await state.getRetailerOverrides();
   const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
   const lines = retailers.map(r =>
     `${r.enabled ? '✅' : '❌'} **${r.name}** — ${r.intervalMs / 1000}s interval, proxy: ${r.proxyTier}`
   );
-  await interaction.reply({ content: lines.join('\n'), ephemeral: true });
+  await interaction.editReply({ content: lines.join('\n') });
 }
 
 async function handleTest(interaction) {

@@ -106,9 +106,10 @@ class ShopifyAdapter extends BaseAdapter {
         ? variant.price
         : normalizePrice(variant.price);
 
-      // Some Shopify stores return prices in cents (e.g. 1999.00 = $19.99)
-      // Heuristic: if price > 500, it's likely in cents
-      if (price != null && price > 500) {
+      // Some Shopify stores return prices in cents (e.g. 199900 = $1999.00)
+      // Heuristic: only divide if price > 5000 — no TCG product costs $5000 CAD (P1-5)
+      // This prevents legitimate $500-$800 sealed cases from being divided to $5-$8
+      if (price != null && price > 5000) {
         price = price / 100;
       }
 

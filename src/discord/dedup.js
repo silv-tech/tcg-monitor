@@ -2,11 +2,13 @@ const state = require('../core/state');
 const logger = require('../monitoring/logger');
 
 const PREFIX = 'tcg:dedup:';
-const DEDUP_TTL = 3600; // 1 hour
+const DEDUP_TTL = 600; // 10 minutes — allows legitimate rapid restocks (P1-3)
 
 function eventKey(event) {
   const { type, product } = event;
-  return `${PREFIX}${type}:${product.retailer}:${product.sku}`;
+  // Include stock state so OOS→restock→OOS→restock generates unique keys
+  const stateHash = type === 'RESTOCK' ? `:${product.inStock ? '1' : '0'}` : '';
+  return `${PREFIX}${type}:${product.retailer}:${product.sku}${stateHash}`;
 }
 
 async function isDuplicate(event) {

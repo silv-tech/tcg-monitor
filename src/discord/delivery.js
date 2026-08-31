@@ -19,6 +19,7 @@ class DeliveryQueue {
     this.processing = false;
     this.client = null;
     this.channelCache = new Map();
+    this.pendingFreeCount = 0; // track in-flight free-tier delays (best-effort, lost on restart)
   }
 
   setClient(client) {
@@ -134,10 +135,11 @@ class DeliveryQueue {
       logger.info(`Paid alert sent in ${latency}ms (e2e: ${e2eLatency}ms): ${event.type} — ${product.name}`);
     }
 
-    // --- FREE TIER: send after delay ---
+    // --- FREE TIER: send after delay (best-effort — lost on restart, paid tier already delivered) ---
     const freeChannel = this.resolveFreeChannel(category);
     if (freeChannel) {
       const delay = channelsConfig?.tiers?.free?.delay || config.delivery.freeTierDelayMs;
+      this.pendingFreeCount++;
       setTimeout(async () => {
         try {
           const { embed, components } = buildAlertEmbed(event, 'free');
@@ -145,6 +147,8 @@ class DeliveryQueue {
           logger.info(`Free alert sent (delayed ${delay}ms): ${event.type} — ${product.name}`);
         } catch (err) {
           logger.error(`Failed free tier delivery: ${err.message}`);
+        } finally {
+          this.pendingFreeCount--;
         }
       }, delay);
     }

@@ -93,17 +93,26 @@ class Scheduler {
       recordPollLatency(adapter.id, pollMs);
 
       const oldProducts = await state.getAllProducts(adapter.id);
-      const events = diffProducts(oldProducts, newProducts);
 
-      if (events.length > 0) {
-        // Stamp detection time on events for delivery latency tracking
-        const detectedAt = Date.now();
-        for (const event of events) {
-          event._detectedAt = detectedAt;
-        }
-        logger.info(`${adapter.name}: ${events.length} event(s) detected (poll: ${pollMs}ms)`);
-        if (this.onEvents) {
-          await this.onEvents(events);
+      // Seed mode: first poll for a retailer — cache products without firing events (P1-1)
+      const isFirstPoll = Object.keys(oldProducts).length === 0 && Object.keys(newProducts).length > 0;
+      if (isFirstPoll) {
+        logger.info(`${adapter.name}: first poll — seeding ${Object.keys(newProducts).length} products (no alerts fired)`);
+      }
+
+      if (!isFirstPoll) {
+        const events = diffProducts(oldProducts, newProducts);
+
+        if (events.length > 0) {
+          // Stamp detection time on events for delivery latency tracking
+          const detectedAt = Date.now();
+          for (const event of events) {
+            event._detectedAt = detectedAt;
+          }
+          logger.info(`${adapter.name}: ${events.length} event(s) detected (poll: ${pollMs}ms)`);
+          if (this.onEvents) {
+            await this.onEvents(events);
+          }
         }
       }
 
