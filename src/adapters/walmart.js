@@ -6,6 +6,7 @@ const { normalizePrice } = require('../utils/helpers');
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
+    this.domain = 'www.walmart.ca';
     // Walmart Canada search API
     this.searchUrls = [
       `${this.url}/search?q=pokemon+tcg`,
@@ -16,14 +17,62 @@ class WalmartAdapter extends BaseAdapter {
     ];
   }
 
+  isChallengePage(html) {
+    if (!html || html.length < 1000) return true;
+    return html.includes('Robot or human?') ||
+      html.includes('blocked') ||
+      html.includes('Access Denied') ||
+      html.includes('captcha') ||
+      (html.length < 5000 && !html.includes('__NEXT_DATA__') && !html.includes('search'));
+  }
+
+  async fetchPage(searchUrl) {
+    // Try stealthFetch first (fast HTTP with TLS fingerprint)
+    try {
+      const html = await this.stealthFetch(searchUrl, { timeoutMs: 20000 });
+      if (!this.isChallengePage(html)) return html;
+      logger.info(`Walmart: stealthFetch returned challenge page for ${searchUrl.split('?')[1]}`);
+    } catch (err) {
+      logger.debug(`Walmart: stealthFetch failed: ${err.message}`);
+    }
+
+    // Try cookieFetch (Playwright solves challenge, caches cookies, then fast HTTP)
+    try {
+      const html = await this.cookieFetch(searchUrl, {
+        domain: this.domain,
+        seedUrl: this.url,
+        challengeDetector: (h) => this.isChallengePage(h),
+        timeoutMs: 25000,
+      });
+      if (!this.isChallengePage(html)) return html;
+      logger.info(`Walmart: cookieFetch returned challenge page`);
+    } catch (err) {
+      logger.debug(`Walmart: cookieFetch failed: ${err.message}`);
+    }
+
+    // Last resort: full browser rendering
+    try {
+      const html = await this.browserFetch(searchUrl, { timeoutMs: 30000 });
+      return html;
+    } catch (err) {
+      logger.debug(`Walmart: browserFetch failed: ${err.message}`);
+    }
+
+    return null;
+  }
+
   async fetchProducts() {
     const products = {};
 
     for (const searchUrl of this.searchUrls) {
       try {
-        const html = await this.stealthFetch(searchUrl, {
-          timeoutMs: 20000,
-        });
+        const html = await this.fetchPage(searchUrl);
+        if (!html) {
+          logger.warn(`Walmart: all fetch methods failed for ${searchUrl.split('?')[1]}`);
+          continue;
+        }
+
+        const beforeCount = Object.keys(products).length;
 
         // Walmart embeds product data in __NEXT_DATA__ or window.__PRELOADED_STATE__
         const nextDataMatch = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>(.+?)<\/script>/s);
@@ -31,7 +80,7 @@ class WalmartAdapter extends BaseAdapter {
           try {
             const data = JSON.parse(nextDataMatch[1]);
             this.parseNextData(data, products);
-            continue;
+            if (Object.keys(products).length > beforeCount) continue;
           } catch (e) {
             logger.debug(`Walmart: failed to parse __NEXT_DATA__: ${e.message}`);
           }
@@ -43,7 +92,7 @@ class WalmartAdapter extends BaseAdapter {
           try {
             const state = JSON.parse(stateMatch[1]);
             this.parsePreloadedState(state, products);
-            continue;
+            if (Object.keys(products).length > beforeCount) continue;
           } catch (e) {
             logger.debug(`Walmart: failed to parse preloaded state: ${e.message}`);
           }
@@ -87,6 +136,12 @@ class WalmartAdapter extends BaseAdapter {
             logger.debug(`Walmart: failed to parse element: ${err.message}`);
           }
         });
+
+        // If we got HTML but no products, log a diagnostic snippet
+        if (Object.keys(products).length === beforeCount) {
+          const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || 'unknown';
+          logger.warn(`Walmart: got HTML (${html.length} bytes, title: "${title}") but parsed 0 products from ${searchUrl.split('?')[1]}`);
+        }
       } catch (err) {
         logger.warn(`Walmart: failed to fetch ${searchUrl}: ${err.message}`);
       }

@@ -11,11 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Store Playwright browsers inside /app so the non-root user can access them
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
+
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
-# Install Playwright Chromium browser binary
-RUN npx playwright install chromium
+# Install Playwright Chromium browser binaries (full + headless shell for 1.48+)
+RUN npx playwright install chromium chromium-headless-shell
 
 COPY . .
 

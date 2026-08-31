@@ -6,7 +6,7 @@
     "url": "https://www.walmart.ca",
     "adapter": "walmart",
     "intervalMs": 60000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": true,
     "color": "#0071dc"
   },
@@ -29,7 +29,7 @@
     "url": "https://www.costco.ca",
     "adapter": "costco",
     "intervalMs": 45000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": true,
     "color": "#e31837",
     "watchlist": ["4201042492", "2007494"]
