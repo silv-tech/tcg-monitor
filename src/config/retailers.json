@@ -41,7 +41,7 @@
     "url": "https://www.amazon.ca",
     "adapter": "amazon",
     "intervalMs": 120000,
-    "proxyTier": "residential",
+    "proxyTier": "residential-us",
     "enabled": true
   },
   {

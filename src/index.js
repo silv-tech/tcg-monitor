@@ -102,10 +102,13 @@ async function main() {
     }
   }
 
-  // 2c. Verify residential proxy if configured
+  // 2c. Verify residential proxies if configured
+  const { testProxy } = require('./core/proxy');
   if (config.proxy.residentialUrl) {
-    const { testProxy } = require('./core/proxy');
-    await testProxy(config.proxy.residentialUrl, 'Residential proxy');
+    await testProxy(config.proxy.residentialUrl, 'Residential CA proxy');
+  }
+  if (config.proxy.residentialUsUrl) {
+    await testProxy(config.proxy.residentialUsUrl, 'Residential US proxy');
   }
 
   // 3. Register adapters from config (merge Redis overrides so enabled/interval state persists)

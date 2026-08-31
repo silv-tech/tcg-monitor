@@ -206,6 +206,8 @@ function getProxyUrl(proxyTier, retailerId) {
     }
     case 'residential':
       return config.proxy.residentialUrl || null;
+    case 'residential-us':
+      return config.proxy.residentialUsUrl || config.proxy.residentialUrl || null;
     case 'datacenter':
       return config.proxy.datacenterUrl || null;
     default:

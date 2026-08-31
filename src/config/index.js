@@ -38,6 +38,7 @@ module.exports = {
   },
   proxy: {
     residentialUrl: process.env.PROXY_RESIDENTIAL_URL,
+    residentialUsUrl: process.env.PROXY_RESIDENTIAL_US_URL,
     datacenterUrl: process.env.PROXY_DATACENTER_URL,
   },
   delivery: {
