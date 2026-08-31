@@ -32,17 +32,15 @@ class AmazonAdapter extends BaseAdapter {
 
     for (const searchUrl of this.searchUrls) {
       try {
-        let html;
-
-        // Go straight to browser — Akamai blocks all HTTP clients even with residential proxies
-        html = await this.browserFetch(searchUrl, {
+        // Try browser first (free), fall back to ScraperAPI (paid) on challenge
+        const html = await this.protectedFetch(searchUrl, {
           timeoutMs: 30000,
           waitForSelector: '[data-component-type="s-search-result"]',
+          challengeDetector: (h) => this._isChallenge(h),
         });
 
-        // Check if we got a challenge page from the browser
-        if (this._isChallenge(html)) {
-          logger.warn(`Amazon: browser returned challenge page for ${searchUrl}`, { reason: 'bot_challenge' });
+        if (!html || this._isChallenge(html)) {
+          logger.warn(`Amazon: all methods returned challenge for ${searchUrl}`, { reason: 'bot_challenge' });
           continue;
         }
 

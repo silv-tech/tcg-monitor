@@ -5,6 +5,7 @@ const { normalizePrice } = require('../utils/helpers');
 const { httpGet } = require('../utils/http');
 const { getNextIspProxy, recordRequest, markProxySuccess, markProxyBlocked } = require('../core/proxy');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const scraperApi = require('../utils/scraper-api');
 
 class CostcoAdapter extends BaseAdapter {
   constructor(config) {
@@ -154,7 +155,7 @@ class CostcoAdapter extends BaseAdapter {
 
   async fetchProductPage(productId) {
     const url = `${this.url}/p/-/x/${productId}`;
-    const { status, html } = await this.directFetch(url);
+    let { status, html } = await this.directFetch(url);
 
     // 404 = not live yet (expected for watchlist), don't count as blocked
     const isBlocked = status === 403 || status === 503;
@@ -165,6 +166,21 @@ class CostcoAdapter extends BaseAdapter {
         logger.debug(`Costco: watchlist item ${productId} not live yet`);
       }
       return null;
+    }
+
+    // If ISP proxy was blocked, try ScraperAPI fallback
+    if (!html && isBlocked && scraperApi.isConfigured()) {
+      try {
+        html = await scraperApi.scraperFetch(url, {
+          render: true,
+          premium: true,
+          country: 'ca',
+          retailerId: this.id,
+        });
+        if (html) logger.debug(`Costco: ScraperAPI fallback succeeded for ${productId}`);
+      } catch (err) {
+        logger.debug(`Costco: ScraperAPI fallback failed for ${productId}: ${err.message}`);
+      }
     }
 
     if (!html) return null;

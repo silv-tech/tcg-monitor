@@ -4,6 +4,7 @@ const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl, getNextIspProxy, recordRequest, markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
 const { classifyCategory, classifyProductType, isTCGProduct } = require('../utils/helpers');
+const scraperApi = require('../utils/scraper-api');
 
 let browserModule;
 try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
@@ -83,6 +84,47 @@ class BaseAdapter {
       if (proxyObj && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
       throw err;
     }
+  }
+
+  /**
+   * Protected fetch: tries browserFetch first (free), falls back to ScraperAPI (paid)
+   * when a challenge page is detected. Pass a challengeDetector function to identify
+   * bot protection pages in the returned HTML.
+   *
+   * @param {string} url - URL to fetch
+   * @param {object} opts
+   * @param {function} opts.challengeDetector - (html) => boolean, returns true if challenge page
+   * @param {object} opts.scraperOpts - Options passed to scraperFetch (render, premium, country, etc.)
+   * @param {number} opts.timeoutMs - Browser timeout
+   * @param {string} opts.waitForSelector - CSS selector to wait for in browser
+   * @returns {string} HTML content
+   */
+  async protectedFetch(url, opts = {}) {
+    const { challengeDetector, scraperOpts = {}, ...browserOpts } = opts;
+
+    // Step 1: Try browserFetch (free)
+    try {
+      const html = await this.browserFetch(url, browserOpts);
+      if (html && (!challengeDetector || !challengeDetector(html))) {
+        return html;
+      }
+      logger.debug(`${this.name}: browser returned challenge for ${url.substring(0, 80)}, trying ScraperAPI...`);
+    } catch (err) {
+      logger.debug(`${this.name}: browserFetch failed (${err.message}), trying ScraperAPI...`);
+    }
+
+    // Step 2: Fall back to ScraperAPI (paid)
+    if (!scraperApi.isConfigured()) {
+      return null; // No API key — can't fall back, return null so adapter can handle gracefully
+    }
+
+    return scraperApi.scraperFetch(url, {
+      render: true,
+      premium: true,
+      country: 'ca',
+      ...scraperOpts,
+      retailerId: this.id,
+    });
   }
 
   /**

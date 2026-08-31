@@ -110,15 +110,19 @@ class PokemonCenterAdapter extends BaseAdapter {
   async scanSitemap() {
     let xml;
 
-    // Go straight to browser — Incapsula blocks all HTTP clients even with residential proxies
+    // Try browser first (free), fall back to ScraperAPI (paid) on challenge
     try {
-      xml = await this.browserFetch(this.sitemapUrl, { timeoutMs: 45000 });
-    } catch (browserErr) {
+      xml = await this.protectedFetch(this.sitemapUrl, {
+        timeoutMs: 45000,
+        challengeDetector: (h) => !h.includes('<loc>') || this.isChallengePage(h),
+        scraperOpts: { render: false, premium: true }, // sitemap is XML, no JS rendering needed
+      });
+    } catch (err) {
       if (this.sitemapProducts.size > 0) {
         logger.warn(`Pokemon Center: sitemap fetch failed, using ${this.sitemapProducts.size} cached products`);
         return;
       }
-      throw new Error(`Sitemap unreachable: ${browserErr.message}`);
+      throw new Error(`Sitemap unreachable: ${err.message}`);
     }
 
     if (!xml || !xml.includes('<loc>') || this.isChallengePage(xml)) {
@@ -126,7 +130,7 @@ class PokemonCenterAdapter extends BaseAdapter {
         logger.warn('Pokemon Center: sitemap returned challenge/empty, using cached products');
         return;
       }
-      throw new Error('Sitemap returned challenge page — all bypass methods failed');
+      throw new Error('Sitemap returned challenge page — all methods failed');
     }
 
     // Parse product URLs from sitemap
@@ -163,9 +167,12 @@ class PokemonCenterAdapter extends BaseAdapter {
   async checkProductAvailability(sku, meta) {
     let html;
 
-    // Go straight to browser — Incapsula blocks all HTTP clients even with residential proxies
+    // Try browser first (free), fall back to ScraperAPI (paid) on challenge
     try {
-      html = await this.browserFetch(meta.url, { timeoutMs: 20000 });
+      html = await this.protectedFetch(meta.url, {
+        timeoutMs: 20000,
+        challengeDetector: (h) => this.isChallengePage(h),
+      });
     } catch (err) {
       const reason = classifyError(err);
       logger.warn(`Pokemon Center: fetch failed for ${sku}`, { reason, url: meta.url, error: err.message });
@@ -177,7 +184,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       return { data: null, failReason: FAILURE_REASONS.EMPTY_RESPONSE };
     }
     if (this.isChallengePage(html)) {
-      logger.debug(`Pokemon Center: challenge page for ${sku}`);
+      logger.debug(`Pokemon Center: all methods returned challenge for ${sku}`);
       return { data: null, failReason: FAILURE_REASONS.BOT_CHALLENGE };
     }
 

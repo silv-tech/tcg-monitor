@@ -28,14 +28,19 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   async fetchPage(searchUrl) {
-    // Go straight to browser — PerimeterX blocks all HTTP clients even with residential proxies
+    // Try browser first (free), fall back to ScraperAPI (paid) on challenge
     try {
-      const html = await this.browserFetch(searchUrl, { timeoutMs: 35000 });
-      if (!this.isChallengePage(html)) return html;
-      const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || 'unknown';
-      logger.warn(`Walmart: browser returned challenge (title: "${title}", ${html.length} bytes) for ${searchUrl.split('?')[1]}`, { reason: 'bot_challenge' });
+      const html = await this.protectedFetch(searchUrl, {
+        timeoutMs: 35000,
+        challengeDetector: (h) => this.isChallengePage(h),
+      });
+      if (html && !this.isChallengePage(html)) return html;
+      if (html) {
+        const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || 'unknown';
+        logger.warn(`Walmart: all methods returned challenge (title: "${title}", ${html.length} bytes) for ${searchUrl.split('?')[1]}`, { reason: 'bot_challenge' });
+      }
     } catch (err) {
-      logger.warn(`Walmart: browserFetch failed for ${searchUrl.split('?')[1]}: ${err.message}`, { reason: classifyError(err) });
+      logger.warn(`Walmart: fetch failed for ${searchUrl.split('?')[1]}: ${err.message}`, { reason: classifyError(err) });
     }
 
     return null;
