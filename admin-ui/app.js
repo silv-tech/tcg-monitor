@@ -135,7 +135,7 @@ async function loadRetailers() {
 async function toggleRetailer(id, enabled) {
   await api(`/retailers/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) });
   log(`${id} ${enabled ? 'enabled' : 'disabled'}`);
-  await loadRetailers();
+  await Promise.all([loadRetailers(), loadHealth()]);
 }
 
 // ─── Interval Modal ──────────────────────────────────────────────
