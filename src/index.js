@@ -102,6 +102,12 @@ async function main() {
     }
   }
 
+  // 2c. Verify residential proxy if configured
+  if (config.proxy.residentialUrl) {
+    const { testProxy } = require('./core/proxy');
+    await testProxy(config.proxy.residentialUrl, 'Residential proxy');
+  }
+
   // 3. Register adapters from config (merge Redis overrides so enabled/interval state persists)
   const baseRetailers = require('./config/retailers.json');
   const overrides = await stateModule.getRetailerOverrides();

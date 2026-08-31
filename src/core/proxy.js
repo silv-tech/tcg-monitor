@@ -176,6 +176,27 @@ function getProxyPoolStats() {
   }));
 }
 
+// ─── Proxy health check ─────────────────────────────────────────
+async function testProxy(proxyUrl, label = 'proxy') {
+  if (!proxyUrl) return { ok: false, error: 'No proxy URL configured' };
+  try {
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    const agent = new HttpsProxyAgent(proxyUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch('https://httpbin.org/ip', { agent, signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    const data = await res.json();
+    const masked = proxyUrl.replace(/\/\/[^@]+@/, '//***:***@');
+    logger.info(`${label} health check PASSED — exit IP: ${data.origin}, proxy: ${masked}`);
+    return { ok: true, ip: data.origin };
+  } catch (err) {
+    logger.error(`${label} health check FAILED: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
 // ─── Original proxy selection (residential/datacenter) ───────────
 function getProxyUrl(proxyTier, retailerId) {
   switch (proxyTier) {
@@ -288,4 +309,5 @@ module.exports = {
   markProxySuccess,
   reloadProxies,
   getProxyPoolStats,
+  testProxy,
 };
