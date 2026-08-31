@@ -88,6 +88,10 @@ async function loadRetailers() {
   const enabled = retailersList.filter(r => r.enabled).length;
   document.getElementById('retailerCount').textContent = `${enabled} active / ${retailersList.length} total`;
 
+  // Update top stat card with accurate retailer count
+  document.getElementById('statRetailers').textContent = retailersList.length;
+  document.getElementById('statRetailersSub').textContent = `${enabled} active`;
+
   const grid = document.getElementById('retailersGrid');
   grid.innerHTML = retailersList.map(r => {
     const cb = circuits[r.id];
