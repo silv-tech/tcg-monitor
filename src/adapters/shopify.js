@@ -132,6 +132,7 @@ class ShopifyAdapter extends BaseAdapter {
       product._productId = item.id;
       product._tags = item.tags || [];
       product._vendor = item.vendor;
+      product.stockCount = variant.inventory_quantity ?? null;
 
       products[product.sku] = product;
     }

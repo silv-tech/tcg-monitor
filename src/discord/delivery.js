@@ -39,6 +39,11 @@ class DeliveryQueue {
     if (!toSend.length) return;
 
     for (const event of toSend) {
+      // Skip non-TCG products (action figures, plushies, etc.)
+      if (!event._scanTier && event.product?.isTCG === false) {
+        logger.debug(`Non-TCG product filtered: ${event.product?.name || 'unknown'}`);
+        continue;
+      }
       // Skip events disabled by event type toggles (scan events always pass through)
       if (!event._scanTier && channelsConfig?.enabledEvents) {
         if (channelsConfig.enabledEvents[event.type] === false) {
@@ -136,6 +141,7 @@ class DeliveryQueue {
     }
 
     // --- FREE TIER: send after delay (best-effort — lost on restart, paid tier already delivered) ---
+    if (channelsConfig?.tiers?.free?.enabled === false) return; // Free tier disabled by client
     const freeChannel = this.resolveFreeChannel(category);
     if (freeChannel) {
       const delay = channelsConfig?.tiers?.free?.delay || config.delivery.freeTierDelayMs;

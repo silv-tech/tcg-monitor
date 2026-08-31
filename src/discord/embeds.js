@@ -85,9 +85,18 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'SKU', value: String(product.sku), inline: true });
   }
 
-  // Stock indicator
-  const stockIcon = product.inStock ? '\u{1F7E2}' : '\u{1F534}';
-  embed.addFields({ name: 'Online Stock', value: stockIcon, inline: true });
+  // Stock indicator (show count if available)
+  if (product.stockCount != null && product.stockCount > 0) {
+    embed.addFields({ name: 'Stock', value: String(product.stockCount), inline: true });
+  } else {
+    const stockIcon = product.inStock ? '\u{1F7E2}' : '\u{1F534}';
+    embed.addFields({ name: 'Online Stock', value: stockIcon, inline: true });
+  }
+
+  // Variant ID (Shopify)
+  if (product._variantId) {
+    embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
+  }
 
   // Cart status
   const cartIcon = product.canAddToCart ? '\u{1F7E2}' : '\u{1F534}';

@@ -83,6 +83,10 @@ class AmazonAdapter extends BaseAdapter {
 
             const image = $el.find('.s-image').first().attr('src') || '';
 
+            // Skip third-party sellers — only show "Ships from and sold by Amazon.ca"
+            const sellerText = $el.find('.a-row.a-size-base .a-color-secondary, .s-merchant-info').text().toLowerCase();
+            if (sellerText && !sellerText.includes('amazon') && sellerText.includes('sold by')) continue;
+
             const outOfStock = $el.find('.a-color-error').text().toLowerCase().includes('currently unavailable') ||
               $el.text().toLowerCase().includes('currently unavailable');
 

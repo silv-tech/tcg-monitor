@@ -13,8 +13,9 @@
     },
     "free": {
       "delay": 45000,
+      "enabled": false,
       "channels": {
-        "default": "1543432841323356170",
+        "default": "",
         "pokemon": "",
         "onepiece": "",
         "dragonball": "",

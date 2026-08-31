@@ -138,6 +138,10 @@ class WalmartAdapter extends BaseAdapter {
           // Skip non-product entries (ads, placeholders)
           if (!item.name || item.__typename === 'AdPlaceholder' || item.__typename === 'TileTakeOverProductPlaceholder') continue;
 
+          // Skip third-party sellers — only show "Sold and shipped by Walmart"
+          const seller = (item.sellerName || item.seller?.name || '').toLowerCase();
+          if (seller && !seller.includes('walmart')) continue;
+
           const product = this.classify({
             sku: item.usItemId || item.id || item.canonicalUrl?.split('/').pop(),
             name: item.name,

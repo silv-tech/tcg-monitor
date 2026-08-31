@@ -3,7 +3,7 @@ const { httpGet } = require('../utils/http');
 const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl, getNextIspProxy, recordRequest, markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
-const { classifyCategory, classifyProductType } = require('../utils/helpers');
+const { classifyCategory, classifyProductType, isTCGProduct } = require('../utils/helpers');
 
 let browserModule;
 try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
@@ -165,6 +165,7 @@ class BaseAdapter {
   classify(product) {
     product.category = classifyCategory(product.name, productsConfig.categories);
     product.productType = classifyProductType(product.name, productsConfig.productTypes);
+    product.isTCG = isTCGProduct(product.name);
     product.retailer = this.name;
     product.retailerId = this.id;
     product.lastSeen = Date.now();
