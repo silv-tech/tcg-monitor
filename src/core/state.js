@@ -9,6 +9,7 @@ function getRedis() {
   if (!redis) {
     redis = new Redis(config.redis.url, {
       maxRetriesPerRequest: 3,
+      enableOfflineQueue: true, // P2-2: queue commands during disconnect instead of throwing
       retryStrategy: (times) => Math.min(times * 500, 5000),
     });
     redis.on('error', (err) => logger.error('Redis error', { error: err.message }));
@@ -38,13 +39,21 @@ async function deleteProduct(retailerId, sku) {
 
 async function getAllProducts(retailerId) {
   const pattern = `${PREFIX}product:${retailerId}:*`;
-  const keys = await getRedis().keys(pattern);
+  // P2-3: Use SCAN instead of KEYS to avoid blocking Redis on large keyspaces
+  const keys = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, batch] = await getRedis().scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+    cursor = nextCursor;
+    keys.push(...batch);
+  } while (cursor !== '0');
+
   if (!keys.length) return {};
   const pipeline = getRedis().pipeline();
   keys.forEach(k => pipeline.get(k));
   const results = await pipeline.exec();
   const products = {};
-  results.forEach(([err, data], i) => {
+  results.forEach(([err, data]) => {
     if (!err && data) {
       const p = JSON.parse(data);
       products[p.sku] = p;

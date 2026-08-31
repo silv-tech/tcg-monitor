@@ -24,6 +24,13 @@ const productsPath = path.join(__dirname, '../config/products.json');
 const channelsPath = path.join(__dirname, '../config/channels.json');
 const proxiesPath = path.join(__dirname, '../config/proxies.json');
 
+// P2-8: Atomic file write — write to temp then rename to prevent corruption on crash
+function atomicWriteSync(filePath, data) {
+  const tmp = filePath + '.tmp';
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, filePath);
+}
+
 // Health check
 router.get('/health', async (req, res) => {
   const health = await checkHealth();
@@ -75,7 +82,7 @@ router.post('/retailers', (req, res) => {
   };
 
   retailers.push(newRetailer);
-  fs.writeFileSync(retailersPath, JSON.stringify(retailers, null, 2));
+  atomicWriteSync(retailersPath, JSON.stringify(retailers, null, 2));
   logger.info(`Retailer added via admin: ${id} (${name})`);
   res.status(201).json(newRetailer);
 });
@@ -87,7 +94,7 @@ router.delete('/retailers/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Retailer not found' });
 
   const removed = retailers.splice(idx, 1)[0];
-  fs.writeFileSync(retailersPath, JSON.stringify(retailers, null, 2));
+  atomicWriteSync(retailersPath, JSON.stringify(retailers, null, 2));
   logger.info(`Retailer removed via admin: ${removed.id} (${removed.name})`);
   res.json({ ok: true, removed });
 });
@@ -102,7 +109,7 @@ async function getProductsWithRedis() {
 // Helper: save products config to both Redis and file
 async function saveProductsConfig(products) {
   await state.setProductsConfig(products);
-  fs.writeFileSync(productsPath, JSON.stringify(products, null, 2));
+  atomicWriteSync(productsPath, JSON.stringify(products, null, 2));
 }
 
 // List tracked products/keywords
@@ -221,7 +228,7 @@ async function getChannelsWithRedis() {
 // Helper: save channels config to both Redis and file (file needed for delivery.reloadChannels())
 async function saveChannelsConfig(channels) {
   await state.setChannelsConfig(channels);
-  fs.writeFileSync(channelsPath, JSON.stringify(channels, null, 2));
+  atomicWriteSync(channelsPath, JSON.stringify(channels, null, 2));
   delivery.reloadChannels();
 }
 
@@ -264,7 +271,7 @@ router.get('/proxies', (req, res) => {
 
 // Update proxy list
 router.put('/proxies', (req, res) => {
-  fs.writeFileSync(proxiesPath, JSON.stringify(req.body, null, 2));
+  atomicWriteSync(proxiesPath, JSON.stringify(req.body, null, 2));
   reloadProxies();
   res.json({ ok: true, pool: getProxyPoolStats() });
 });

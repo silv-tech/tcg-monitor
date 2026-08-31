@@ -1,8 +1,9 @@
 const logger = require('../monitoring/logger');
 
 let playwright;
-let browser;
-let launching = false;
+// P2-9: Cache browsers per proxy URL to prevent proxy conflicts between adapters
+const browsers = new Map(); // proxyUrl → { browser, launching }
+const NO_PROXY = '__direct__';
 
 /**
  * Optional headless browser fallback for sites that block all HTTP clients.
@@ -14,18 +15,24 @@ let launching = false;
  */
 
 async function getBrowser(proxyUrl) {
-  if (browser?.isConnected()) return browser;
-  if (launching) {
-    // Wait for in-progress launch
+  const key = proxyUrl || NO_PROXY;
+  const entry = browsers.get(key);
+
+  if (entry?.browser?.isConnected()) return entry.browser;
+  if (entry?.launching) {
     await new Promise(r => setTimeout(r, 2000));
-    if (browser?.isConnected()) return browser;
+    const retry = browsers.get(key);
+    if (retry?.browser?.isConnected()) return retry.browser;
   }
 
-  launching = true;
-  try {
-    playwright = require('playwright-core');
-  } catch {
-    throw new Error('playwright-core not installed. Run: npm install playwright-core && npx playwright install chromium');
+  browsers.set(key, { browser: null, launching: true });
+
+  if (!playwright) {
+    try {
+      playwright = require('playwright-core');
+    } catch {
+      throw new Error('playwright-core not installed. Run: npm install playwright-core && npx playwright install chromium');
+    }
   }
 
   const launchOpts = {
@@ -46,9 +53,9 @@ async function getBrowser(proxyUrl) {
     };
   }
 
-  browser = await playwright.chromium.launch(launchOpts);
-  launching = false;
-  logger.info('Browser launched for stealth fetching');
+  const browser = await playwright.chromium.launch(launchOpts);
+  browsers.set(key, { browser, launching: false });
+  logger.info(`Browser launched for stealth fetching (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
   return browser;
 }
 
@@ -106,11 +113,13 @@ async function browserFetch(url, opts = {}) {
 }
 
 async function closeBrowser() {
-  if (browser?.isConnected()) {
-    await browser.close();
-    browser = null;
-    logger.info('Browser closed');
+  for (const [key, entry] of browsers) {
+    if (entry.browser?.isConnected()) {
+      await entry.browser.close();
+    }
   }
+  browsers.clear();
+  logger.info('All browsers closed');
 }
 
 module.exports = { browserFetch, closeBrowser };

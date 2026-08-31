@@ -25,9 +25,14 @@ async function markSent(event) {
 async function filterDuplicates(events) {
   const unique = [];
   for (const event of events) {
-    if (await isDuplicate(event)) {
-      logger.debug(`Dedup: skipping ${event.type} for ${event.product.sku}`);
-      continue;
+    try {
+      if (await isDuplicate(event)) {
+        logger.debug(`Dedup: skipping ${event.type} for ${event.product.sku}`);
+        continue;
+      }
+    } catch (err) {
+      // P2-2: Fail-open — if Redis is down, let alerts through rather than dropping them
+      logger.warn(`Dedup: Redis error, passing event through: ${err.message}`);
     }
     unique.push(event);
   }

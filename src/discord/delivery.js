@@ -252,18 +252,35 @@ class DeliveryQueue {
     return channelsConfig.webhooks[`${tier}_default`] || null;
   }
 
-  async sendWebhook(url, embed, content) {
+  async sendWebhook(url, embed, content, retries = 0) {
     const body = { embeds: [embed.toJSON()] };
     if (content) body.content = content;
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    // P2-10: 10-second timeout via AbortController
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
 
-    if (!res.ok) {
-      throw new Error(`Webhook failed: ${res.status}`);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      // P2-7: Retry on Discord 429 rate limit (up to 2 retries)
+      if (res.status === 429 && retries < 2) {
+        const retryAfter = parseFloat(res.headers.get('retry-after') || '2') * 1000;
+        logger.warn(`Webhook rate limited, retrying in ${retryAfter}ms`);
+        await sleep(Math.min(retryAfter, 10000));
+        return this.sendWebhook(url, embed, content, retries + 1);
+      }
+
+      if (!res.ok) {
+        throw new Error(`Webhook failed: ${res.status}`);
+      }
+    } finally {
+      clearTimeout(timer);
     }
   }
 }

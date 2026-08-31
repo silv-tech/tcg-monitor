@@ -120,6 +120,16 @@ class CostcoAdapter extends BaseAdapter {
       }
     }
 
+    // P2-5: Cap to prevent unbounded memory growth from large sitemaps
+    const MAX_KNOWN_IDS = 5000;
+    if (this.knownProductIds.size > MAX_KNOWN_IDS) {
+      const ids = [...this.knownProductIds];
+      this.knownProductIds = new Set(ids.slice(-MAX_KNOWN_IDS));
+      // Re-add watchlist items so they're never pruned
+      for (const id of this.watchlist) this.knownProductIds.add(id);
+      logger.warn(`Costco: capped knownProductIds to ${MAX_KNOWN_IDS} (was ${ids.length})`);
+    }
+
     logger.info(`Costco: sitemap scan found ${this.knownProductIds.size} TCG product IDs`);
   }
 

@@ -44,16 +44,23 @@ async function main() {
   const fs = require('fs');
   const path = require('path');
 
+  // P2-8: Atomic writes — write to temp then rename
+  function atomicWrite(filePath, data) {
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, filePath);
+  }
+
   const savedChannels = await stateModule.getChannelsConfig();
   if (savedChannels) {
-    fs.writeFileSync(path.join(__dirname, 'config/channels.json'), JSON.stringify(savedChannels, null, 2));
+    atomicWrite(path.join(__dirname, 'config/channels.json'), JSON.stringify(savedChannels, null, 2));
     delivery.reloadChannels();
     logger.info('Seeded channels.json from Redis');
   }
 
   const savedProducts = await stateModule.getProductsConfig();
   if (savedProducts) {
-    fs.writeFileSync(path.join(__dirname, 'config/products.json'), JSON.stringify(savedProducts, null, 2));
+    atomicWrite(path.join(__dirname, 'config/products.json'), JSON.stringify(savedProducts, null, 2));
     logger.info('Seeded products.json from Redis');
   }
 
@@ -105,6 +112,16 @@ async function main() {
 
   logger.info('TCG Monitor running');
 }
+
+// P2-1: Prevent unhandled errors from crashing the entire process
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection', { error: reason?.message || String(reason), stack: reason?.stack });
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception — shutting down', { error: err.message, stack: err.stack });
+  process.exit(1);
+});
 
 main().catch((err) => {
   logger.error('Fatal startup error', { error: err.message, stack: err.stack });

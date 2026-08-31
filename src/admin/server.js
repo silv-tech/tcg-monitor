@@ -1,6 +1,5 @@
 const express = require('express');
 const crypto = require('crypto');
-const cors = require('cors');
 const path = require('path');
 const config = require('../config');
 const routes = require('./routes');
@@ -51,7 +50,7 @@ function isValidApiKey(provided) {
 function createAdminServer() {
   const app = express();
 
-  app.use(cors());
+  // P2-6: No open CORS — dashboard is served from same origin, no cross-origin needed
   app.use(express.json({ limit: '100kb' }));
 
   // API key auth for admin routes

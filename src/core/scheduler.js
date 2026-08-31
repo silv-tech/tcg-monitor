@@ -215,6 +215,13 @@ class Scheduler {
   async start() {
     if (this.running) return;
     this.running = true;
+
+    // P2-4: Clear any leftover timers to prevent double-polling on re-start
+    for (const [, timer] of this.timers) {
+      clearInterval(timer);
+    }
+    this.timers.clear();
+
     logger.info(`Scheduler starting with ${this.adapters.size} adapters`);
 
     let stagger = 0;
