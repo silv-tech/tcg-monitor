@@ -11,13 +11,14 @@ function esc(str) {
   return div.innerHTML;
 }
 
-// API key login — stored in localStorage, no more bootstrap endpoint (P0-2)
+// API key login — styled login screen, stored in localStorage (P0-2)
 (async function boot() {
   const saved = localStorage.getItem('tcg_api_key');
   if (saved) {
     apiKey = saved;
     try {
       await api('/retailers'); // Test the key
+      showDashboard();
       await loadAll();
       return;
     } catch {
@@ -25,28 +26,53 @@ function esc(str) {
       apiKey = '';
     }
   }
-  promptApiKey();
+  // Show login screen (already visible by default)
+  document.getElementById('loginKeyInput').focus();
 })();
 
-function promptApiKey() {
-  const key = prompt('Enter admin API key:');
-  if (!key) {
-    log('No API key entered. Retrying in 3s...');
-    setTimeout(promptApiKey, 3000);
-    return;
-  }
-  apiKey = key;
-  api('/retailers')
-    .then(() => {
-      localStorage.setItem('tcg_api_key', key);
-      loadAll();
-    })
-    .catch(() => {
-      log('Invalid API key');
-      apiKey = '';
-      setTimeout(promptApiKey, 1000);
-    });
+function showDashboard() {
+  document.getElementById('loginOverlay').classList.add('hidden');
+  document.getElementById('dashHeader').classList.remove('dashboard-hidden');
+  document.getElementById('dashContent').classList.remove('dashboard-hidden');
+  // Remove overlay from DOM after fade
+  setTimeout(() => {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.remove();
+  }, 300);
 }
+
+async function submitLogin() {
+  const input = document.getElementById('loginKeyInput');
+  const btn = document.getElementById('loginBtn');
+  const error = document.getElementById('loginError');
+  const key = input.value.trim();
+
+  if (!key) { error.textContent = 'Please enter an API key'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Signing in...';
+  error.textContent = '';
+
+  apiKey = key;
+  try {
+    await api('/retailers');
+    localStorage.setItem('tcg_api_key', key);
+    showDashboard();
+    await loadAll();
+  } catch {
+    apiKey = '';
+    error.textContent = 'Invalid API key';
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+    input.focus();
+    input.select();
+  }
+}
+
+// Enter key on login input
+document.getElementById('loginKeyInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitLogin();
+});
 
 function headers() {
   return { 'Content-Type': 'application/json', 'x-api-key': apiKey };
