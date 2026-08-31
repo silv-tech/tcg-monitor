@@ -113,12 +113,22 @@ class Scheduler {
       }
 
       // Clean up stale products no longer returned by the adapter
-      const staleSkus = Object.keys(oldProducts).filter(sku => !(sku in newProducts));
-      if (staleSkus.length > 0) {
-        for (const sku of staleSkus) {
-          await state.deleteProduct(adapter.id, sku);
+      // SAFETY: Skip cleanup if the new result looks partial — prevents mass false alerts
+      // when an adapter returns fewer products due to a flaky search URL or rate limit.
+      const oldCount = Object.keys(oldProducts).length;
+      const newCount = Object.keys(newProducts).length;
+      const isPartialResult = oldCount > 0 && newCount < oldCount * 0.5;
+
+      if (isPartialResult) {
+        logger.warn(`${adapter.name}: skipping stale cleanup — looks like a partial result (${newCount} new vs ${oldCount} cached). This prevents mass false alerts.`);
+      } else {
+        const staleSkus = Object.keys(oldProducts).filter(sku => !(sku in newProducts));
+        if (staleSkus.length > 0) {
+          for (const sku of staleSkus) {
+            await state.deleteProduct(adapter.id, sku);
+          }
+          logger.info(`${adapter.name}: cleaned up ${staleSkus.length} stale products from Redis`);
         }
-        logger.info(`${adapter.name}: cleaned up ${staleSkus.length} stale products from Redis`);
       }
 
       await state.setLastCheck(adapter.id);

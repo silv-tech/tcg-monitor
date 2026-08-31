@@ -88,8 +88,10 @@ async function clearErrors(retailerId) {
   await setRetailerStatus(retailerId, { errors: 0, lastError: null, healthy: true });
 }
 
-// ─── Retailer overrides (persist across deploys) ─────────────────
+// ─── Config persistence (survive ephemeral filesystem deploys) ────
 const OVERRIDES_KEY = `${PREFIX}retailer_overrides`;
+const CHANNELS_KEY = `${PREFIX}channels_config`;
+const PRODUCTS_KEY = `${PREFIX}products_config`;
 
 async function getRetailerOverrides() {
   const data = await getRedis().get(OVERRIDES_KEY);
@@ -106,6 +108,26 @@ async function deleteRetailerOverride(retailerId) {
   const overrides = await getRetailerOverrides();
   delete overrides[retailerId];
   await getRedis().set(OVERRIDES_KEY, JSON.stringify(overrides));
+}
+
+// ─── Channels config persistence ─────────────────────────────────
+async function getChannelsConfig() {
+  const data = await getRedis().get(CHANNELS_KEY);
+  return data ? JSON.parse(data) : null;
+}
+
+async function setChannelsConfig(config) {
+  await getRedis().set(CHANNELS_KEY, JSON.stringify(config));
+}
+
+// ─── Products config persistence ─────────────────────────────────
+async function getProductsConfig() {
+  const data = await getRedis().get(PRODUCTS_KEY);
+  return data ? JSON.parse(data) : null;
+}
+
+async function setProductsConfig(config) {
+  await getRedis().set(PRODUCTS_KEY, JSON.stringify(config));
 }
 
 async function shutdown() {
@@ -130,5 +152,9 @@ module.exports = {
   getRetailerOverrides,
   setRetailerOverride,
   deleteRetailerOverride,
+  getChannelsConfig,
+  setChannelsConfig,
+  getProductsConfig,
+  setProductsConfig,
   shutdown,
 };

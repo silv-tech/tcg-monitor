@@ -1,5 +1,17 @@
 require('dotenv').config();
 
+const INSECURE_KEYS = ['changeme', 'test', 'admin', 'password', ''];
+
+const apiKey = process.env.ADMIN_API_KEY || '';
+
+// Validate required env vars on startup (P0-4)
+if (!apiKey || INSECURE_KEYS.includes(apiKey)) {
+  console.error('FATAL: ADMIN_API_KEY env var is unset or insecure. Set a strong, unique API key.');
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
+}
+
 module.exports = {
   discord: {
     token: process.env.DISCORD_TOKEN,
@@ -15,7 +27,7 @@ module.exports = {
   },
   admin: {
     port: parseInt(process.env.ADMIN_PORT) || 3500,
-    apiKey: process.env.ADMIN_API_KEY || 'changeme',
+    apiKey: apiKey || 'changeme',
   },
   proxy: {
     residentialUrl: process.env.PROXY_RESIDENTIAL_URL,

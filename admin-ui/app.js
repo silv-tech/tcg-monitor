@@ -3,18 +3,50 @@ let apiKey = '';
 let channelsData = null;
 let retailersList = [];
 
-// Auto-connect on page load
+// HTML escape to prevent XSS (P0-7)
+function esc(str) {
+  if (str == null) return '';
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+// API key login — stored in localStorage, no more bootstrap endpoint (P0-2)
 (async function boot() {
-  try {
-    const res = await fetch(`${BASE}/bootstrap`);
-    const { key } = await res.json();
-    apiKey = key;
-    await loadAll();
-  } catch {
-    log('Auto-connect failed — server may be starting up. Retrying in 3s...');
-    setTimeout(boot, 3000);
+  const saved = localStorage.getItem('tcg_api_key');
+  if (saved) {
+    apiKey = saved;
+    try {
+      await api('/retailers'); // Test the key
+      await loadAll();
+      return;
+    } catch {
+      localStorage.removeItem('tcg_api_key');
+      apiKey = '';
+    }
   }
+  promptApiKey();
 })();
+
+function promptApiKey() {
+  const key = prompt('Enter admin API key:');
+  if (!key) {
+    log('No API key entered. Retrying in 3s...');
+    setTimeout(promptApiKey, 3000);
+    return;
+  }
+  apiKey = key;
+  api('/retailers')
+    .then(() => {
+      localStorage.setItem('tcg_api_key', key);
+      loadAll();
+    })
+    .catch(() => {
+      log('Invalid API key');
+      apiKey = '';
+      setTimeout(promptApiKey, 1000);
+    });
+}
 
 function headers() {
   return { 'Content-Type': 'application/json', 'x-api-key': apiKey };
@@ -179,7 +211,7 @@ async function loadRetailers() {
     const adapter = r.adapter || '—';
     const proxy = r.proxyTier === 'none' ? 'Direct' : r.proxyTier;
     const interval = (r.intervalMs / 1000).toFixed(0);
-    const note = r._note ? `<div class="r-note">${r._note}</div>` : '';
+    const note = r._note ? `<div class="r-note">${esc(r._note)}</div>` : '';
 
     // Circuit breaker status note
     let cbNote = '';
@@ -191,22 +223,22 @@ async function loadRetailers() {
 
     return `
       <div class="r-card">
-        <div class="color-bar" style="background:${r.color || '#3f3f46'}"></div>
+        <div class="color-bar" style="background:${esc(r.color) || '#3f3f46'}"></div>
         <div class="r-header">
-          <div class="r-name"><span class="dot ${dotClass}"></span>${r.name}</div>
+          <div class="r-name"><span class="dot ${dotClass}"></span>${esc(r.name)}</div>
           <div style="display:flex;gap:6px">
-            <button class="toggle-btn" onclick="toggleRetailer('${r.id}', ${!r.enabled})">
+            <button class="toggle-btn" onclick="toggleRetailer('${esc(r.id)}', ${!r.enabled})">
               ${r.enabled ? 'Disable' : 'Enable'}
             </button>
-            <button class="toggle-btn" style="color:#ef4444;border-color:#3f3f46" onclick="removeRetailer('${r.id}','${r.name.replace(/'/g, "\\'")}')">
+            <button class="toggle-btn" style="color:#ef4444;border-color:#3f3f46" onclick="removeRetailer('${esc(r.id)}','${esc(r.name).replace(/'/g, "\\'")}')">
               Remove
             </button>
           </div>
         </div>
         <div class="r-meta">
-          <span>${adapter}</span>
-          <span class="r-interval" onclick="editInterval('${r.id}', ${r.intervalMs})" title="Click to edit polling interval" style="cursor:pointer;border-bottom:1px dashed #52525b">${interval}s</span>
-          <span>${proxy}</span>
+          <span>${esc(adapter)}</span>
+          <span class="r-interval" onclick="editInterval('${esc(r.id)}', ${r.intervalMs})" title="Click to edit polling interval" style="cursor:pointer;border-bottom:1px dashed #52525b">${esc(interval)}s</span>
+          <span>${esc(proxy)}</span>
         </div>
         ${note}
         ${cbNote}
@@ -350,18 +382,18 @@ async function loadProducts() {
   const kwEl = document.getElementById('keywordsList');
   kwEl.innerHTML = data.keywords.map(kw => `
     <span class="keyword-tag">
-      ${kw} <span class="remove" onclick="removeKeyword('${kw}')">&times;</span>
+      ${esc(kw)} <span class="remove" onclick="removeKeyword('${esc(kw)}')">&times;</span>
     </span>
   `).join('');
 
   const tbody = document.getElementById('skuTable');
   tbody.innerHTML = data.tracked.map(t => `
     <tr>
-      <td>${t.sku}</td>
-      <td>${t.retailer}</td>
-      <td>${t.name}</td>
+      <td>${esc(t.sku)}</td>
+      <td>${esc(t.retailer)}</td>
+      <td>${esc(t.name)}</td>
       <td>${t.addedAt ? new Date(t.addedAt).toLocaleDateString() : '—'}</td>
-      <td><button class="btn-danger" onclick="removeSku('${t.retailer}','${t.sku}')">Remove</button></td>
+      <td><button class="btn-danger" onclick="removeSku('${esc(t.retailer)}','${esc(t.sku)}')">Remove</button></td>
     </tr>
   `).join('');
 }
@@ -395,7 +427,7 @@ async function loadPerformance() {
     const statusText = r.blocked === 0 ? 'OK' : blockRate > 50 ? 'Degraded' : 'Partial';
     return `
       <tr>
-        <td>${id}</td>
+        <td>${esc(id)}</td>
         <td>${r.requests}</td>
         <td>${r.blocked}</td>
         <td>${blockRate}%</td>
@@ -497,8 +529,8 @@ async function loadChannels() {
   retGrid.innerHTML = enabledRetailers.map(r => `
     <div class="routing-card" style="padding:12px">
       <div class="routing-row" style="margin:0">
-        <label style="min-width:120px;font-weight:500;color:#fafafa">${r.name}</label>
-        <input type="text" id="rch-${r.id}" value="${retCh[r.id] || ''}" placeholder="Channel ID (optional)" />
+        <label style="min-width:120px;font-weight:500;color:#fafafa">${esc(r.name)}</label>
+        <input type="text" id="rch-${esc(r.id)}" value="${esc(retCh[r.id] || '')}" placeholder="Channel ID (optional)" />
       </div>
     </div>
   `).join('');
@@ -518,8 +550,8 @@ async function loadChannels() {
   const retRolesGrid = document.getElementById('retailerRolesGrid');
   retRolesGrid.innerHTML = enabledRetailers.slice(0, 10).map(r => `
     <div class="routing-row">
-      <label>${r.name}</label>
-      <input type="text" id="role-ret-${r.id}" value="${retRoles[r.id] || ''}" placeholder="Role ID" />
+      <label>${esc(r.name)}</label>
+      <input type="text" id="role-ret-${esc(r.id)}" value="${esc(retRoles[r.id] || '')}" placeholder="Role ID" />
     </div>
   `).join('');
 
@@ -676,7 +708,7 @@ async function triggerScan() {
       const barColor = r.sent > 0 ? '#9b59b6' : '#27272a';
       return `
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;font-size:13px">
-          <span style="min-width:140px;color:#fafafa;font-weight:500">${r.name}</span>
+          <span style="min-width:140px;color:#fafafa;font-weight:500">${esc(r.name)}</span>
           <span style="min-width:80px;color:#a1a1aa">${r.sent}/${r.found}</span>
           <div style="flex:1;height:4px;border-radius:2px;background:#27272a;overflow:hidden">
             <div style="width:${pct}%;height:100%;border-radius:2px;background:${barColor};transition:width 0.3s"></div>
@@ -751,7 +783,7 @@ async function loadProxies() {
     const statusText = d.blocked === 0 ? 'Clean' : parseFloat(blockRate) > 50 ? 'Struggling' : 'Partial';
     return `
       <tr>
-        <td>${r.name}</td>
+        <td>${esc(r.name)}</td>
         <td><span style="color:#60a5fa;font-weight:500">ISP</span></td>
         <td>${d.requests}</td>
         <td>${d.blocked}</td>
