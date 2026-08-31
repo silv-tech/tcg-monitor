@@ -85,6 +85,10 @@ class PokemonCenterAdapter extends BaseAdapter {
       }
     }
 
+    if (Object.keys(products).length === 0 && this.searchQueries.length > 0) {
+      throw new Error('All searches returned 0 products — Incapsula may be blocking');
+    }
+
     return products;
   }
 

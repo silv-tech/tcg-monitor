@@ -67,6 +67,11 @@ class EBGamesAdapter extends BaseAdapter {
       }
     }
 
+    // If ALL search URLs returned 0 results, the site is likely down/blocked
+    if (Object.keys(products).length === 0 && this.searchUrls.length > 0) {
+      throw new Error('All search URLs returned 0 products — site may be down or blocking');
+    }
+
     return products;
   }
 }

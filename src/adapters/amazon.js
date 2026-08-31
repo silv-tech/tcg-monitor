@@ -90,6 +90,10 @@ class AmazonAdapter extends BaseAdapter {
       }
     }
 
+    if (Object.keys(products).length === 0 && this.searchUrls.length > 0) {
+      throw new Error('All searches returned 0 products — Akamai may be blocking');
+    }
+
     return products;
   }
 }
