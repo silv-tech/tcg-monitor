@@ -1,10 +1,17 @@
 const http = require('http');
 
+// P3-8: Read API key from env var or CLI arg instead of hardcoding
+const apiKey = process.env.ADMIN_API_KEY || process.argv[2] || '';
+if (!apiKey) {
+  console.error('Usage: ADMIN_API_KEY=xxx node health-check.js  (or pass key as CLI arg)');
+  process.exit(1);
+}
+
 const options = {
   hostname: 'localhost',
-  port: 3500,
+  port: process.env.ADMIN_PORT || 3500,
   path: '/api/health',
-  headers: { 'x-api-key': 'tcg-admin-test' },
+  headers: { 'x-api-key': apiKey },
 };
 
 http.get(options, (res) => {

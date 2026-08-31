@@ -19,6 +19,11 @@ RUN npx playwright install chromium
 
 COPY . .
 
+# P3-7: Run as non-root user for security
+RUN groupadd --system app && useradd --system --gid app app && \
+    chown -R app:app /app
+USER app
+
 EXPOSE 3500
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
