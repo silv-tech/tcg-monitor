@@ -92,59 +92,72 @@ router.delete('/retailers/:id', (req, res) => {
   res.json({ ok: true, removed });
 });
 
+// Helper: read products config from Redis (persists across deploys), fall back to file
+async function getProductsWithRedis() {
+  const fromRedis = await state.getProductsConfig();
+  if (fromRedis) return fromRedis;
+  return JSON.parse(fs.readFileSync(productsPath, 'utf-8'));
+}
+
+// Helper: save products config to both Redis and file
+async function saveProductsConfig(products) {
+  await state.setProductsConfig(products);
+  fs.writeFileSync(productsPath, JSON.stringify(products, null, 2));
+}
+
 // List tracked products/keywords
-router.get('/products', (req, res) => {
-  const products = JSON.parse(fs.readFileSync(productsPath, 'utf-8'));
+router.get('/products', async (req, res) => {
+  const products = await getProductsWithRedis();
   res.json(products);
 });
 
 // Add tracked SKU
-router.post('/products/tracked', (req, res) => {
+router.post('/products/tracked', async (req, res) => {
   const { sku, retailer, name } = req.body;
   if (!sku || !retailer) return res.status(400).json({ error: 'sku and retailer required' });
 
-  const products = JSON.parse(fs.readFileSync(productsPath, 'utf-8'));
+  const products = await getProductsWithRedis();
   const exists = products.tracked.some(t => t.sku === sku && t.retailer === retailer);
   if (exists) return res.status(409).json({ error: 'Already tracked' });
 
   products.tracked.push({ sku, retailer, name: name || sku, addedAt: new Date().toISOString() });
-  fs.writeFileSync(productsPath, JSON.stringify(products, null, 2));
+  await saveProductsConfig(products);
   res.status(201).json({ ok: true });
 });
 
 // Remove tracked SKU
-router.delete('/products/tracked/:retailer/:sku', (req, res) => {
-  const products = JSON.parse(fs.readFileSync(productsPath, 'utf-8'));
+router.delete('/products/tracked/:retailer/:sku', async (req, res) => {
+  const products = await getProductsWithRedis();
   const before = products.tracked.length;
   products.tracked = products.tracked.filter(
     t => !(t.sku === req.params.sku && t.retailer === req.params.retailer)
   );
   if (products.tracked.length === before) return res.status(404).json({ error: 'Not found' });
-  fs.writeFileSync(productsPath, JSON.stringify(products, null, 2));
+  await saveProductsConfig(products);
   res.json({ ok: true });
 });
 
 // Add keyword
-router.post('/products/keywords', (req, res) => {
+router.post('/products/keywords', async (req, res) => {
   const { keyword } = req.body;
   if (!keyword) return res.status(400).json({ error: 'keyword required' });
 
-  const products = JSON.parse(fs.readFileSync(productsPath, 'utf-8'));
+  const products = await getProductsWithRedis();
   if (products.keywords.includes(keyword)) return res.status(409).json({ error: 'Already exists' });
 
   products.keywords.push(keyword);
-  fs.writeFileSync(productsPath, JSON.stringify(products, null, 2));
+  await saveProductsConfig(products);
   res.json({ ok: true });
 });
 
 // Remove keyword
-router.delete('/products/keywords/:keyword', (req, res) => {
-  const products = JSON.parse(fs.readFileSync(productsPath, 'utf-8'));
+router.delete('/products/keywords/:keyword', async (req, res) => {
+  const products = await getProductsWithRedis();
   const idx = products.keywords.indexOf(req.params.keyword);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
 
   products.keywords.splice(idx, 1);
-  fs.writeFileSync(productsPath, JSON.stringify(products, null, 2));
+  await saveProductsConfig(products);
   res.json({ ok: true });
 });
 
@@ -198,22 +211,35 @@ router.post('/scan', async (req, res) => {
   }
 });
 
+// Helper: read channels config from Redis (persists across deploys), fall back to file
+async function getChannelsWithRedis() {
+  const fromRedis = await state.getChannelsConfig();
+  if (fromRedis) return fromRedis;
+  return JSON.parse(fs.readFileSync(channelsPath, 'utf-8'));
+}
+
+// Helper: save channels config to both Redis and file (file needed for delivery.reloadChannels())
+async function saveChannelsConfig(channels) {
+  await state.setChannelsConfig(channels);
+  fs.writeFileSync(channelsPath, JSON.stringify(channels, null, 2));
+  delivery.reloadChannels();
+}
+
 // Get channel config
-router.get('/channels', (req, res) => {
-  const channels = JSON.parse(fs.readFileSync(channelsPath, 'utf-8'));
+router.get('/channels', async (req, res) => {
+  const channels = await getChannelsWithRedis();
   res.json(channels);
 });
 
 // Update channel config
-router.put('/channels', (req, res) => {
-  fs.writeFileSync(channelsPath, JSON.stringify(req.body, null, 2));
-  delivery.reloadChannels();
+router.put('/channels', async (req, res) => {
+  await saveChannelsConfig(req.body);
   res.json({ ok: true });
 });
 
 // Update a single channel or role mapping
-router.patch('/channels', (req, res) => {
-  const channels = JSON.parse(fs.readFileSync(channelsPath, 'utf-8'));
+router.patch('/channels', async (req, res) => {
+  const channels = await getChannelsWithRedis();
   // Deep merge
   function merge(target, source) {
     for (const key of Object.keys(source)) {
@@ -226,8 +252,7 @@ router.patch('/channels', (req, res) => {
     }
   }
   merge(channels, req.body);
-  fs.writeFileSync(channelsPath, JSON.stringify(channels, null, 2));
-  delivery.reloadChannels();
+  await saveChannelsConfig(channels);
   res.json(channels);
 });
 

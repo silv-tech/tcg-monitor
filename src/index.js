@@ -39,9 +39,27 @@ async function main() {
     logger.warn('No DISCORD_TOKEN — running without Discord');
   }
 
-  // 2. Register adapters from config (merge Redis overrides so enabled/interval state persists)
+  // 2. Seed config files from Redis (survives ephemeral filesystem deploys)
+  const stateModule = require('./core/state');
+  const fs = require('fs');
+  const path = require('path');
+
+  const savedChannels = await stateModule.getChannelsConfig();
+  if (savedChannels) {
+    fs.writeFileSync(path.join(__dirname, 'config/channels.json'), JSON.stringify(savedChannels, null, 2));
+    delivery.reloadChannels();
+    logger.info('Seeded channels.json from Redis');
+  }
+
+  const savedProducts = await stateModule.getProductsConfig();
+  if (savedProducts) {
+    fs.writeFileSync(path.join(__dirname, 'config/products.json'), JSON.stringify(savedProducts, null, 2));
+    logger.info('Seeded products.json from Redis');
+  }
+
+  // 3. Register adapters from config (merge Redis overrides so enabled/interval state persists)
   const baseRetailers = require('./config/retailers.json');
-  const overrides = await require('./core/state').getRetailerOverrides();
+  const overrides = await stateModule.getRetailerOverrides();
   const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
   for (const retailer of retailers) {
     const AdapterClass = ADAPTER_MAP[retailer.adapter];
@@ -52,18 +70,18 @@ async function main() {
     scheduler.register(new AdapterClass(retailer));
   }
 
-  // 3. Wire events to delivery
+  // 4. Wire events to delivery
   scheduler.setEventHandler(async (events) => {
     await delivery.deliver(events);
   });
 
-  // 4. Start scheduler
+  // 5. Start scheduler
   await scheduler.start();
 
-  // 5. Start admin server
+  // 6. Start admin server
   const adminServer = createAdminServer();
 
-  // 6. Health check loop — every 2 minutes
+  // 7. Health check loop — every 2 minutes
   const healthInterval = setInterval(async () => {
     const client = getClient();
     if (client) await checkAndAlert(client);
