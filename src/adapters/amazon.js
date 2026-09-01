@@ -37,6 +37,7 @@ class AmazonAdapter extends BaseAdapter {
           timeoutMs: 30000,
           waitForSelector: '[data-component-type="s-search-result"]',
           challengeDetector: (h) => this._isChallenge(h),
+          scraperOpts: { ultraPremium: true },
         });
 
         if (!html || this._isChallenge(html)) {
