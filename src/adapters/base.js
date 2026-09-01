@@ -230,6 +230,7 @@ class BaseAdapter {
           proxyUrl,
           timeoutMs: 30000,
           waitForSelector,
+          seedUrl,
         });
 
         recordRequest(this.id, false, this.proxyTier);

@@ -143,7 +143,7 @@ async function getSessionCookies(domain, seedUrl, opts = {}) {
  * Used as fallback when cookie-only approach fails.
  */
 async function browserFetchWithCookies(url, opts = {}) {
-  const { proxyUrl, timeoutMs = 30000, waitForSelector } = opts;
+  const { proxyUrl, timeoutMs = 30000, waitForSelector, seedUrl } = opts;
 
   const b = await ensureBrowser(proxyUrl);
   const context = await createStealthContext(b);
@@ -157,22 +157,31 @@ async function browserFetchWithCookies(url, opts = {}) {
   });
 
   try {
-    // Inject cached cookies so browser has existing Incapsula session
     const domain = new URL(url).hostname;
+
+    // Inject cached cookies first
     const cached = cookieCache.get(domain);
     if (cached && cached.cookies && cached.cookies.length > 0) {
       await context.addCookies(cached.cookies);
-      logger.debug(`Cookie session: injected ${cached.cookies.length} cached cookies for ${domain}`);
     }
 
+    // If seedUrl provided, solve the challenge there first (same context)
+    if (seedUrl) {
+      await page.goto(seedUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(5000);
+      try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+      logger.debug(`Cookie session: seeded ${domain} before fetching product page`);
+    }
+
+    // Navigate to the actual target URL
     await page.goto(url, { timeout: timeoutMs, waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(8000);
+    await page.waitForTimeout(5000);
 
     if (waitForSelector) {
       try {
         await page.waitForSelector(waitForSelector, { timeout: 15000 });
       } catch {
-        // Selector not found
+        // Selector not found (e.g. OOS product has no add-to-cart button)
       }
     }
 
@@ -191,7 +200,7 @@ async function browserFetchWithCookies(url, opts = {}) {
       const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       cookieCache.set(domain, {
         cookieString,
-        cookies, // Keep full cookie objects for future browser injection
+        cookies,
         expiresAt: Date.now() + COOKIE_TTL,
       });
     }
