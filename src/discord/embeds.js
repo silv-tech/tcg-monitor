@@ -205,7 +205,7 @@ function buildAlertEmbed(event, tier) {
 
   // ── Footer with detection speed + freshness ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
-  let footerText = `Pulse Watch  ·  ${tierLabel}`;
+  let footerText = `Nocturne Monitors  ·  ${tierLabel}`;
   if (event._detectedAt) {
     const speedMs = Date.now() - event._detectedAt;
     const speedSec = (speedMs / 1000).toFixed(1);

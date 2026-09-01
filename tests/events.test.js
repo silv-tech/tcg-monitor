@@ -89,6 +89,15 @@ describe('detectEvents', () => {
     assert.ok(shipping);
   });
 
+  it('PREORDER_LIVE when isPreorderable flips true', () => {
+    const old = makeProduct({ isPreorderable: false });
+    const newProd = makeProduct({ isPreorderable: true });
+    const events = detectEvents(old, newProd);
+    const preorder = events.find(e => e.type === EVENT_TYPES.PREORDER_LIVE);
+    assert.ok(preorder, 'Should emit PREORDER_LIVE event');
+    assert.ok(preorder.detail.includes('Pre-order'));
+  });
+
   it('multiple events can fire simultaneously', () => {
     const old = makeProduct({ inStock: false, canAddToCart: false, price: 200 });
     const newProd = makeProduct({ inStock: true, canAddToCart: true, price: 150 });

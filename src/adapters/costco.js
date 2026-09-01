@@ -82,15 +82,20 @@ class CostcoAdapter extends BaseAdapter {
       this.lastSitemapScan = Date.now();
     }
 
-    // Phase 2: Check each known product page
-    for (const productId of this.knownProductIds) {
-      try {
-        const product = await this.fetchProductPage(productId);
-        if (product) {
-          products[product.sku] = product;
+    // Phase 2: Check each known product page (parallel batches of 5)
+    const ids = [...this.knownProductIds];
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+      const batch = ids.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(productId => this.fetchProductPage(productId))
+      );
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === 'fulfilled' && results[j].value) {
+          products[results[j].value.sku] = results[j].value;
+        } else if (results[j].status === 'rejected') {
+          logger.debug(`Costco: failed to fetch product ${batch[j]}: ${results[j].reason.message}`);
         }
-      } catch (err) {
-        logger.debug(`Costco: failed to fetch product ${productId}: ${err.message}`);
       }
     }
 

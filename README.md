@@ -1,4 +1,4 @@
-# TCG Monitor
+# Nocturne Monitors
 
 Real-time stock monitoring system for Canadian TCG (Trading Card Game) retailers. Watches for restocks, new products, price changes, and pre-orders, then pushes alerts to Discord with tiered access (paid/free).
 
@@ -39,8 +39,7 @@ src/
 │   ├── amazon.js          # Amazon Canada (residential proxy needed)
 │   ├── costco.js          # Costco Canada (sitemap + JSON-LD)
 │   ├── pokemoncenter.js   # Pokemon Center (Incapsula protected)
-│   ├── ebgames.js         # EB Games (currently disabled — site rebuild)
-│   └── _template.js       # Template for adding new retailers
+│   └── ebgames.js         # EB Games (currently disabled — site rebuild)
 ├── discord/
 │   ├── bot.js             # Discord.js v14 bot + slash commands
 │   ├── embeds.js          # Rich embeds with retailer branding
@@ -55,8 +54,7 @@ src/
 │   └── logger.js          # Winston structured logging
 └── utils/
     ├── http.js            # HTTP client with retry + proxy support
-    ├── stealth-http.js    # got-scraping TLS fingerprint randomization
-    ├── cookies.js         # Cookie jar management
+    ├── stealth-http.js    # impit (Apify) TLS fingerprint spoofing
     └── helpers.js         # Classification, pricing, utilities
 ```
 
@@ -140,7 +138,7 @@ API key set via `ADMIN_API_KEY` env var.
 
 ## Adding a New Custom Retailer
 
-1. Copy `src/adapters/_template.js` to `src/adapters/newretailer.js`
+1. Create `src/adapters/newretailer.js` extending `BaseAdapter`
 2. Implement `fetchProducts()` — return `{ [sku]: product }` map
 3. Use `this.classify()` to auto-categorize products
 4. Register in `src/index.js` ADAPTER_MAP
@@ -170,7 +168,7 @@ API key set via `ADMIN_API_KEY` env var.
 npm test
 ```
 
-39 tests covering event detection, product classification, embed building, and high-volume simulation (500 SKUs).
+37 tests covering event detection, product classification, embed building, and high-volume simulation (500 SKUs).
 
 ## Deployment (Railway)
 
@@ -184,7 +182,7 @@ npm test
 - **Runtime**: Node.js 20+
 - **State**: Redis (ioredis)
 - **Bot**: Discord.js v14
-- **HTTP**: node-fetch + got-scraping (TLS fingerprinting)
+- **HTTP**: node-fetch + impit (TLS fingerprinting via BoringSSL)
 - **Parsing**: cheerio (HTML), built-in JSON
 - **Admin**: Express + static HTML dashboard
 - **Logging**: Winston

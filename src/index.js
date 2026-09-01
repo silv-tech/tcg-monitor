@@ -29,7 +29,7 @@ const ADAPTER_MAP = {
 };
 
 async function main() {
-  logger.info('Pulse Watch starting...');
+  logger.info('Nocturne Monitors starting...');
 
   // 1. Start Discord bot
   if (config.discord.token) {
@@ -198,7 +198,7 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  logger.info('Pulse Watch running');
+  logger.info('Nocturne Monitors running');
 }
 
 // P2-1: Prevent unhandled errors from crashing the entire process

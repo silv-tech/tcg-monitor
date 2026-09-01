@@ -35,7 +35,7 @@ setInterval(() => {
   for (const [ip, w] of rateWindows) {
     if (w.start < cutoff) rateWindows.delete(ip);
   }
-}, 300000);
+}, 300000).unref();
 
 // ─── Timing-safe comparison helper (P0-3) ────────────────────────
 function timingSafeCompare(a, b) {
@@ -70,7 +70,7 @@ setInterval(() => {
   for (const [token, expiry] of sessions) {
     if (now > expiry) sessions.delete(token);
   }
-}, 30 * 60 * 1000);
+}, 30 * 60 * 1000).unref();
 
 function createAdminServer() {
   const app = express();

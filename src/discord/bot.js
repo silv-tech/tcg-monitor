@@ -42,6 +42,9 @@ async function createBot() {
       case 'test-asin':
         await handleTestAsin(interaction);
         break;
+      case 'freetier':
+        await handleFreeTier(interaction);
+        break;
     }
   });
 
@@ -51,7 +54,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '3';
+const COMMANDS_VERSION = '4';
 
 async function registerCommands() {
   const commands = [
@@ -82,6 +85,9 @@ async function registerCommands() {
         opt.setName('asin')
           .setDescription('Amazon ASIN (e.g. B0GW2DK37Q)')
           .setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('freetier')
+      .setDescription('Toggle the free tier alerts on or off'),
   ].map(cmd => cmd.toJSON());
 
   // Skip re-registration if commands haven't changed (saves Discord API calls)
@@ -120,7 +126,7 @@ async function handleStatus(interaction) {
 
   await interaction.editReply({
     content: [
-      '**Pulse Watch Status**',
+      '**Nocturne Monitors Status**',
       '',
       ...statusLines,
       '',
@@ -227,6 +233,35 @@ async function handleTestAsin(interaction) {
     await interaction.editReply({
       content: `✅ Test alert sent for **${asin}**${cached ? ' (from cache)' : ' (manual)'} — check paid channel for OLID!`,
     });
+  } catch (err) {
+    await interaction.editReply({ content: `Failed: ${err.message}` });
+  }
+}
+
+async function handleFreeTier(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    const channels = await state.getChannelsConfig() || {};
+    if (!channels.tiers) channels.tiers = {};
+    if (!channels.tiers.free) channels.tiers.free = {};
+
+    const currentlyEnabled = channels.tiers.free.enabled !== false;
+    channels.tiers.free.enabled = !currentlyEnabled;
+
+    await state.setChannelsConfig(channels);
+
+    // Write to disk + reload delivery module
+    const fs = require('fs');
+    const path = require('path');
+    const channelsPath = path.join(__dirname, '../config/channels.json');
+    const tmp = channelsPath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(channels, null, 2));
+    fs.renameSync(tmp, channelsPath);
+    delivery.reloadChannels();
+
+    const newState = !currentlyEnabled ? 'ON' : 'OFF';
+    logger.info(`Free tier toggled ${newState} via /freetier command`);
+    await interaction.editReply({ content: `Free tier alerts are now **${newState}**` });
   } catch (err) {
     await interaction.editReply({ content: `Failed: ${err.message}` });
   }

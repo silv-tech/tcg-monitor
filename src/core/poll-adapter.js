@@ -75,7 +75,7 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
   // Clean up stale products (with partial-result safety)
   const oldCount = Object.keys(oldProducts).length;
   const newCount = Object.keys(newProducts).length;
-  const isPartialResult = oldCount > 0 && newCount < oldCount * 0.5;
+  const isPartialResult = oldCount > 0 && newCount < oldCount * 0.3;
 
   if (isPartialResult) {
     logger.warn(`${adapter.name}: skipping stale cleanup — looks like a partial result (${newCount} new vs ${oldCount} cached)`);

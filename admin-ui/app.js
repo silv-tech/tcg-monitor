@@ -531,6 +531,16 @@ async function loadChannels() {
     `;
   }).join('');
 
+  // Free tier toggle button state
+  const freeEnabled = c.tiers?.free?.enabled !== false;
+  const ftBtn = document.getElementById('freeTierToggle');
+  if (ftBtn) {
+    ftBtn.textContent = freeEnabled ? 'ON' : 'OFF';
+    ftBtn.style.background = freeEnabled ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.08)';
+    ftBtn.style.color = freeEnabled ? '#4ade80' : '#f87171';
+    ftBtn.style.borderColor = freeEnabled ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)';
+  }
+
   // Tier delays
   setVal('ch-paid-delay', c.tiers?.paid?.delay || 0);
   setVal('ch-free-delay', c.tiers?.free?.delay || 45000);
@@ -642,7 +652,7 @@ async function saveChannels() {
   const config = {
     tiers: {
       paid: { delay: parseInt(getVal('ch-paid-delay')) || 0, channels: paidChannels },
-      free: { delay: parseInt(getVal('ch-free-delay')) || 45000, channels: freeChannels },
+      free: { delay: parseInt(getVal('ch-free-delay')) || 45000, channels: freeChannels, enabled: channelsData?.tiers?.free?.enabled !== false },
     },
     retailerChannels,
     enabledEvents,
@@ -668,6 +678,16 @@ async function saveChannels() {
     setTimeout(() => msg.classList.remove('show'), 3000);
   } catch (err) {
     log('Failed to save channels: ' + err.message);
+  }
+}
+
+async function toggleFreeTier() {
+  try {
+    const result = await api('/channels/freetier', { method: 'POST' });
+    log(`Free tier toggled ${result.enabled ? 'ON' : 'OFF'}`);
+    await loadChannels();
+  } catch (err) {
+    log('Failed to toggle free tier: ' + err.message);
   }
 }
 

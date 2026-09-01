@@ -59,6 +59,15 @@ function detectEvents(oldProduct, newProduct) {
     });
   }
 
+  // Pre-order live
+  if (!oldProduct.isPreorderable && newProduct.isPreorderable) {
+    events.push({
+      type: EVENT_TYPES.PREORDER_LIVE,
+      product: newProduct,
+      detail: `Pre-order now available at ${newProduct.retailer}`,
+    });
+  }
+
   // Shipping change
   if (oldProduct.shipsToHome !== newProduct.shipsToHome && newProduct.shipsToHome) {
     events.push({

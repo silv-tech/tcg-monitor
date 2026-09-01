@@ -263,6 +263,21 @@ async function saveChannelsConfig(channels) {
   delivery.reloadChannels();
 }
 
+// Toggle free tier on/off
+router.post('/channels/freetier', async (req, res) => {
+  const channels = await getChannelsWithRedis();
+  if (!channels.tiers) channels.tiers = {};
+  if (!channels.tiers.free) channels.tiers.free = {};
+
+  const currentlyEnabled = channels.tiers.free.enabled !== false;
+  channels.tiers.free.enabled = !currentlyEnabled;
+
+  await saveChannelsConfig(channels);
+  const newState = !currentlyEnabled;
+  logger.info(`Free tier toggled ${newState ? 'ON' : 'OFF'} via dashboard`);
+  res.json({ enabled: newState });
+});
+
 // Get channel config
 router.get('/channels', async (req, res) => {
   const channels = await getChannelsWithRedis();
@@ -277,13 +292,18 @@ router.put('/channels', async (req, res) => {
 
 // Update a single channel or role mapping
 router.patch('/channels', async (req, res) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return res.status(400).json({ error: 'Body must be a JSON object' });
+  }
   const channels = await getChannelsWithRedis();
-  // Deep merge
-  function merge(target, source) {
+  // Deep merge (max depth 5 to prevent prototype pollution)
+  function merge(target, source, depth = 0) {
+    if (depth > 5) return;
     for (const key of Object.keys(source)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
       if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
         if (!target[key]) target[key] = {};
-        merge(target[key], source[key]);
+        merge(target[key], source[key], depth + 1);
       } else {
         target[key] = source[key];
       }
@@ -302,6 +322,9 @@ router.get('/proxies', (req, res) => {
 
 // Update proxy list
 router.put('/proxies', (req, res) => {
+  if (!req.body || typeof req.body !== 'object') {
+    return res.status(400).json({ error: 'Body must be a valid JSON object' });
+  }
   atomicWriteSync(proxiesPath, JSON.stringify(req.body, null, 2));
   reloadProxies();
   res.json({ ok: true, pool: getProxyPoolStats() });

@@ -205,6 +205,7 @@ async function rebuildCrossRetailerIndex() {
   const results = await pipeline.exec();
 
   crossRetailerIndex.length = 0;
+  const MAX_INDEX_SIZE = 2000;
   for (const [err, data] of results) {
     if (err || !data) continue;
     const p = safeParse(data);
@@ -217,6 +218,7 @@ async function rebuildCrossRetailerIndex() {
       url: p.url,
       asin: p.retailerId === 'amazon' ? p.sku : null,
     });
+    if (crossRetailerIndex.length >= MAX_INDEX_SIZE) break;
   }
   indexLastBuilt = now;
 }
