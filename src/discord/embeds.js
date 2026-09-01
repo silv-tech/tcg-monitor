@@ -80,31 +80,64 @@ function buildAlertEmbed(event, tier) {
   // Type field
   embed.addFields({ name: 'Type', value: cfg.label, inline: true });
 
-  // SKU field
+  const isAmazon = product.retailerId === 'amazon';
+
+  // SKU / ASIN field
   if (product.sku) {
-    embed.addFields({ name: 'SKU', value: String(product.sku), inline: true });
+    embed.addFields({ name: isAmazon ? 'ASIN' : 'SKU', value: String(product.sku), inline: true });
   }
 
-  // Stock indicator (show count if available)
+  // Stock indicator
   if (product.stockCount != null && product.stockCount > 0) {
     embed.addFields({ name: 'Stock', value: String(product.stockCount), inline: true });
+  } else if (isAmazon) {
+    embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
   } else {
     const stockIcon = product.inStock ? '\u{1F7E2}' : '\u{1F534}';
     embed.addFields({ name: 'Online Stock', value: stockIcon, inline: true });
   }
 
-  // Variant ID (Shopify)
-  if (product._variantId) {
-    embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
+  if (isAmazon && product.sku) {
+    // ── Amazon-specific fields ──
+    const asin = String(product.sku);
+    const atcBase = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+
+    // One Click Checkout (two inline fields, side by side)
+    embed.addFields(
+      { name: 'One Click Checkout', value: `[ATCx1](${atcBase}1) | [ATCx2](${atcBase}2)`, inline: true },
+      { name: 'One Click Checkout', value: `[ATCx3](${atcBase}3) | [ATCx8](${atcBase}8)`, inline: true }
+    );
+
+    // Offer Id (ASIN in code block)
+    embed.addFields({ name: 'Offer Id', value: `\`${asin}\``, inline: false });
+
+    // Links
+    const encodedName = encodeURIComponent(product.name || '');
+    const links = [
+      `[Login](https://www.amazon.ca/ap/signin)`,
+      `[Cart](https://www.amazon.ca/gp/cart/view.html)`,
+      `[Amazon Business](https://business.amazon.ca/)`,
+      `[Keepa](https://keepa.com/#!product/6-${asin})`,
+      `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
+      `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
+    ].join(' | ');
+    embed.addFields({ name: 'Links', value: links, inline: false });
+  } else {
+    // ── Non-Amazon fields ──
+
+    // Variant ID (Shopify)
+    if (product._variantId) {
+      embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
+    }
+
+    // Cart status
+    const cartIcon = product.canAddToCart ? '\u{1F7E2}' : '\u{1F534}';
+    embed.addFields({ name: 'Add to Cart', value: cartIcon, inline: true });
+
+    // Ships to home
+    const shipIcon = product.shipsToHome ? '\u{1F7E2}' : '\u{1F534}';
+    embed.addFields({ name: 'Ships Home', value: shipIcon, inline: true });
   }
-
-  // Cart status
-  const cartIcon = product.canAddToCart ? '\u{1F7E2}' : '\u{1F534}';
-  embed.addFields({ name: 'Add to Cart', value: cartIcon, inline: true });
-
-  // Ships to home
-  const shipIcon = product.shipsToHome ? '\u{1F7E2}' : '\u{1F534}';
-  embed.addFields({ name: 'Ships Home', value: shipIcon, inline: true });
 
   // ── Footer ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
