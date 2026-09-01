@@ -7,8 +7,10 @@ const retailersPath = path.join(__dirname, '../config/retailers.json');
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes without check = stale
 
 // Adapter health: track consecutive 0-product polls (#4)
+// Threshold 6 accounts for ScraperAPI rate limiting (5-min intervals) — adapters
+// polling every 60s will have ~5 rate-limited polls between successful ones
 const zeroProductPolls = new Map(); // retailerId → consecutive count
-const ZERO_PRODUCT_THRESHOLD = 3;
+const ZERO_PRODUCT_THRESHOLD = 6;
 
 async function checkHealth() {
   // Merge base config with Redis overrides so enabled state is accurate

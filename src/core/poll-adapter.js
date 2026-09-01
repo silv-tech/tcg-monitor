@@ -95,7 +95,13 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
   await state.clearErrors(adapter.id);
 
   // Track product count for adapter health monitoring
-  recordProductCount(adapter.id, Object.keys(newProducts).length);
+  // Skip zero-product counter when cached products exist — this is a rate-limit, not a failure
+  if (newCount === 0 && oldCount > 0) {
+    // Rate-limited poll: don't penalize health — data is still in Redis from last successful poll
+    logger.debug(`${adapter.name}: 0 products (rate-limited), skipping health counter (${oldCount} cached)`);
+  } else {
+    recordProductCount(adapter.id, newCount);
+  }
 
   return { success: true, productCount: newCount, eventCount, pollMs };
 }
