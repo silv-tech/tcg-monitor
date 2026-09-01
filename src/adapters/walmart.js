@@ -12,8 +12,13 @@ class WalmartAdapter extends BaseAdapter {
       'pokemon tcg',
       'pokemon booster box',
       'pokemon elite trainer box',
+      'pokemon tcg collection',
       'one piece card game',
       'dragon ball super card game',
+      'yu-gi-oh booster box',
+      'lorcana booster box',
+      'magic the gathering booster box',
+      'digimon card game',
     ];
   }
 

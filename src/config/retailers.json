@@ -418,7 +418,7 @@
     "proxyTier": "none",
     "enabled": true,
     "color": "#1a1a2e",
-    "collections": ["booster-packs", "disney-lorcana-sealed-in-stock", "dragon-ball-fusion-world-sealed", "digimon-sealed-in-stock"],
-    "searchKeywords": ["pokemon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "sealed"]
+    "collections": [],
+    "searchKeywords": ["pokemon", "pokémon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "yugioh", "yu-gi-oh", "digimon", "magic the gathering", "flesh and blood", "weiss schwarz", "cardfight vanguard", "union arena", "star wars unlimited", "sealed", "tcg", "trading card"]
   }
 ]
