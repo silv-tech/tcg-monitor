@@ -55,23 +55,33 @@ async function getBrowser(proxyUrl) {
   return browser;
 }
 
+// Common viewport sizes to randomize — avoids fingerprinting from a single fixed resolution
+const VIEWPORTS = [
+  { width: 1920, height: 1080 },
+  { width: 1536, height: 864 },
+  { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 2560, height: 1440 },
+];
+
 async function browserFetch(url, opts = {}) {
   const { proxyUrl, timeoutMs = 30000, waitForSelector, extractJson = false } = opts;
 
   const b = await getBrowser(proxyUrl);
-  // Patchright handles UA, sec-ch-ua, and all fingerprint consistency automatically
+  const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+
   const context = await b.newContext({
     locale: 'en-CA',
     timezoneId: 'America/Toronto',
-    viewport: { width: 1920, height: 1080 },
+    viewport,
   });
 
   const page = await context.newPage();
 
-  // Block unnecessary resources to speed up loading
+  // Block images and media only — DO NOT block fonts/stylesheets (bot detection red flag)
   await page.route('**/*', route => {
     const type = route.request().resourceType();
-    if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+    if (['image', 'media'].includes(type)) {
       return route.abort();
     }
     return route.continue();
@@ -83,6 +93,21 @@ async function browserFetch(url, opts = {}) {
     if (waitForSelector) {
       await page.waitForSelector(waitForSelector, { timeout: timeoutMs });
     }
+
+    // Simulate human behavior — mouse movements and scroll
+    try {
+      // Random mouse movements (3-5 points)
+      const moves = 3 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < moves; i++) {
+        const x = 100 + Math.floor(Math.random() * (viewport.width - 200));
+        const y = 100 + Math.floor(Math.random() * (viewport.height - 200));
+        await page.mouse.move(x, y, { steps: 5 + Math.floor(Math.random() * 10) });
+        await page.waitForTimeout(200 + Math.floor(Math.random() * 300));
+      }
+      // Small scroll
+      await page.mouse.wheel(0, 200 + Math.floor(Math.random() * 300));
+      await page.waitForTimeout(500 + Math.floor(Math.random() * 500));
+    } catch { /* behavioral sim is best-effort */ }
 
     // Randomized wait — let JS execute and challenge scripts resolve
     const delay = 2000 + Math.floor(Math.random() * 2000);

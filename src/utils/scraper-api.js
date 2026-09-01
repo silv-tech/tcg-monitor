@@ -15,8 +15,11 @@ const CREDIT_COSTS = {
 const creditUsage = { total: 0, byRetailer: {}, sessionStart: Date.now() };
 
 // Rate limiter: prevent excessive ScraperAPI calls (costs money)
-// Budget: 100K credits/month. At 20 min intervals: ~75K credits/month (safe margin)
-const MIN_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes between ScraperAPI calls per retailer
+// Budget: 100K credits/month on Hobby plan ($49/mo)
+// Structured endpoints: 9 queries × 5 credits × 2/hr × 24h × 30d = 64,800 credits
+// Pokemon Center: 25 credits × 2/hr × 24h × 30d = 36,000 credits
+// Total: ~100,800/month — right at budget
+const MIN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes between ScraperAPI calls per query
 const lastCallByRetailer = new Map(); // retailerId → timestamp
 
 /**
@@ -122,8 +125,128 @@ function getCreditUsage() {
   return { ...creditUsage };
 }
 
+/**
+ * ScraperAPI Structured Data Endpoints — purpose-built for e-commerce sites.
+ * These handle anti-bot automatically at 5 credits/request (vs 10-25 for generic scraping).
+ * Returns clean JSON instead of raw HTML.
+ */
+
+/**
+ * Search Amazon via ScraperAPI structured endpoint.
+ * @param {string} query - Search query (e.g., "pokemon tcg booster box")
+ * @param {object} opts
+ * @param {string} opts.tld - Amazon TLD (default: 'ca' for amazon.ca)
+ * @param {string} opts.retailerId - For credit tracking and rate limiting
+ * @returns {object|null} Parsed JSON response, or null if rate-limited
+ */
+async function amazonSearch(query, opts = {}) {
+  if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+
+  const { tld = 'ca', retailerId = 'amazon' } = opts;
+
+  // Rate limit
+  const now = Date.now();
+  const lastCall = lastCallByRetailer.get(`${retailerId}:${query}`) || 0;
+  if (now - lastCall < MIN_INTERVAL_MS) {
+    logger.debug(`ScraperAPI: rate-limited Amazon search "${query}" for ${retailerId}`);
+    return null;
+  }
+  lastCallByRetailer.set(`${retailerId}:${query}`, now);
+
+  const params = new URLSearchParams({
+    api_key: SCRAPER_API_KEY,
+    query,
+    tld,
+    country_code: tld,
+  });
+
+  const apiUrl = `${SCRAPER_API_BASE}/structured/amazon/search?${params}`;
+  const cost = 5; // Structured e-commerce endpoints cost 5 credits
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(apiUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`ScraperAPI Amazon search: HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    creditUsage.total += cost;
+    creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
+    logger.info(`ScraperAPI: Amazon search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
+
+    return data;
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error(`ScraperAPI Amazon search: timeout for "${query}"`);
+    throw err;
+  }
+}
+
+/**
+ * Search Walmart via ScraperAPI structured endpoint.
+ * @param {string} query - Search query (e.g., "pokemon tcg")
+ * @param {object} opts
+ * @param {string} opts.tld - Walmart TLD (default: 'ca' for walmart.ca)
+ * @param {string} opts.retailerId - For credit tracking and rate limiting
+ * @returns {object|null} Parsed JSON response, or null if rate-limited
+ */
+async function walmartSearch(query, opts = {}) {
+  if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+
+  const { tld = 'ca', retailerId = 'walmart' } = opts;
+
+  // Rate limit
+  const now = Date.now();
+  const lastCall = lastCallByRetailer.get(`${retailerId}:${query}`) || 0;
+  if (now - lastCall < MIN_INTERVAL_MS) {
+    logger.debug(`ScraperAPI: rate-limited Walmart search "${query}" for ${retailerId}`);
+    return null;
+  }
+  lastCallByRetailer.set(`${retailerId}:${query}`, now);
+
+  const params = new URLSearchParams({
+    api_key: SCRAPER_API_KEY,
+    query,
+    tld,
+    country_code: tld,
+  });
+
+  const apiUrl = `${SCRAPER_API_BASE}/structured/walmart/search?${params}`;
+  const cost = 5;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(apiUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`ScraperAPI Walmart search: HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    creditUsage.total += cost;
+    creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
+    logger.info(`ScraperAPI: Walmart search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
+
+    return data;
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error(`ScraperAPI Walmart search: timeout for "${query}"`);
+    throw err;
+  }
+}
+
 function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, getCreditUsage, isConfigured };
+module.exports = { scraperFetch, amazonSearch, walmartSearch, getCreditUsage, isConfigured };

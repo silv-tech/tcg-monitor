@@ -1,120 +1,101 @@
 const BaseAdapter = require('./base');
-const cheerio = require('cheerio');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { classifyError } = require('../core/failure-reasons');
-
-let cookieSession;
-try { cookieSession = require('../utils/cookie-session'); } catch { cookieSession = null; }
+const { amazonSearch, isConfigured } = require('../utils/scraper-api');
 
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.domain = 'www.amazon.ca';
-    this.searchUrls = [
-      `${this.url}/s?k=pokemon+tcg+booster+box&rh=n%3A6388804011`,
-      `${this.url}/s?k=pokemon+elite+trainer+box`,
-      `${this.url}/s?k=one+piece+card+game+booster+box`,
-      `${this.url}/s?k=pokemon+tcg+collection+box`,
+    // Search queries for ScraperAPI structured endpoint
+    this.searchQueries = [
+      'pokemon tcg booster box',
+      'pokemon elite trainer box',
+      'one piece card game booster box',
+      'pokemon tcg collection box',
     ];
   }
 
-  _isChallenge(html) {
-    if (html.includes('captcha') || html.includes('Robot Check') || html.includes('Enter the characters')) return true;
-    if (html.length < 5000) return true;
-    // If the response is large but doesn't contain search results, we got a redirect/block page
-    if (!html.includes('s-search-result') && !html.includes('data-asin')) return true;
-    return false;
-  }
-
   async fetchProducts() {
+    if (!isConfigured()) {
+      throw new Error('Amazon: SCRAPER_API_KEY not configured — structured endpoint required');
+    }
+
     const products = {};
 
-    for (const searchUrl of this.searchUrls) {
+    for (const query of this.searchQueries) {
       try {
-        // Try browser first (free), fall back to ScraperAPI (paid) on challenge
-        // ScraperAPI can't bypass Akamai at any tier — browser only, no paid fallback
-        const html = await this.protectedFetch(searchUrl, {
-          timeoutMs: 30000,
-          waitForSelector: '[data-component-type="s-search-result"]',
-          challengeDetector: (h) => this._isChallenge(h),
-          noScraper: true,
+        const data = await amazonSearch(query, {
+          tld: 'ca',
+          retailerId: this.id,
         });
 
-        if (!html || this._isChallenge(html)) {
-          logger.warn(`Amazon: all methods returned challenge for ${searchUrl}`, { reason: 'bot_challenge' });
+        if (!data) {
+          logger.debug(`Amazon: rate-limited for "${query}"`);
           continue;
         }
 
-        const $ = cheerio.load(html);
-        const resultCount = $('[data-component-type="s-search-result"]').length;
+        // ScraperAPI structured endpoint returns { results: [...] } or { organic_results: [...] }
+        const results = data.results || data.organic_results || data.search_results || [];
 
-        if (resultCount === 0) {
-          // Log diagnostic info
-          const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || 'unknown';
-          logger.warn(`Amazon: 0 results on page. Title: "${title}", HTML: ${html.length} bytes`, { reason: 'parse_error' });
+        if (results.length === 0) {
+          logger.warn(`Amazon: 0 results from structured API for "${query}"`, { reason: 'empty_response' });
           continue;
         }
 
-        $('[data-component-type="s-search-result"]').each((_, el) => {
+        for (const item of results) {
           try {
-            const $el = $(el);
-            const asin = $el.attr('data-asin');
-            if (!asin) return;
+            const asin = item.asin;
+            if (!asin) continue;
 
-            const name = $el.find('h2 .a-text-normal, h2 a span').first().text().trim();
-            if (!name) return;
+            const name = item.name || item.title;
+            if (!name) continue;
 
             // Skip non-TCG results
             const lowerName = name.toLowerCase();
             const isTCG = ['pokemon', 'tcg', 'card game', 'booster', 'trainer box', 'one piece'].some(
               kw => lowerName.includes(kw)
             );
-            if (!isTCG) return;
+            if (!isTCG) continue;
 
-            const href = $el.find('h2 a').first().attr('href') || '';
-            const url = href.startsWith('http') ? href : `${this.url}${href}`;
+            // Skip third-party sellers — only show Amazon-fulfilled
+            const seller = (item.sold_by || item.seller || '').toLowerCase();
+            if (seller && !seller.includes('amazon')) continue;
 
-            const priceWhole = $el.find('.a-price .a-price-whole').first().text().replace(',', '');
-            const priceFraction = $el.find('.a-price .a-price-fraction').first().text();
-            let price = null;
-            if (priceWhole) {
-              price = parseFloat(`${priceWhole}.${priceFraction || '00'}`);
-            }
+            const price = typeof item.price === 'number' ? item.price :
+              normalizePrice(item.price_string || item.price);
 
-            const image = $el.find('.s-image').first().attr('src') || '';
+            const url = item.url || item.product_url || item.link ||
+              `${this.url}/dp/${asin}`;
+            const fullUrl = url.startsWith('http') ? url : `${this.url}${url}`;
 
-            // Skip third-party sellers — only show "Ships from and sold by Amazon.ca"
-            const sellerText = $el.find('.a-row.a-size-base .a-color-secondary, .s-merchant-info').text().toLowerCase();
-            if (sellerText && !sellerText.includes('amazon') && sellerText.includes('sold by')) return;
+            const image = item.image || item.thumbnail || '';
 
-            const outOfStock = $el.find('.a-color-error').text().toLowerCase().includes('currently unavailable') ||
-              $el.text().toLowerCase().includes('currently unavailable');
+            // Stock: if we have price, assume in stock (structured API only returns available items)
+            const inStock = price != null;
 
             const product = this.classify({
               sku: asin,
               name,
               price,
               currency: 'CAD',
-              url,
+              url: fullUrl,
               image,
-              inStock: !outOfStock && price != null,
-              canAddToCart: !outOfStock && price != null,
+              inStock,
+              canAddToCart: inStock,
               shipsToHome: true,
             });
 
             products[product.sku] = product;
           } catch (err) {
-            logger.debug(`Amazon: failed to parse result: ${err.message}`);
+            logger.debug(`Amazon: failed to parse item: ${err.message}`);
           }
-        });
-      } catch (err) {
-        logger.warn(`Amazon: failed to fetch search: ${err.message}`, { reason: classifyError(err) });
-      }
-    }
+        }
 
-    if (Object.keys(products).length === 0 && this.searchUrls.length > 0) {
-      throw new Error('All searches returned 0 products — Akamai may be blocking');
+        logger.info(`Amazon: "${query}" returned ${results.length} results, ${Object.keys(products).length} total products`);
+      } catch (err) {
+        logger.warn(`Amazon: structured search failed for "${query}": ${err.message}`);
+      }
     }
 
     return products;
