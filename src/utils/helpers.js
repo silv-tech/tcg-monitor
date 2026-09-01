@@ -51,6 +51,11 @@ const NON_TCG_KEYWORDS = [
   'lego', 'mega construx', 'building set',
   'dvd', 'blu-ray', 'movie', 'season ',
   'final blast', 'dragon stars', 'super warrior',
+  'cards against humanity', 'monopoly', 'uno ', 'uno:', 'phase 10',
+  'exploding kittens', 'codenames', 'catan', 'risk ', 'clue ',
+  'sorry!', 'skip-bo', 'sequence', 'apples to apples',
+  'card storage', 'storage box', 'card organizer', 'card holder',
+  'card sleeves', 'card protector', 'toploader', 'top loader',
 ];
 
 function isTCGProduct(name) {

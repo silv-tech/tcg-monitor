@@ -51,11 +51,11 @@ class AmazonAdapter extends BaseAdapter {
             const name = item.name || item.title;
             if (!name) continue;
 
-            // Skip non-TCG results
+            // Skip non-TCG results — use specific brand/product keywords, not generic "card game"
             const lowerName = name.toLowerCase();
-            const isTCG = ['pokemon', 'tcg', 'card game', 'booster', 'trainer box', 'one piece'].some(
-              kw => lowerName.includes(kw)
-            );
+            const isTCG = ['pokemon', 'tcg', 'booster', 'trainer box', 'one piece',
+              'dragon ball', 'lorcana', 'yugioh', 'yu-gi-oh', 'magic the gathering',
+              'trading card'].some(kw => lowerName.includes(kw));
             if (!isTCG) continue;
 
             // Skip third-party sellers — only show Amazon-fulfilled
