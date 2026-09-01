@@ -9,6 +9,7 @@ const logger = require('../monitoring/logger');
 
 const delivery = require('../discord/delivery');
 const { runScan } = require('../core/scan');
+const { getBudgetStatus } = require('../utils/scraper-api');
 
 const router = express.Router();
 
@@ -50,9 +51,19 @@ router.patch('/retailers/:id', async (req, res) => {
   const retailer = retailers.find(r => r.id === req.params.id);
   if (!retailer) return res.status(404).json({ error: 'Retailer not found' });
 
+  // Input validation (#18)
   const changes = {};
-  if (req.body.enabled !== undefined) changes.enabled = req.body.enabled;
-  if (req.body.intervalMs !== undefined) changes.intervalMs = req.body.intervalMs;
+  if (req.body.enabled !== undefined) {
+    if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
+    changes.enabled = req.body.enabled;
+  }
+  if (req.body.intervalMs !== undefined) {
+    if (typeof req.body.intervalMs !== 'number' || req.body.intervalMs < 5000 || req.body.intervalMs > 600000) {
+      return res.status(400).json({ error: 'intervalMs must be a number between 5000 and 600000' });
+    }
+    changes.intervalMs = req.body.intervalMs;
+  }
+  if (Object.keys(changes).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
 
   await state.setRetailerOverride(req.params.id, changes);
   res.json({ ...retailer, ...changes });
@@ -63,6 +74,20 @@ router.post('/retailers', (req, res) => {
   const { id, name, url, adapter, intervalMs, proxyTier, color } = req.body;
   if (!id || !name || !url || !adapter) {
     return res.status(400).json({ error: 'id, name, url, and adapter are required' });
+  }
+  // Input validation (#18)
+  if (typeof id !== 'string' || !/^[a-z0-9_-]+$/.test(id)) {
+    return res.status(400).json({ error: 'id must be lowercase alphanumeric with hyphens/underscores' });
+  }
+  if (typeof name !== 'string' || name.length > 100) {
+    return res.status(400).json({ error: 'name must be a string under 100 chars' });
+  }
+  if (typeof url !== 'string' || !url.startsWith('http')) {
+    return res.status(400).json({ error: 'url must be a valid HTTP URL' });
+  }
+  const validAdapters = ['shopify', 'walmart', 'amazon', 'costco', 'pokemoncenter', 'bestbuy', 'ebgames'];
+  if (!validAdapters.includes(adapter)) {
+    return res.status(400).json({ error: `adapter must be one of: ${validAdapters.join(', ')}` });
   }
 
   const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
@@ -173,6 +198,11 @@ router.get('/stats/proxy', (req, res) => {
   res.json(getProxyStats());
 });
 
+// ScraperAPI budget status (#2)
+router.get('/stats/budget', (req, res) => {
+  res.json(getBudgetStatus());
+});
+
 // Circuit breaker status
 router.get('/stats/circuits', (req, res) => {
   res.json(scheduler.getCircuitStatus());
@@ -206,7 +236,7 @@ router.get('/state/:retailerId', async (req, res) => {
 // Manual scan — resend cached products to Discord
 router.post('/scan', async (req, res) => {
   const hours = req.body.hours;
-  if (hours !== 12 && hours !== 24) {
+  if (typeof hours !== 'number' || (hours !== 12 && hours !== 24)) {
     return res.status(400).json({ error: 'hours must be 12 or 24' });
   }
   try {
@@ -225,10 +255,11 @@ async function getChannelsWithRedis() {
   return JSON.parse(fs.readFileSync(channelsPath, 'utf-8'));
 }
 
-// Helper: save channels config to both Redis and file (file needed for delivery.reloadChannels())
+// Save channels config to Redis (#20) — file write kept for backward compat with delivery.reloadChannels()
 async function saveChannelsConfig(channels) {
   await state.setChannelsConfig(channels);
-  atomicWriteSync(channelsPath, JSON.stringify(channels, null, 2));
+  // Still write file since delivery.reloadChannels() reads from disk
+  try { atomicWriteSync(channelsPath, JSON.stringify(channels, null, 2)); } catch {}
   delivery.reloadChannels();
 }
 

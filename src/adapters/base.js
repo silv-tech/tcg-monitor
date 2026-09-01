@@ -3,7 +3,7 @@ const { httpGet } = require('../utils/http');
 const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl, getNextIspProxy, recordRequest, markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
-const { classifyCategory, classifyProductType, isTCGProduct } = require('../utils/helpers');
+const { classifyCategory, isTCGProduct } = require('../utils/helpers');
 const scraperApi = require('../utils/scraper-api');
 
 let browserModule;
@@ -21,6 +21,7 @@ class BaseAdapter {
     this.proxyTier = retailerConfig.proxyTier;
     this.color = retailerConfig.color;
     this.enabled = retailerConfig.enabled;
+    this.maxProducts = retailerConfig.maxProducts || 500; // Configurable cap (#17)
 
     // Circuit breaker: stop wasting proxy bandwidth after consecutive browser failures
     this._browserFailCount = 0;
@@ -246,7 +247,6 @@ class BaseAdapter {
 
   classify(product) {
     product.category = classifyCategory(product.name, productsConfig.categories);
-    product.productType = classifyProductType(product.name, productsConfig.productTypes);
     product.isTCG = isTCGProduct(product.name);
     product.retailer = this.name;
     product.retailerId = this.id;
@@ -263,6 +263,14 @@ class BaseAdapter {
     const start = Date.now();
     try {
       const products = await this.fetchProducts();
+      // Product cap (#17) — prevent runaway adapters from consuming too much memory/Redis
+      const keys = Object.keys(products);
+      if (keys.length > this.maxProducts) {
+        logger.warn(`${this.name}: ${keys.length} products exceeds cap of ${this.maxProducts}, truncating`);
+        for (const key of keys.slice(this.maxProducts)) {
+          delete products[key];
+        }
+      }
       const elapsed = Date.now() - start;
       logger.info(`${this.name}: found ${Object.keys(products).length} products in ${elapsed}ms`);
       return products;

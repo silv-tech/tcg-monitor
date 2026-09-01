@@ -28,6 +28,7 @@ async function getBrowser(proxyUrl) {
     try {
       patchright = require('patchright');
     } catch {
+      browsers.delete(key);
       throw new Error('patchright not installed. Run: npm install patchright && npx patchright install chromium');
     }
   }
@@ -49,10 +50,15 @@ async function getBrowser(proxyUrl) {
     };
   }
 
-  const browser = await patchright.chromium.launch(launchOpts);
-  browsers.set(key, { browser, launching: false });
-  logger.info(`Patchright browser launched (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
-  return browser;
+  try {
+    const browser = await patchright.chromium.launch(launchOpts);
+    browsers.set(key, { browser, launching: false });
+    logger.info(`Patchright browser launched (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
+    return browser;
+  } catch (err) {
+    browsers.delete(key);
+    throw err;
+  }
 }
 
 // Common viewport sizes to randomize — avoids fingerprinting from a single fixed resolution

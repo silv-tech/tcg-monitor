@@ -70,6 +70,23 @@ function buildCrossRetailerValue(matches) {
   }).join(' | ');
 }
 
+function buildPriceHistoryValue(history) {
+  if (!history || history.length < 2) return null;
+  const entries = history.slice(-5); // last 5 price points
+  return entries.map(h => {
+    const daysAgo = formatDaysAgo(h.time);
+    return `$${h.price.toFixed(2)} (${daysAgo})`;
+  }).join(' → ');
+}
+
+function formatFreshness(lastCheckedAt) {
+  if (!lastCheckedAt) return null;
+  const agoMs = Date.now() - lastCheckedAt;
+  if (agoMs < 60000) return `${Math.round(agoMs / 1000)}s ago`;
+  if (agoMs < 3600000) return `${Math.round(agoMs / 60000)}m ago`;
+  return `${Math.round(agoMs / 3600000)}h ago`;
+}
+
 // ─── Main builder ────────────────────────────────────────────────
 
 function buildAlertEmbed(event, tier) {
@@ -131,15 +148,42 @@ function buildAlertEmbed(event, tier) {
     // ── Amazon-specific fields ──
     const asin = String(product.sku);
 
+    // One Click Checkout — CA (ATCx1 | ATCx2 row, ATCx3 | ATCx8 row)
+    const atcCa = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+    embed.addFields({
+      name: 'One Click Checkout',
+      value: `[ATCx1](${atcCa}1) | [ATCx2](${atcCa}2)`,
+      inline: false,
+    });
+    embed.addFields({
+      name: 'One Click Checkout',
+      value: `[ATCx3](${atcCa}3) | [ATCx8](${atcCa}8)`,
+      inline: false,
+    });
+
+    // One Click Checkout — US
+    const atcUs = `https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+    embed.addFields({
+      name: '\u{1F1FA}\u{1F1F8} One Click Checkout',
+      value: `[ATCx1](${atcUs}1) | [ATCx2](${atcUs}2)`,
+      inline: false,
+    });
+    embed.addFields({
+      name: '\u{1F1FA}\u{1F1F8} One Click Checkout',
+      value: `[ATCx3](${atcUs}3) | [ATCx8](${atcUs}8)`,
+      inline: false,
+    });
+
     // Offer Id (ASIN in code block)
     embed.addFields({ name: 'Offer Id', value: `\`${asin}\``, inline: false });
 
     // Links
     const encodedName = encodeURIComponent(product.name || '');
     const links = [
+      `[Login](https://www.amazon.ca/ap/signin)`,
       `[Cart](https://www.amazon.ca/gp/cart/view.html)`,
+      `[Amazon Business](https://www.amazon.ca/business)`,
       `[Keepa](https://keepa.com/#!product/6-${asin})`,
-      `[CamelCamelCamel](https://ca.camelcamelcamel.com/product/${asin})`,
       `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
       `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
     ].join(' | ');
@@ -167,19 +211,29 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Restock History', value: restockValue, inline: false });
   }
 
+  // ── Price History (#12) ──
+  const priceValue = buildPriceHistoryValue(event._priceHistory);
+  if (priceValue) {
+    embed.addFields({ name: 'Price History', value: priceValue, inline: false });
+  }
+
   // ── Cross-Retailer Price Check (all retailers) ──
   const crossValue = buildCrossRetailerValue(event._crossRetailer);
   if (crossValue) {
     embed.addFields({ name: 'Also In Stock', value: crossValue, inline: false });
   }
 
-  // ── Footer with detection speed ──
+  // ── Footer with detection speed + freshness (#11) ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
   let footerText = `Pulse Watch  ·  ${tierLabel}`;
   if (event._detectedAt) {
     const speedMs = Date.now() - event._detectedAt;
     const speedSec = (speedMs / 1000).toFixed(1);
     footerText += `  ·  \u26A1 ${speedSec}s`;
+  }
+  const freshness = formatFreshness(event._lastCheckedAt);
+  if (freshness) {
+    footerText += `  ·  Checked: ${freshness}`;
   }
   embed.setFooter({ text: footerText });
 
@@ -192,31 +246,6 @@ function buildAlertEmbed(event, tier) {
           .setLabel(cfg.button)
           .setURL(product.url)
           .setStyle(ButtonStyle.Link)
-      )
-    );
-  }
-
-  // ── Amazon ATC buttons (replace old markdown links) ──
-  if (isAmazon && product.sku) {
-    const asin = String(product.sku);
-    const atcCa = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
-    const atcUs = `https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
-
-    // Row 2: Canada ATC buttons
-    components.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('\u{1F1E8}\u{1F1E6} Cop x1').setURL(`${atcCa}1`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('\u{1F1E8}\u{1F1E6} Cop x2').setURL(`${atcCa}2`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('\u{1F1E8}\u{1F1E6} Cop x3').setURL(`${atcCa}3`).setStyle(ButtonStyle.Link),
-      )
-    );
-
-    // Row 3: US ATC buttons
-    components.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('\u{1F1FA}\u{1F1F8} Cop x1').setURL(`${atcUs}1`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('\u{1F1FA}\u{1F1F8} Cop x2').setURL(`${atcUs}2`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('\u{1F1FA}\u{1F1F8} Cop x3').setURL(`${atcUs}3`).setStyle(ButtonStyle.Link),
       )
     );
   }

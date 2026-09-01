@@ -78,8 +78,24 @@ function createAdminServer() {
   // P2-6: No open CORS — dashboard is served from same origin, no cross-origin needed
   app.use(express.json({ limit: '100kb' }));
 
-  // ─── Login endpoint (username/password → session token) ────────
+  // ─── Login rate limit (#19): 5 attempts per minute per IP ────────
+  const loginAttempts = new Map();
+  const LOGIN_LIMIT = 5;
+  const LOGIN_WINDOW_MS = 60000;
+
   app.post('/api/login', (req, res) => {
+    const ip = req.ip;
+    const now = Date.now();
+    let window = loginAttempts.get(ip);
+    if (!window || now - window.start > LOGIN_WINDOW_MS) {
+      window = { start: now, count: 0 };
+      loginAttempts.set(ip, window);
+    }
+    window.count++;
+    if (window.count > LOGIN_LIMIT) {
+      return res.status(429).json({ error: 'Too many login attempts — try again in a minute' });
+    }
+
     const { username, password } = req.body || {};
     const validUser = timingSafeCompare(username, config.admin.username);
     const validPass = timingSafeCompare(password, config.admin.password);

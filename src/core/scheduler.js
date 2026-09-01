@@ -3,6 +3,8 @@ const state = require('./state');
 const { diffProducts, EVENT_TYPES } = require('./events');
 const { recordPollLatency } = require('./proxy');
 const { sleep } = require('../utils/helpers');
+const { recordProductCount } = require('../monitoring/health');
+const { pollAdapterOnce } = require('./poll-adapter');
 
 // Circuit breaker thresholds
 const CIRCUIT_ERROR_THRESHOLD = 5;   // consecutive errors to trip
@@ -59,6 +61,12 @@ class Scheduler {
   }
 
   _shouldPoll(adapter) {
+    // Redis watchdog pause (#3)
+    if (this._redisPaused) {
+      logger.debug(`${adapter.name}: skipping poll — Redis is down`);
+      return false;
+    }
+
     const circuit = this._getCircuit(adapter.id);
 
     if (circuit.state === 'closed') return true;
@@ -84,71 +92,12 @@ class Scheduler {
     if (!this._shouldPoll(adapter)) return;
 
     this.polling.add(adapter.id);
-    const pollStart = Date.now();
     const circuit = this._getCircuit(adapter.id);
+    const ADAPTER_TIMEOUT = Math.max(adapter.intervalMs * 2, 120000);
 
     try {
-      const newProducts = await adapter.run();
-      const pollMs = Date.now() - pollStart;
-      recordPollLatency(adapter.id, pollMs);
-
-      const oldProducts = await state.getAllProducts(adapter.id);
-
-      // Seed mode: first poll for a retailer — cache products without firing events (P1-1)
-      const isFirstPoll = Object.keys(oldProducts).length === 0 && Object.keys(newProducts).length > 0;
-      if (isFirstPoll) {
-        logger.info(`${adapter.name}: first poll — seeding ${Object.keys(newProducts).length} products (no alerts fired)`);
-      }
-
-      if (!isFirstPoll) {
-        const events = diffProducts(oldProducts, newProducts);
-
-        if (events.length > 0) {
-          // Stamp detection time on events for delivery latency tracking
-          const detectedAt = Date.now();
-          for (const event of events) {
-            event._detectedAt = detectedAt;
-          }
-          // Record restock timestamps for history tracking
-          for (const event of events) {
-            if (event.type === EVENT_TYPES.RESTOCK && event.product?.sku) {
-              await state.recordRestock(adapter.id, event.product.sku);
-            }
-          }
-
-          logger.info(`${adapter.name}: ${events.length} event(s) detected (poll: ${pollMs}ms)`);
-          if (this.onEvents) {
-            await this.onEvents(events);
-          }
-        }
-      }
-
-      // Save state AFTER successful delivery — if delivery fails, events re-fire next poll
-      for (const [sku, product] of Object.entries(newProducts)) {
-        await state.setProduct(adapter.id, sku, product);
-      }
-
-      // Clean up stale products no longer returned by the adapter
-      // SAFETY: Skip cleanup if the new result looks partial — prevents mass false alerts
-      // when an adapter returns fewer products due to a flaky search URL or rate limit.
-      const oldCount = Object.keys(oldProducts).length;
-      const newCount = Object.keys(newProducts).length;
-      const isPartialResult = oldCount > 0 && newCount < oldCount * 0.5;
-
-      if (isPartialResult) {
-        logger.warn(`${adapter.name}: skipping stale cleanup — looks like a partial result (${newCount} new vs ${oldCount} cached). This prevents mass false alerts.`);
-      } else {
-        const staleSkus = Object.keys(oldProducts).filter(sku => !(sku in newProducts));
-        if (staleSkus.length > 0) {
-          for (const sku of staleSkus) {
-            await state.deleteProduct(adapter.id, sku);
-          }
-          logger.info(`${adapter.name}: cleaned up ${staleSkus.length} stale products from Redis`);
-        }
-      }
-
-      await state.setLastCheck(adapter.id);
-      await state.clearErrors(adapter.id);
+      // Delegate to extracted poll module (#22)
+      await pollAdapterOnce(adapter, circuit, this.onEvents, ADAPTER_TIMEOUT);
 
       // Success — reset circuit breaker
       if (circuit.state === 'open') {
@@ -156,13 +105,10 @@ class Scheduler {
       }
       circuit.errors = 0;
     } catch (err) {
-      const pollMs = Date.now() - pollStart;
-      recordPollLatency(adapter.id, pollMs);
-      const status = await state.recordError(adapter.id, err);
+      recordPollLatency(adapter.id, 0);
+      await state.recordError(adapter.id, err);
 
-      // Increment circuit error count
       circuit.errors++;
-
       if (circuit.errors >= CIRCUIT_ERROR_THRESHOLD && circuit.state === 'closed') {
         this._tripCircuit(adapter);
       }
@@ -258,6 +204,22 @@ class Scheduler {
 
       stagger += 3000;
     }
+
+    // Redis health watchdog (#3) — check every 30s, pause polls if Redis is down
+    this._redisWatchdog = setInterval(async () => {
+      try {
+        await state.getRedis().ping();
+        if (this._redisPaused) {
+          this._redisPaused = false;
+          logger.info('REDIS WATCHDOG: Redis recovered — resuming polls');
+        }
+      } catch (err) {
+        if (!this._redisPaused) {
+          this._redisPaused = true;
+          logger.error(`REDIS WATCHDOG: Redis unreachable (${err.message}) — pausing polls until recovery`);
+        }
+      }
+    }, 30000);
   }
 
   stop() {
@@ -266,6 +228,10 @@ class Scheduler {
       clearInterval(timer);
     }
     this.timers.clear();
+    if (this._redisWatchdog) {
+      clearInterval(this._redisWatchdog);
+      this._redisWatchdog = null;
+    }
     logger.info('Scheduler stopped');
   }
 

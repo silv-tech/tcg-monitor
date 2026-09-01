@@ -10,14 +10,6 @@ function classifyCategory(name, categories) {
   return 'other';
 }
 
-function classifyProductType(name, productTypes) {
-  const lower = name.toLowerCase();
-  for (const [type, keywords] of Object.entries(productTypes)) {
-    if (keywords.some(kw => lower.includes(kw))) return type;
-  }
-  return 'other';
-}
-
 function normalizePrice(priceStr) {
   if (typeof priceStr === 'number') return priceStr;
   if (!priceStr) return null;
@@ -71,4 +63,4 @@ function truncate(str, len = 256) {
   return str.length > len ? str.slice(0, len - 3) + '...' : str;
 }
 
-module.exports = { sleep, classifyCategory, classifyProductType, normalizePrice, hashSku, truncate, isTCGProduct };
+module.exports = { sleep, classifyCategory, normalizePrice, hashSku, truncate, isTCGProduct };

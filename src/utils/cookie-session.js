@@ -57,11 +57,16 @@ async function ensureBrowser(proxyUrl) {
     }
   }
 
-  const browser = await patchright.chromium.launch(opts);
-  browserCache.set(cacheKey, browser);
-  launching.delete(cacheKey);
-  logger.info(`Cookie session: browser launched (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
-  return browser;
+  try {
+    const browser = await patchright.chromium.launch(opts);
+    browserCache.set(cacheKey, browser);
+    launching.delete(cacheKey);
+    logger.info(`Cookie session: browser launched (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
+    return browser;
+  } catch (err) {
+    launching.delete(cacheKey);
+    throw err;
+  }
 }
 
 async function createStealthContext(browser) {
@@ -85,8 +90,12 @@ async function getSessionCookies(domain, seedUrl, opts = {}) {
 
   if (!forceRefresh) {
     const cached = cookieCache.get(domain);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.cookieString;
+    if (cached) {
+      if (cached.expiresAt > Date.now()) {
+        return cached.cookieString;
+      }
+      // Expired — remove stale entry so it's not reused
+      cookieCache.delete(domain);
     }
   }
 

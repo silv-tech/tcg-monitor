@@ -4,8 +4,19 @@ const logger = require('../monitoring/logger');
 const { buildAlertEmbed } = require('./embeds');
 const { filterDuplicates, markSent } = require('./dedup');
 const { recordAlertLatency } = require('../core/proxy');
-const { getRestockHistory, findCrossRetailerMatches } = require('../core/state');
+const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory } = require('../core/state');
 const { sleep } = require('../utils/helpers');
+
+// Event priority for delivery ordering (#7) — lower number = higher priority
+const EVENT_PRIORITY = {
+  RESTOCK: 0,
+  PREORDER_LIVE: 1,
+  CART_AVAILABLE: 2,
+  NEW_SKU: 3,
+  PRICE_CHANGE: 4,
+  SHIPPING_CHANGE: 5,
+  LISTING: 6,
+};
 
 let channelsConfig;
 try {
@@ -65,6 +76,12 @@ class DeliveryQueue {
     this.processing = true;
 
     while (this.queue.length > 0) {
+      // Sort by priority (#7): RESTOCK first, LISTING last
+      this.queue.sort((a, b) => {
+        const pa = EVENT_PRIORITY[a.event.type] ?? 9;
+        const pb = EVENT_PRIORITY[b.event.type] ?? 9;
+        return pa - pb;
+      });
       const { event, queuedAt } = this.queue.shift();
       try {
         await this.routeEvent(event, queuedAt);
@@ -92,8 +109,13 @@ class DeliveryQueue {
     try {
       if (product.retailerId && product.sku) {
         event._restockHistory = await getRestockHistory(product.retailerId, product.sku);
+        event._priceHistory = await getPriceHistory(product.retailerId, product.sku);
       }
       event._crossRetailer = await findCrossRetailerMatches(product);
+      // Freshness: when was this retailer last checked? (#10)
+      if (product.retailerId) {
+        event._lastCheckedAt = await getLastCheck(product.retailerId);
+      }
     } catch (err) {
       logger.debug(`Event enrichment failed: ${err.message}`);
     }
@@ -254,10 +276,10 @@ class DeliveryQueue {
       }
     }
 
-    // Webhook fallback
+    // Webhook fallback — includes components (#13)
     const webhookUrl = this.resolveWebhook(tier);
     if (webhookUrl) {
-      await this.sendWebhook(webhookUrl, embed, content);
+      await this.sendWebhook(webhookUrl, embed, content, components);
       return;
     }
 
@@ -282,9 +304,13 @@ class DeliveryQueue {
     return channelsConfig.webhooks[`${tier}_default`] || null;
   }
 
-  async sendWebhook(url, embed, content, retries = 0) {
+  async sendWebhook(url, embed, content, components, retries = 0) {
     const body = { embeds: [embed.toJSON()] };
     if (content) body.content = content;
+    // Include button components in webhook payload (#13)
+    if (components && components.length) {
+      body.components = components.map(c => c.toJSON());
+    }
 
     // P2-10: 10-second timeout via AbortController
     const controller = new AbortController();
@@ -303,7 +329,7 @@ class DeliveryQueue {
         const retryAfter = parseFloat(res.headers.get('retry-after') || '2') * 1000;
         logger.warn(`Webhook rate limited, retrying in ${retryAfter}ms`);
         await sleep(Math.min(retryAfter, 10000));
-        return this.sendWebhook(url, embed, content, retries + 1);
+        return this.sendWebhook(url, embed, content, components, retries + 1);
       }
 
       if (!res.ok) {

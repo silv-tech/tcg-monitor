@@ -1,19 +1,12 @@
 const assert = require('assert');
 const { describe, it } = require('node:test');
-const { classifyCategory, classifyProductType, normalizePrice, hashSku, truncate } = require('../src/utils/helpers');
+const { classifyCategory, normalizePrice, hashSku, truncate } = require('../src/utils/helpers');
 
 const categories = {
   pokemon: ['pokemon', 'pokémon', 'pikachu'],
   onepiece: ['one piece'],
   dragonball: ['dragon ball'],
   lorcana: ['lorcana'],
-};
-
-const productTypes = {
-  'booster-box': ['booster box', 'booster display', 'display box'],
-  'etb': ['elite trainer box', 'elite trainer', 'etb'],
-  'tin': ['tin'],
-  'blister': ['blister'],
 };
 
 describe('classifyCategory', () => {
@@ -31,24 +24,6 @@ describe('classifyCategory', () => {
 
   it('case insensitive', () => {
     assert.strictEqual(classifyCategory('POKEMON ELITE TRAINER BOX', categories), 'pokemon');
-  });
-});
-
-describe('classifyProductType', () => {
-  it('detects booster box', () => {
-    assert.strictEqual(classifyProductType('Pokemon Booster Box 36 Packs', productTypes), 'booster-box');
-  });
-
-  it('detects ETB', () => {
-    assert.strictEqual(classifyProductType('Scarlet & Violet Elite Trainer Box', productTypes), 'etb');
-  });
-
-  it('detects tin', () => {
-    assert.strictEqual(classifyProductType('Pokemon 2024 Collectors Tin', productTypes), 'tin');
-  });
-
-  it('returns other for unknown type', () => {
-    assert.strictEqual(classifyProductType('Some Random Product', productTypes), 'other');
   });
 });
 

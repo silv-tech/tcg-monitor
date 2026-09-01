@@ -34,7 +34,7 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     // Availability check rotation — ScraperAPI costs 25 credits/check, keep low
     this.checkIndex = 0;
-    this.CHECKS_PER_POLL = 3;
+    this.CHECKS_PER_POLL = 15;
   }
 
   isChallengePage(html) {
@@ -85,7 +85,8 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     // Phase 3: Build full product list — use cached availability for all products
     for (const [sku, meta] of this.sitemapProducts) {
-      const avail = this.availabilityCache.get(sku) || { inStock: true, price: null, image: '' };
+      // Default to NOT in stock for unchecked products — avoids false restock alerts
+      const avail = this.availabilityCache.get(sku) || { inStock: false, price: null, image: '' };
       products[sku] = this.classify({
         sku,
         name: meta.name,

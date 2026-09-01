@@ -23,79 +23,78 @@ class AmazonAdapter extends BaseAdapter {
 
     const products = {};
 
-    for (const query of this.searchQueries) {
-      try {
-        const data = await amazonSearch(query, {
-          tld: 'ca',
-          retailerId: this.id,
-        });
+    // Parallel search queries (#6) — all queries fire simultaneously
+    const searchResults = await Promise.allSettled(
+      this.searchQueries.map(query =>
+        amazonSearch(query, { tld: 'ca', retailerId: this.id })
+          .then(data => ({ query, data }))
+      )
+    );
 
-        if (!data) {
-          logger.debug(`Amazon: rate-limited for "${query}"`);
-          continue;
-        }
-
-        // ScraperAPI structured endpoint returns { results: [...] } or { organic_results: [...] }
-        const results = data.results || data.organic_results || data.search_results || [];
-
-        if (results.length === 0) {
-          logger.warn(`Amazon: 0 results from structured API for "${query}"`, { reason: 'empty_response' });
-          continue;
-        }
-
-        for (const item of results) {
-          try {
-            const asin = item.asin;
-            if (!asin) continue;
-
-            const name = item.name || item.title;
-            if (!name) continue;
-
-            // Skip non-TCG results — use specific brand/product keywords, not generic "card game"
-            const lowerName = name.toLowerCase();
-            const isTCG = ['pokemon', 'tcg', 'booster', 'trainer box', 'one piece',
-              'dragon ball', 'lorcana', 'yugioh', 'yu-gi-oh', 'magic the gathering',
-              'trading card'].some(kw => lowerName.includes(kw));
-            if (!isTCG) continue;
-
-            // Skip third-party sellers — only show Amazon-fulfilled
-            const seller = (item.sold_by || item.seller || '').toLowerCase();
-            if (seller && !seller.includes('amazon')) continue;
-
-            const price = typeof item.price === 'number' ? item.price :
-              normalizePrice(item.price_string || item.price);
-
-            const url = item.url || item.product_url || item.link ||
-              `${this.url}/dp/${asin}`;
-            const fullUrl = url.startsWith('http') ? url : `${this.url}${url}`;
-
-            const image = item.image || item.thumbnail || '';
-
-            // Stock: if we have price, assume in stock (structured API only returns available items)
-            const inStock = price != null;
-
-            const product = this.classify({
-              sku: asin,
-              name,
-              price,
-              currency: 'CAD',
-              url: fullUrl,
-              image,
-              inStock,
-              canAddToCart: inStock,
-              shipsToHome: true,
-            });
-
-            products[product.sku] = product;
-          } catch (err) {
-            logger.debug(`Amazon: failed to parse item: ${err.message}`);
-          }
-        }
-
-        logger.info(`Amazon: "${query}" returned ${results.length} results, ${Object.keys(products).length} total products`);
-      } catch (err) {
-        logger.warn(`Amazon: structured search failed for "${query}": ${err.message}`);
+    for (const result of searchResults) {
+      if (result.status === 'rejected') {
+        logger.warn(`Amazon: structured search failed: ${result.reason.message}`);
+        continue;
       }
+      const { query, data } = result.value;
+      if (!data) {
+        logger.debug(`Amazon: rate-limited for "${query}"`);
+        continue;
+      }
+
+      const results = data.results || data.organic_results || data.search_results || [];
+      if (results.length === 0) {
+        logger.warn(`Amazon: 0 results from structured API for "${query}"`, { reason: 'empty_response' });
+        continue;
+      }
+
+      for (const item of results) {
+        try {
+          const asin = item.asin;
+          if (!asin) continue;
+
+          const name = item.name || item.title;
+          if (!name) continue;
+
+          const lowerName = name.toLowerCase();
+          const isTCG = ['pokemon', 'tcg', 'booster', 'trainer box', 'one piece',
+            'dragon ball', 'lorcana', 'yugioh', 'yu-gi-oh', 'magic the gathering',
+            'trading card'].some(kw => lowerName.includes(kw));
+          if (!isTCG) continue;
+
+          // Skip third-party sellers — only show Amazon-fulfilled (#9)
+          const seller = (item.sold_by || item.seller || '').toLowerCase();
+          if (seller && !seller.includes('amazon')) continue;
+
+          const price = typeof item.price === 'number' ? item.price :
+            normalizePrice(item.price_string || item.price);
+
+          const url = item.url || item.product_url || item.link ||
+            `${this.url}/dp/${asin}`;
+          const fullUrl = url.startsWith('http') ? url : `${this.url}${url}`;
+
+          const image = item.image || item.thumbnail || '';
+          const inStock = price != null;
+
+          const product = this.classify({
+            sku: asin,
+            name,
+            price,
+            currency: 'CAD',
+            url: fullUrl,
+            image,
+            inStock,
+            canAddToCart: inStock,
+            shipsToHome: true,
+          });
+
+          products[product.sku] = product;
+        } catch (err) {
+          logger.debug(`Amazon: failed to parse item: ${err.message}`);
+        }
+      }
+
+      logger.info(`Amazon: "${query}" returned ${results.length} results, ${Object.keys(products).length} total products`);
     }
 
     return products;

@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "id": "6000207839158",
+      "name": "Pokemon TCG Scarlet & Violet Prismatic Evolutions Elite Trainer Box",
+      "price": 69.97,
+      "price_string": "$69.97",
+      "url": "https://www.walmart.ca/ip/6000207839158",
+      "image": "https://i5.walmartimages.ca/images/Large/123.jpg",
+      "availability": "In Stock",
+      "seller": "Walmart.ca"
+    },
+    {
+      "id": "6000207000001",
+      "name": "Pokemon TCG Booster Box One Piece Card Game",
+      "price": null,
+      "availability": "",
+      "seller": "Walmart.ca"
+    },
+    {
+      "id": "6000207000002",
+      "name": "Pokemon Plush Pikachu 12 inch Stuffed Toy",
+      "price": 24.97,
+      "availability": "In Stock",
+      "seller": "Walmart.ca"
+    },
+    {
+      "id": "6000207000003",
+      "name": "Dragon Ball Super Card Game Booster Box",
+      "price": 119.97,
+      "availability": "In Stock",
+      "seller": "Third Party Seller"
+    }
+  ]
+}

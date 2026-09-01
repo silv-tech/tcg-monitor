@@ -64,8 +64,10 @@ async function httpGet(url, opts = {}) {
       clearTimeout(timer);
 
       if (res.status === 429) {
-        const retryAfter = parseInt(res.headers.get('retry-after') || '5') * 1000;
-        logger.warn(`Rate limited on ${url}, waiting ${retryAfter}ms`);
+        const raw = res.headers.get('retry-after') || '5';
+        const retryAfter = Math.min((parseInt(raw) || 5) * 1000, 30000);
+        logger.warn(`Rate limited on ${url}, waiting ${retryAfter}ms (attempt ${attempt}/${maxRetries})`);
+        if (attempt >= maxRetries) throw new Error(`Rate limited after ${maxRetries} attempts: ${url}`);
         await sleep(retryAfter);
         continue;
       }

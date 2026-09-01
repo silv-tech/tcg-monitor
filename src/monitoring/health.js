@@ -6,6 +6,10 @@ const logger = require('../monitoring/logger');
 const retailersPath = path.join(__dirname, '../config/retailers.json');
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes without check = stale
 
+// Adapter health: track consecutive 0-product polls (#4)
+const zeroProductPolls = new Map(); // retailerId → consecutive count
+const ZERO_PRODUCT_THRESHOLD = 3;
+
 async function checkHealth() {
   // Merge base config with Redis overrides so enabled state is accurate
   const base = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
@@ -22,7 +26,8 @@ async function checkHealth() {
     const now = Date.now();
 
     const isStale = lastCheck && (now - lastCheck) > STALE_THRESHOLD_MS;
-    const healthy = status.healthy && !isStale;
+    const zeroCount = zeroProductPolls.get(retailer.id) || 0;
+    const healthy = status.healthy && !isStale && zeroCount < ZERO_PRODUCT_THRESHOLD;
 
     results.push({
       id: retailer.id,
@@ -32,6 +37,7 @@ async function checkHealth() {
       lastCheck: lastCheck ? new Date(lastCheck).toISOString() : null,
       consecutiveErrors: status.errors,
       lastError: status.lastError,
+      zeroProductPolls: zeroCount,
     });
   }
 
@@ -49,4 +55,37 @@ async function isSystemHealthy() {
   };
 }
 
-module.exports = { checkHealth, isSystemHealthy };
+// Redis health check (#3)
+async function checkRedisHealth() {
+  try {
+    const redis = state.getRedis();
+    const pong = await redis.ping();
+    return { healthy: pong === 'PONG', latencyMs: 0 };
+  } catch (err) {
+    logger.error(`Redis health check failed: ${err.message}`);
+    return { healthy: false, error: err.message };
+  }
+}
+
+// Called by scheduler after each successful poll
+function recordProductCount(retailerId, count) {
+  if (count === 0) {
+    const prev = zeroProductPolls.get(retailerId) || 0;
+    zeroProductPolls.set(retailerId, prev + 1);
+    if (prev + 1 >= ZERO_PRODUCT_THRESHOLD) {
+      logger.warn(`ADAPTER HEALTH: ${retailerId} returned 0 products for ${prev + 1} consecutive polls`);
+    }
+  } else {
+    zeroProductPolls.set(retailerId, 0);
+  }
+}
+
+function getZeroProductPolls() {
+  const result = {};
+  for (const [id, count] of zeroProductPolls) {
+    if (count > 0) result[id] = count;
+  }
+  return result;
+}
+
+module.exports = { checkHealth, isSystemHealthy, checkRedisHealth, recordProductCount, getZeroProductPolls };

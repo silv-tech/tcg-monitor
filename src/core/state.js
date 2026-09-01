@@ -21,10 +21,16 @@ function getRedis() {
 const PREFIX = 'tcg:';
 const SKU_TTL = 86400 * 7; // 7 days
 
+// Safe JSON.parse — corrupted Redis data should never crash the process
+function safeParse(data, fallback = null) {
+  try { return JSON.parse(data); }
+  catch (err) { logger.warn(`Corrupted Redis data, returning fallback: ${err.message}`); return fallback; }
+}
+
 async function getProduct(retailerId, sku) {
   const key = `${PREFIX}product:${hashSku(retailerId, sku)}`;
   const data = await getRedis().get(key);
-  return data ? JSON.parse(data) : null;
+  return data ? safeParse(data) : null;
 }
 
 async function setProduct(retailerId, sku, product) {
@@ -55,8 +61,8 @@ async function getAllProducts(retailerId) {
   const products = {};
   results.forEach(([err, data]) => {
     if (!err && data) {
-      const p = JSON.parse(data);
-      products[p.sku] = p;
+      const p = safeParse(data);
+      if (p && p.sku) products[p.sku] = p;
     }
   });
   return products;
@@ -76,7 +82,7 @@ async function setLastCheck(retailerId) {
 async function getRetailerStatus(retailerId) {
   const key = `${PREFIX}status:${retailerId}`;
   const data = await getRedis().get(key);
-  return data ? JSON.parse(data) : { errors: 0, lastError: null, healthy: true };
+  return data ? safeParse(data, { errors: 0, lastError: null, healthy: true }) : { errors: 0, lastError: null, healthy: true };
 }
 
 async function setRetailerStatus(retailerId, status) {
@@ -104,7 +110,7 @@ const PRODUCTS_KEY = `${PREFIX}products_config`;
 
 async function getRetailerOverrides() {
   const data = await getRedis().get(OVERRIDES_KEY);
-  return data ? JSON.parse(data) : {};
+  return data ? safeParse(data, {}) : {};
 }
 
 async function setRetailerOverride(retailerId, changes) {
@@ -122,7 +128,7 @@ async function deleteRetailerOverride(retailerId) {
 // ─── Channels config persistence ─────────────────────────────────
 async function getChannelsConfig() {
   const data = await getRedis().get(CHANNELS_KEY);
-  return data ? JSON.parse(data) : null;
+  return data ? safeParse(data) : null;
 }
 
 async function setChannelsConfig(config) {
@@ -132,7 +138,7 @@ async function setChannelsConfig(config) {
 // ─── Products config persistence ─────────────────────────────────
 async function getProductsConfig() {
   const data = await getRedis().get(PRODUCTS_KEY);
-  return data ? JSON.parse(data) : null;
+  return data ? safeParse(data) : null;
 }
 
 async function setProductsConfig(config) {
@@ -146,7 +152,7 @@ const RESTOCK_MAX = 10;
 async function recordRestock(retailerId, sku) {
   const key = `${PREFIX}restock:${retailerId}:${sku}`;
   const raw = await getRedis().get(key);
-  const history = raw ? JSON.parse(raw) : [];
+  const history = raw ? safeParse(raw, []) : [];
   history.push(Date.now());
   if (history.length > RESTOCK_MAX) history.splice(0, history.length - RESTOCK_MAX);
   await getRedis().set(key, JSON.stringify(history), 'EX', RESTOCK_TTL);
@@ -155,10 +161,15 @@ async function recordRestock(retailerId, sku) {
 async function getRestockHistory(retailerId, sku) {
   const key = `${PREFIX}restock:${retailerId}:${sku}`;
   const raw = await getRedis().get(key);
-  return raw ? JSON.parse(raw) : [];
+  return raw ? safeParse(raw, []) : [];
 }
 
-// ─── Cross-retailer price check ─────────────────────────────────
+// ─── Cross-retailer price check (#8, #14) ───────────────────────
+// In-memory index rebuilt from Redis on each poll cycle — avoids SCAN on every alert
+const crossRetailerIndex = []; // [{ retailerId, sku, name, price, url, inStock, asin }]
+let indexLastBuilt = 0;
+const INDEX_TTL = 60000; // Rebuild index every 60s max
+
 function tokenize(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(t => t.length > 1);
 }
@@ -174,7 +185,10 @@ function jaccardSimilarity(a, b) {
   return union === 0 ? 0 : intersection / union;
 }
 
-async function findCrossRetailerMatches(product) {
+async function rebuildCrossRetailerIndex() {
+  const now = Date.now();
+  if (now - indexLastBuilt < INDEX_TTL) return;
+
   const pattern = `${PREFIX}product:*`;
   const keys = [];
   let cursor = '0';
@@ -184,33 +198,78 @@ async function findCrossRetailerMatches(product) {
     keys.push(...batch);
   } while (cursor !== '0');
 
-  if (!keys.length) return [];
+  if (!keys.length) { indexLastBuilt = now; return; }
 
   const pipeline = getRedis().pipeline();
   keys.forEach(k => pipeline.get(k));
   const results = await pipeline.exec();
 
-  const sourceTokens = tokenize(product.name || '');
-  if (!sourceTokens.length) return [];
-
-  const matches = [];
+  crossRetailerIndex.length = 0;
   for (const [err, data] of results) {
     if (err || !data) continue;
-    const p = JSON.parse(data);
-    // Different retailer, in stock, has a price
-    if (p.retailerId === product.retailerId) continue;
-    if (!p.inStock) continue;
-    if (p.price == null || p.price <= 0) continue;
+    const p = safeParse(data);
+    if (!p || !p.inStock || p.price == null || p.price <= 0) continue;
+    crossRetailerIndex.push({
+      retailerId: p.retailerId,
+      sku: p.sku,
+      name: p.name || '',
+      price: p.price,
+      url: p.url,
+      asin: p.retailerId === 'amazon' ? p.sku : null,
+    });
+  }
+  indexLastBuilt = now;
+}
 
-    const sim = jaccardSimilarity(sourceTokens, tokenize(p.name || ''));
-    if (sim >= 0.4) {
-      matches.push({ retailer: p.retailer, price: p.price, url: p.url, similarity: sim });
+async function findCrossRetailerMatches(product) {
+  await rebuildCrossRetailerIndex();
+
+  const sourceTokens = tokenize(product.name || '');
+  if (!sourceTokens.length && !product.sku) return [];
+
+  const matches = [];
+  for (const p of crossRetailerIndex) {
+    if (p.retailerId === product.retailerId) continue;
+
+    // #8: Exact ASIN match first (Amazon products across .ca/.com)
+    if (product.sku && p.asin && product.sku === p.asin) {
+      matches.push({ retailer: p.retailerId, price: p.price, url: p.url, similarity: 1.0 });
+      continue;
+    }
+
+    // Jaccard name similarity
+    if (sourceTokens.length > 0) {
+      const sim = jaccardSimilarity(sourceTokens, tokenize(p.name));
+      if (sim >= 0.4) {
+        matches.push({ retailer: p.retailerId, price: p.price, url: p.url, similarity: sim });
+      }
     }
   }
 
-  // Sort by similarity desc, take top 3
   matches.sort((a, b) => b.similarity - a.similarity);
   return matches.slice(0, 3);
+}
+
+// ─── Price history (#12) ──────────────────────────��───────────────
+const PRICE_HISTORY_TTL = 86400 * 90; // 90 days
+const PRICE_HISTORY_MAX = 10;
+
+async function recordPrice(retailerId, sku, price) {
+  if (price == null || price <= 0) return;
+  const key = `${PREFIX}pricehistory:${retailerId}:${sku}`;
+  const raw = await getRedis().get(key);
+  const history = raw ? safeParse(raw, []) : [];
+  // Only record if price changed from last entry
+  if (history.length > 0 && history[history.length - 1].price === price) return;
+  history.push({ price, time: Date.now() });
+  if (history.length > PRICE_HISTORY_MAX) history.splice(0, history.length - PRICE_HISTORY_MAX);
+  await getRedis().set(key, JSON.stringify(history), 'EX', PRICE_HISTORY_TTL);
+}
+
+async function getPriceHistory(retailerId, sku) {
+  const key = `${PREFIX}pricehistory:${retailerId}:${sku}`;
+  const raw = await getRedis().get(key);
+  return raw ? safeParse(raw, []) : [];
 }
 
 async function shutdown() {
@@ -242,5 +301,7 @@ module.exports = {
   recordRestock,
   getRestockHistory,
   findCrossRetailerMatches,
+  recordPrice,
+  getPriceHistory,
   shutdown,
 };

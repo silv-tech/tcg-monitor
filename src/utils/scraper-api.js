@@ -14,12 +14,19 @@ const CREDIT_COSTS = {
 // Track credit usage per session
 const creditUsage = { total: 0, byRetailer: {}, sessionStart: Date.now() };
 
+// Budget monitoring — Hobby plan = 100K credits/month
+const MONTHLY_BUDGET = parseInt(process.env.SCRAPER_BUDGET) || 100000;
+const WARN_THRESHOLD = 0.80;  // warn admin at 80%
+const PAUSE_THRESHOLD = 0.90; // pause scraping at 90%
+let budgetPaused = false;
+let budgetWarned = false;
+
 // Rate limiter: prevent excessive ScraperAPI calls (costs money)
 // Budget: 100K credits/month on Hobby plan ($49/mo)
 // Structured endpoints: 9 queries × 5 credits × 2/hr × 24h × 30d = 64,800 credits
 // Pokemon Center: 25 credits × 2/hr × 24h × 30d = 36,000 credits
 // Total: ~100,800/month — right at budget
-const MIN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes between ScraperAPI calls per query
+const MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes between ScraperAPI calls per query
 const lastCallByRetailer = new Map(); // retailerId → timestamp
 
 /**
@@ -49,6 +56,12 @@ async function scraperFetch(targetUrl, opts = {}) {
     timeoutMs = 60000,
     retailerId = 'unknown',
   } = opts;
+
+  // Budget check — pause scraping if over threshold
+  if (budgetPaused) {
+    logger.debug(`ScraperAPI: budget paused (${creditUsage.total}/${MONTHLY_BUDGET} credits used)`);
+    return null;
+  }
 
   // Rate limit: skip if called too recently for this retailer
   const now = Date.now();
@@ -105,9 +118,10 @@ async function scraperFetch(targetUrl, opts = {}) {
 
     const html = await response.text();
 
-    // Track credits
+    // Track credits + budget monitoring
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
+    checkBudget();
 
     logger.info(`ScraperAPI: OK for ${retailerId} (${tier}, ${cost} credits, session total: ${creditUsage.total})`);
 
@@ -121,8 +135,39 @@ async function scraperFetch(targetUrl, opts = {}) {
   }
 }
 
+function checkBudget() {
+  const pct = creditUsage.total / MONTHLY_BUDGET;
+  if (pct >= PAUSE_THRESHOLD && !budgetPaused) {
+    budgetPaused = true;
+    logger.error(`ScraperAPI BUDGET PAUSED: ${creditUsage.total}/${MONTHLY_BUDGET} credits (${(pct * 100).toFixed(0)}%). Scraping halted to prevent overage.`);
+  } else if (pct >= WARN_THRESHOLD && !budgetWarned) {
+    budgetWarned = true;
+    logger.warn(`ScraperAPI BUDGET WARNING: ${creditUsage.total}/${MONTHLY_BUDGET} credits (${(pct * 100).toFixed(0)}%). Approaching limit.`);
+  }
+}
+
 function getCreditUsage() {
   return { ...creditUsage };
+}
+
+function getBudgetStatus() {
+  const pct = creditUsage.total / MONTHLY_BUDGET;
+  return {
+    used: creditUsage.total,
+    budget: MONTHLY_BUDGET,
+    pct: parseFloat((pct * 100).toFixed(1)),
+    warned: budgetWarned,
+    paused: budgetPaused,
+  };
+}
+
+function resetBudget() {
+  creditUsage.total = 0;
+  creditUsage.byRetailer = {};
+  creditUsage.sessionStart = Date.now();
+  budgetPaused = false;
+  budgetWarned = false;
+  logger.info('ScraperAPI budget counters reset');
 }
 
 /**
@@ -141,6 +186,7 @@ function getCreditUsage() {
  */
 async function amazonSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+  if (budgetPaused) return null;
 
   const { tld = 'ca', retailerId = 'amazon' } = opts;
 
@@ -178,6 +224,7 @@ async function amazonSearch(query, opts = {}) {
 
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
+    checkBudget();
     logger.info(`ScraperAPI: Amazon search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
 
     return data;
@@ -198,6 +245,7 @@ async function amazonSearch(query, opts = {}) {
  */
 async function walmartSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+  if (budgetPaused) return null;
 
   const { retailerId = 'walmart' } = opts;
 
@@ -237,6 +285,7 @@ async function walmartSearch(query, opts = {}) {
 
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
+    checkBudget();
     logger.info(`ScraperAPI: Walmart search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
 
     return data;
@@ -251,4 +300,4 @@ function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, amazonSearch, walmartSearch, getCreditUsage, isConfigured };
+module.exports = { scraperFetch, amazonSearch, walmartSearch, getCreditUsage, getBudgetStatus, resetBudget, isConfigured };
