@@ -107,7 +107,7 @@ class BaseAdapter {
    * @returns {string} HTML content
    */
   async protectedFetch(url, opts = {}) {
-    const { challengeDetector, scraperOpts = {}, ...browserOpts } = opts;
+    const { challengeDetector, scraperOpts = {}, noScraper = false, ...browserOpts } = opts;
 
     // Circuit breaker: skip browser if it's been consistently failing (saves proxy bandwidth)
     const now = Date.now();
@@ -153,8 +153,8 @@ class BaseAdapter {
     }
 
     // Step 2: Fall back to ScraperAPI (paid)
-    if (!scraperApi.isConfigured()) {
-      return null; // No API key — can't fall back, return null so adapter can handle gracefully
+    if (noScraper || !scraperApi.isConfigured()) {
+      return null; // No ScraperAPI — return null so adapter can handle gracefully
     }
 
     return scraperApi.scraperFetch(url, {

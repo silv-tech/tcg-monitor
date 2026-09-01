@@ -33,11 +33,12 @@ class AmazonAdapter extends BaseAdapter {
     for (const searchUrl of this.searchUrls) {
       try {
         // Try browser first (free), fall back to ScraperAPI (paid) on challenge
+        // ScraperAPI can't bypass Akamai at any tier — browser only, no paid fallback
         const html = await this.protectedFetch(searchUrl, {
           timeoutMs: 30000,
           waitForSelector: '[data-component-type="s-search-result"]',
           challengeDetector: (h) => this._isChallenge(h),
-          scraperOpts: { ultraPremium: true },
+          noScraper: true,
         });
 
         if (!html || this._isChallenge(html)) {

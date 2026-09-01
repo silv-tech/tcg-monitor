@@ -30,10 +30,11 @@ class WalmartAdapter extends BaseAdapter {
   async fetchPage(searchUrl) {
     // Try browser first (free), fall back to ScraperAPI (paid) on challenge
     try {
+      // ScraperAPI can't bypass PerimeterX — browser only, no paid fallback
       const html = await this.protectedFetch(searchUrl, {
         timeoutMs: 35000,
         challengeDetector: (h) => this.isChallengePage(h),
-        scraperOpts: { ultraPremium: true },
+        noScraper: true,
       });
       if (html && !this.isChallengePage(html)) return html;
       if (html) {
