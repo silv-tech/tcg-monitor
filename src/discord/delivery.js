@@ -4,6 +4,7 @@ const logger = require('../monitoring/logger');
 const { buildAlertEmbed } = require('./embeds');
 const { filterDuplicates, markSent } = require('./dedup');
 const { recordAlertLatency } = require('../core/proxy');
+const { getRestockHistory, findCrossRetailerMatches } = require('../core/state');
 const { sleep } = require('../utils/helpers');
 
 let channelsConfig;
@@ -85,7 +86,21 @@ class DeliveryQueue {
     this.processing = false;
   }
 
+  async enrichEvent(event) {
+    const { product } = event;
+    if (!product) return;
+    try {
+      if (product.retailerId && product.sku) {
+        event._restockHistory = await getRestockHistory(product.retailerId, product.sku);
+      }
+      event._crossRetailer = await findCrossRetailerMatches(product);
+    } catch (err) {
+      logger.debug(`Event enrichment failed: ${err.message}`);
+    }
+  }
+
   async routeEvent(event, queuedAt) {
+    await this.enrichEvent(event);
     const { product } = event;
     const category = product.category || 'default';
     const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);

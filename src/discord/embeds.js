@@ -40,6 +40,36 @@ const EVENT_CONFIG = {
   },
 };
 
+// ─── Helpers ─────────────────────────────────────────────────────
+
+function formatDaysAgo(ts) {
+  const days = Math.round((Date.now() - ts) / 86400000);
+  if (days === 0) return 'today';
+  if (days === 1) return '1d ago';
+  return `${days}d ago`;
+}
+
+function buildRestockHistoryValue(history) {
+  if (!history || history.length === 0) return null;
+  const last = history[history.length - 1];
+  if (history.length === 1) return `Last: ${formatDaysAgo(last)}`;
+  // Average interval between restocks
+  let totalGap = 0;
+  for (let i = 1; i < history.length; i++) {
+    totalGap += history[i] - history[i - 1];
+  }
+  const avgDays = Math.round(totalGap / (history.length - 1) / 86400000);
+  return `Last: ${formatDaysAgo(last)} · Avg: every ~${avgDays}d`;
+}
+
+function buildCrossRetailerValue(matches) {
+  if (!matches || matches.length === 0) return null;
+  return matches.map(m => {
+    const name = m.url ? `[${m.retailer}](${m.url})` : m.retailer;
+    return `${name} — $${m.price.toFixed(2)}`;
+  }).join(' | ');
+}
+
 // ─── Main builder ────────────────────────────────────────────────
 
 function buildAlertEmbed(event, tier) {
@@ -100,13 +130,6 @@ function buildAlertEmbed(event, tier) {
   if (isAmazon && product.sku) {
     // ── Amazon-specific fields ──
     const asin = String(product.sku);
-    const atcBase = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
-
-    // One Click Checkout (two inline fields, side by side)
-    embed.addFields(
-      { name: 'One Click Checkout', value: `[ATCx1](${atcBase}1) | [ATCx2](${atcBase}2)`, inline: true },
-      { name: 'One Click Checkout', value: `[ATCx3](${atcBase}3) | [ATCx8](${atcBase}8)`, inline: true }
-    );
 
     // Offer Id (ASIN in code block)
     embed.addFields({ name: 'Offer Id', value: `\`${asin}\``, inline: false });
@@ -114,10 +137,9 @@ function buildAlertEmbed(event, tier) {
     // Links
     const encodedName = encodeURIComponent(product.name || '');
     const links = [
-      `[Login](https://www.amazon.ca/ap/signin)`,
       `[Cart](https://www.amazon.ca/gp/cart/view.html)`,
-      `[Amazon Business](https://business.amazon.ca/)`,
       `[Keepa](https://keepa.com/#!product/6-${asin})`,
+      `[CamelCamelCamel](https://ca.camelcamelcamel.com/product/${asin})`,
       `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
       `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
     ].join(' | ');
@@ -139,11 +161,29 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Ships Home', value: shipIcon, inline: true });
   }
 
-  // ── Footer ──
-  const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
-  embed.setFooter({ text: `Pulse Watch  ·  ${tierLabel}` });
+  // ── Restock History (all retailers) ──
+  const restockValue = buildRestockHistoryValue(event._restockHistory);
+  if (restockValue) {
+    embed.addFields({ name: 'Restock History', value: restockValue, inline: false });
+  }
 
-  // ── Button ──
+  // ── Cross-Retailer Price Check (all retailers) ──
+  const crossValue = buildCrossRetailerValue(event._crossRetailer);
+  if (crossValue) {
+    embed.addFields({ name: 'Also In Stock', value: crossValue, inline: false });
+  }
+
+  // ── Footer with detection speed ──
+  const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
+  let footerText = `Pulse Watch  ·  ${tierLabel}`;
+  if (event._detectedAt) {
+    const speedMs = Date.now() - event._detectedAt;
+    const speedSec = (speedMs / 1000).toFixed(1);
+    footerText += `  ·  \u26A1 ${speedSec}s`;
+  }
+  embed.setFooter({ text: footerText });
+
+  // ── Buttons ──
   const components = [];
   if (product.url) {
     components.push(
@@ -152,6 +192,31 @@ function buildAlertEmbed(event, tier) {
           .setLabel(cfg.button)
           .setURL(product.url)
           .setStyle(ButtonStyle.Link)
+      )
+    );
+  }
+
+  // ── Amazon ATC buttons (replace old markdown links) ──
+  if (isAmazon && product.sku) {
+    const asin = String(product.sku);
+    const atcCa = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+    const atcUs = `https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+
+    // Row 2: Canada ATC buttons
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setLabel('\u{1F1E8}\u{1F1E6} Cop x1').setURL(`${atcCa}1`).setStyle(ButtonStyle.Link),
+        new ButtonBuilder().setLabel('\u{1F1E8}\u{1F1E6} Cop x2').setURL(`${atcCa}2`).setStyle(ButtonStyle.Link),
+        new ButtonBuilder().setLabel('\u{1F1E8}\u{1F1E6} Cop x3').setURL(`${atcCa}3`).setStyle(ButtonStyle.Link),
+      )
+    );
+
+    // Row 3: US ATC buttons
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setLabel('\u{1F1FA}\u{1F1F8} Cop x1').setURL(`${atcUs}1`).setStyle(ButtonStyle.Link),
+        new ButtonBuilder().setLabel('\u{1F1FA}\u{1F1F8} Cop x2').setURL(`${atcUs}2`).setStyle(ButtonStyle.Link),
+        new ButtonBuilder().setLabel('\u{1F1FA}\u{1F1F8} Cop x3').setURL(`${atcUs}3`).setStyle(ButtonStyle.Link),
       )
     );
   }

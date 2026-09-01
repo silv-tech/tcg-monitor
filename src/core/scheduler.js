@@ -1,6 +1,6 @@
 const logger = require('../monitoring/logger');
 const state = require('./state');
-const { diffProducts } = require('./events');
+const { diffProducts, EVENT_TYPES } = require('./events');
 const { recordPollLatency } = require('./proxy');
 const { sleep } = require('../utils/helpers');
 
@@ -109,6 +109,13 @@ class Scheduler {
           for (const event of events) {
             event._detectedAt = detectedAt;
           }
+          // Record restock timestamps for history tracking
+          for (const event of events) {
+            if (event.type === EVENT_TYPES.RESTOCK && event.product?.sku) {
+              await state.recordRestock(adapter.id, event.product.sku);
+            }
+          }
+
           logger.info(`${adapter.name}: ${events.length} event(s) detected (poll: ${pollMs}ms)`);
           if (this.onEvents) {
             await this.onEvents(events);

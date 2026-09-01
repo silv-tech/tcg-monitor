@@ -139,6 +139,80 @@ async function setProductsConfig(config) {
   await getRedis().set(PRODUCTS_KEY, JSON.stringify(config));
 }
 
+// ─── Restock history ─────────────────────────────────────────────
+const RESTOCK_TTL = 86400 * 90; // 90 days
+const RESTOCK_MAX = 10;
+
+async function recordRestock(retailerId, sku) {
+  const key = `${PREFIX}restock:${retailerId}:${sku}`;
+  const raw = await getRedis().get(key);
+  const history = raw ? JSON.parse(raw) : [];
+  history.push(Date.now());
+  if (history.length > RESTOCK_MAX) history.splice(0, history.length - RESTOCK_MAX);
+  await getRedis().set(key, JSON.stringify(history), 'EX', RESTOCK_TTL);
+}
+
+async function getRestockHistory(retailerId, sku) {
+  const key = `${PREFIX}restock:${retailerId}:${sku}`;
+  const raw = await getRedis().get(key);
+  return raw ? JSON.parse(raw) : [];
+}
+
+// ─── Cross-retailer price check ─────────────────────────────────
+function tokenize(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(t => t.length > 1);
+}
+
+function jaccardSimilarity(a, b) {
+  const setA = new Set(a);
+  const setB = new Set(b);
+  let intersection = 0;
+  for (const t of setA) {
+    if (setB.has(t)) intersection++;
+  }
+  const union = new Set([...setA, ...setB]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+async function findCrossRetailerMatches(product) {
+  const pattern = `${PREFIX}product:*`;
+  const keys = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, batch] = await getRedis().scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+    cursor = nextCursor;
+    keys.push(...batch);
+  } while (cursor !== '0');
+
+  if (!keys.length) return [];
+
+  const pipeline = getRedis().pipeline();
+  keys.forEach(k => pipeline.get(k));
+  const results = await pipeline.exec();
+
+  const sourceTokens = tokenize(product.name || '');
+  if (!sourceTokens.length) return [];
+
+  const matches = [];
+  for (const [err, data] of results) {
+    if (err || !data) continue;
+    const p = JSON.parse(data);
+    // Different retailer, in stock, has a price
+    if (p.retailerId === product.retailerId) continue;
+    if (!p.inStock) continue;
+    if (p.price == null || p.price <= 0) continue;
+
+    const sim = jaccardSimilarity(sourceTokens, tokenize(p.name || ''));
+    if (sim >= 0.4) {
+      matches.push({ retailer: p.retailer, price: p.price, url: p.url, similarity: sim });
+    }
+  }
+
+  // Sort by similarity desc, take top 3
+  matches.sort((a, b) => b.similarity - a.similarity);
+  return matches.slice(0, 3);
+}
+
 async function shutdown() {
   if (redis) {
     await redis.quit();
@@ -165,5 +239,8 @@ module.exports = {
   setChannelsConfig,
   getProductsConfig,
   setProductsConfig,
+  recordRestock,
+  getRestockHistory,
+  findCrossRetailerMatches,
   shutdown,
 };
