@@ -115,7 +115,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       xml = await this.protectedFetch(this.sitemapUrl, {
         timeoutMs: 45000,
         challengeDetector: (h) => !h.includes('<loc>') || this.isChallengePage(h),
-        scraperOpts: { render: false, premium: true }, // sitemap is XML, no JS rendering needed
+        scraperOpts: { render: false, ultraPremium: true }, // sitemap is XML, no JS rendering needed
       });
     } catch (err) {
       if (this.sitemapProducts.size > 0) {
@@ -172,6 +172,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       html = await this.protectedFetch(meta.url, {
         timeoutMs: 20000,
         challengeDetector: (h) => this.isChallengePage(h),
+        scraperOpts: { ultraPremium: true },
       });
     } catch (err) {
       const reason = classifyError(err);
