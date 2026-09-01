@@ -93,6 +93,8 @@ function buildAlertEmbed(event, tier) {
   const { type, product, oldValue, newValue } = event;
   const cfg = EVENT_CONFIG[type] || EVENT_CONFIG[EVENT_TYPES.RESTOCK];
 
+  const isAmazon = product.retailerId === 'amazon';
+
   const embed = new EmbedBuilder()
     .setColor(cfg.color)
     .setTimestamp();
@@ -102,7 +104,11 @@ function buildAlertEmbed(event, tier) {
 
   // ── Title: product name (clickable link) ──
   embed.setTitle(product.name);
-  if (product.url) embed.setURL(product.url);
+  // Use short URL for Amazon (/dp/ASIN), truncate others to Discord's 2048 limit
+  const safeUrl = isAmazon && product.sku
+    ? `https://www.amazon.ca/dp/${product.sku}`
+    : product.url && product.url.length <= 2048 ? product.url : null;
+  if (safeUrl) embed.setURL(safeUrl);
 
   // ── Thumbnail ──
   if (product.image) embed.setThumbnail(product.image);
@@ -126,8 +132,6 @@ function buildAlertEmbed(event, tier) {
 
   // Type field
   embed.addFields({ name: 'Type', value: cfg.label, inline: true });
-
-  const isAmazon = product.retailerId === 'amazon';
 
   // SKU / ASIN field
   if (product.sku) {
@@ -241,12 +245,16 @@ function buildAlertEmbed(event, tier) {
 
   // ── Buttons ──
   const components = [];
-  if (product.url) {
+  // Use short URL for button (Discord limit: 512 chars)
+  const buttonUrl = isAmazon && product.sku
+    ? `https://www.amazon.ca/dp/${product.sku}`
+    : product.url;
+  if (buttonUrl && buttonUrl.length <= 512) {
     components.push(
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setLabel(cfg.button)
-          .setURL(product.url)
+          .setURL(buttonUrl)
           .setStyle(ButtonStyle.Link)
       )
     );
