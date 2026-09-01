@@ -62,9 +62,9 @@ class AmazonAdapter extends BaseAdapter {
             'trading card'].some(kw => lowerName.includes(kw));
           if (!isTCG) continue;
 
-          // Skip unless SOLD by Amazon — "Fulfilled by Amazon" (FBA) third-party items don't count
+          // Skip third-party sellers — allow Amazon-sold OR unknown seller (ScraperAPI often omits sold_by)
           const seller = (item.sold_by || item.seller || '').toLowerCase();
-          if (!seller.includes('amazon')) continue;
+          if (seller && !seller.includes('amazon')) continue;
 
           const price = typeof item.price === 'number' ? item.price :
             normalizePrice(item.price_string || item.price);
