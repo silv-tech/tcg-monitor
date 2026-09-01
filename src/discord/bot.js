@@ -48,7 +48,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '1';
+const COMMANDS_VERSION = '2';
 
 async function registerCommands() {
   const commands = [

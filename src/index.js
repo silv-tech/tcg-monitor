@@ -135,7 +135,48 @@ async function main() {
   // 6. Start admin server
   const adminServer = createAdminServer();
 
-  // 7. Health check loop — every 2 minutes
+  // 7. One-time sample alerts — show client the system is live
+  // Sends one real product from Pokemon Center, Best Buy, and Costco after first polls complete
+  const stateForSample = require('./core/state');
+  setTimeout(async () => {
+    try {
+      const sampleFlag = await stateForSample.getRedis().get('tcg:sample_alerts_sent');
+      if (sampleFlag) {
+        logger.info('Sample alerts already sent (skipping)');
+        return;
+      }
+
+      const sampleRetailers = ['pokemoncenter', 'bestbuy', 'costco'];
+      const sampleEvents = [];
+
+      for (const retailerId of sampleRetailers) {
+        const products = await stateForSample.getAllProducts(retailerId);
+        const entries = Object.values(products);
+        if (entries.length === 0) continue;
+
+        // Pick first product with a name
+        const sample = entries.find(p => p.name && p.isTCG !== false) || entries[0];
+        if (!sample) continue;
+
+        sampleEvents.push({
+          type: 'LISTING',
+          product: { ...sample, retailerId, lastSeen: Date.now() },
+          detail: `Now monitoring ${entries.length} products at ${sample.retailer || retailerId}`,
+          _scanTier: 'paid', // bypass TCG filter and dedup
+        });
+      }
+
+      if (sampleEvents.length > 0) {
+        await delivery.deliver(sampleEvents, { skipDedup: true });
+        await stateForSample.getRedis().set('tcg:sample_alerts_sent', '1', 'EX', 86400 * 30); // don't re-send for 30 days
+        logger.info(`Sent ${sampleEvents.length} sample alerts (Pokemon Center, Best Buy, Costco)`);
+      }
+    } catch (err) {
+      logger.error(`Sample alerts failed: ${err.message}`);
+    }
+  }, 3 * 60 * 1000); // Wait 3 minutes for first polls to complete
+
+  // 8. Health check loop — every 2 minutes
   const healthInterval = setInterval(async () => {
     const client = getClient();
     if (client) await checkAndAlert(client);
