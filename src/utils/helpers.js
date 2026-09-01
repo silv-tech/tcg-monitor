@@ -22,19 +22,26 @@ function hashSku(retailer, sku) {
   return `${retailer}:${sku}`;
 }
 
-// TCG product keywords — if a product name matches a game category but none of these,
-// it's probably not a card game product (e.g. action figures, plushies, video games)
+// TCG sealed product keywords — matches actual sealed card products
 const TCG_KEYWORDS = [
-  'tcg', 'card game', 'trading card', 'booster', 'elite trainer', 'etb',
-  'tin ', ' tin', 'blister', 'bundle box', 'booster bundle', 'collection box',
-  'premium collection', 'special collection', 'build and battle', 'league battle',
-  'starter deck', 'structure deck', 'sealed', 'display', 'case ', ' case',
-  'pack ', ' pack', ' box', 'box ', 'ultra premium', 'poster collection',
-  'tech sticker', 'binder', 'playmat', 'deck box', 'sleeves', 'card binder',
-  'booster pack', 'expansion', 'trainer gallery',
+  'booster box', 'booster pack', 'booster bundle', 'booster display',
+  'elite trainer', 'etb', 'blister', 'bundle box',
+  'collection box', 'premium collection', 'special collection',
+  'build and battle', 'league battle', 'starter deck', 'structure deck',
+  'ultra premium', 'poster collection', 'tech sticker',
+  'trainer gallery', 'expansion pack',
+  ' tin', 'tin ', ' box', 'box ', ' pack', 'pack ',
+  'sealed', 'card game', 'trading card',
 ];
 
 const NON_TCG_KEYWORDS = [
+  // Accessories — not sealed product
+  'deck box', 'deckbox', 'playmat', 'play mat', 'binder', 'card binder',
+  'sleeves', 'card sleeves', 'penny sleeves', 'card protector', 'protector case',
+  'toploader', 'top loader', 'display case', 'acrylic', 'portfolio',
+  'card storage', 'storage box', 'card organizer', 'card holder',
+  'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box',
+  // Figures, toys, clothing
   'action figure', 'figure series', 'plush', 'stuffed', 'figurine',
   'video game', 'nintendo switch', 'ps4', 'ps5', 'xbox',
   'board game', 'puzzle', 'costume', 'backpack', 'clothing',
@@ -43,11 +50,10 @@ const NON_TCG_KEYWORDS = [
   'lego', 'mega construx', 'building set',
   'dvd', 'blu-ray', 'movie', 'season ',
   'final blast', 'dragon stars', 'super warrior',
+  // Board games / party games
   'cards against humanity', 'monopoly', 'uno ', 'uno:', 'phase 10',
   'exploding kittens', 'codenames', 'catan', 'risk ', 'clue ',
   'sorry!', 'skip-bo', 'sequence', 'apples to apples',
-  'card storage', 'storage box', 'card organizer', 'card holder',
-  'card sleeves', 'card protector', 'toploader', 'top loader',
 ];
 
 function isTCGProduct(name) {

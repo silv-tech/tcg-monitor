@@ -1,7 +1,25 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { normalizePrice } = require('../utils/helpers');
+const { normalizePrice, isTCGProduct } = require('../utils/helpers');
 const { amazonSearch, isConfigured } = require('../utils/scraper-api');
+
+// Game names that we track — Amazon results MUST match one of these
+const GAME_NAMES = [
+  'pokemon', 'pokémon', 'one piece', 'dragon ball', 'lorcana',
+  'yugioh', 'yu-gi-oh', 'magic the gathering', 'digimon',
+  'naruto', 'star wars unlimited', 'flesh and blood', 'union arena',
+  'weiss schwarz', 'cardfight vanguard',
+];
+
+// Accessories — never alert on these even if they mention a game name
+const ACCESSORY_KEYWORDS = [
+  'deck box', 'deckbox', 'playmat', 'play mat', 'sleeves', 'card sleeves',
+  'penny sleeves', 'card protector', 'protector case', 'toploader', 'top loader',
+  'display case', 'acrylic', 'portfolio', 'binder', 'card binder', 'album',
+  'card holder', 'card organizer', 'storage box', 'card storage',
+  'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box', 'token deck',
+  'divider', 'accessories',
+];
 
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
@@ -60,12 +78,19 @@ class AmazonAdapter extends BaseAdapter {
           if (!name) continue;
 
           const lowerName = name.toLowerCase();
-          const isTCG = ['pokemon', 'tcg', 'booster', 'trainer box', 'one piece',
-            'dragon ball', 'lorcana', 'yugioh', 'yu-gi-oh', 'magic the gathering',
-            'trading card'].some(kw => lowerName.includes(kw));
-          if (!isTCG) continue;
 
-          // emi= URL filter already restricts to "sold by Amazon.ca" at search level.
+          // Layer 1: Must mention a game we actually track
+          const hasGameName = GAME_NAMES.some(g => lowerName.includes(g));
+          if (!hasGameName) continue;
+
+          // Layer 2: Must pass shared TCG product filter (sealed products, not figures/toys)
+          if (!isTCGProduct(name)) continue;
+
+          // Layer 3: Exclude accessories (deck boxes, binders, sleeves, etc.)
+          const isAccessory = ACCESSORY_KEYWORDS.some(kw => lowerName.includes(kw));
+          if (isAccessory) continue;
+
+          // Layer 4: emi= URL filter already restricts to "sold by Amazon.ca" at search level.
           // Double-check if seller data is present in autoparse response.
           const seller = (item.sold_by || item.seller || '').toLowerCase();
           if (seller && !seller.includes('amazon')) continue;
