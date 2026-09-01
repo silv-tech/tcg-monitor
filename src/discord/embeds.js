@@ -143,7 +143,7 @@ function buildAlertEmbed(event, tier) {
 
   // ── Offer Listing ID (Amazon only) ──
   if (isAmazon && event._offerListingId) {
-    embed.addFields({ name: 'Offer Id', value: event._offerListingId, inline: false });
+    embed.addFields({ name: 'Offer Id', value: `\`${event._offerListingId}\``, inline: false });
   }
 
   // ── One Click Checkout (markdown links in embed fields — matches client's preferred format) ──
