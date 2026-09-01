@@ -33,6 +33,7 @@ class WalmartAdapter extends BaseAdapter {
       const html = await this.protectedFetch(searchUrl, {
         timeoutMs: 35000,
         challengeDetector: (h) => this.isChallengePage(h),
+        scraperOpts: { ultraPremium: true },
       });
       if (html && !this.isChallengePage(html)) return html;
       if (html) {
