@@ -21,6 +21,13 @@ class BaseAdapter {
     this.proxyTier = retailerConfig.proxyTier;
     this.color = retailerConfig.color;
     this.enabled = retailerConfig.enabled;
+
+    // Circuit breaker: stop wasting proxy bandwidth after consecutive browser failures
+    this._browserFailCount = 0;
+    this._browserCircuitOpen = false;
+    this._browserCircuitOpenedAt = 0;
+    this._BROWSER_FAIL_THRESHOLD = 3;       // Open circuit after 3 consecutive failures
+    this._BROWSER_RETRY_INTERVAL = 600000;  // Try browser again every 10 minutes
   }
 
   getProxy() {
@@ -102,15 +109,47 @@ class BaseAdapter {
   async protectedFetch(url, opts = {}) {
     const { challengeDetector, scraperOpts = {}, ...browserOpts } = opts;
 
-    // Step 1: Try browserFetch (free)
-    try {
-      const html = await this.browserFetch(url, browserOpts);
-      if (html && (!challengeDetector || !challengeDetector(html))) {
-        return html;
+    // Circuit breaker: skip browser if it's been consistently failing (saves proxy bandwidth)
+    const now = Date.now();
+    const browserSkipped = this._browserCircuitOpen &&
+      (now - this._browserCircuitOpenedAt < this._BROWSER_RETRY_INTERVAL);
+
+    if (browserSkipped) {
+      logger.debug(`${this.name}: browser circuit open, skipping (retry in ${Math.round((this._BROWSER_RETRY_INTERVAL - (now - this._browserCircuitOpenedAt)) / 1000)}s)`);
+    }
+
+    // Step 1: Try browserFetch (free) — unless circuit breaker is open
+    if (!browserSkipped) {
+      // Reset circuit if retry interval has passed
+      if (this._browserCircuitOpen) {
+        logger.info(`${this.name}: browser circuit half-open, retrying browser...`);
+        this._browserCircuitOpen = false;
       }
-      logger.debug(`${this.name}: browser returned challenge for ${url.substring(0, 80)}, trying ScraperAPI...`);
-    } catch (err) {
-      logger.debug(`${this.name}: browserFetch failed (${err.message}), trying ScraperAPI...`);
+
+      try {
+        const html = await this.browserFetch(url, browserOpts);
+        if (html && (!challengeDetector || !challengeDetector(html))) {
+          // Success — reset circuit breaker
+          if (this._browserFailCount > 0) {
+            logger.info(`${this.name}: browser succeeded after ${this._browserFailCount} failures, circuit closed`);
+          }
+          this._browserFailCount = 0;
+          return html;
+        }
+        // Challenge detected — count as failure
+        this._browserFailCount++;
+        logger.debug(`${this.name}: browser returned challenge (fail ${this._browserFailCount}/${this._BROWSER_FAIL_THRESHOLD})`);
+      } catch (err) {
+        this._browserFailCount++;
+        logger.debug(`${this.name}: browserFetch failed (${err.message}) (fail ${this._browserFailCount}/${this._BROWSER_FAIL_THRESHOLD})`);
+      }
+
+      // Open circuit if threshold reached
+      if (this._browserFailCount >= this._BROWSER_FAIL_THRESHOLD && !this._browserCircuitOpen) {
+        this._browserCircuitOpen = true;
+        this._browserCircuitOpenedAt = now;
+        logger.warn(`${this.name}: browser circuit OPEN — skipping browser for ${this._BROWSER_RETRY_INTERVAL / 60000}min to save proxy bandwidth`);
+      }
     }
 
     // Step 2: Fall back to ScraperAPI (paid)
