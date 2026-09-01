@@ -98,12 +98,15 @@ class AmazonAdapter extends BaseAdapter {
           const price = typeof item.price === 'number' ? item.price :
             normalizePrice(item.price_string || item.price || item.current_price);
 
+          // Layer 5: Must have a real price — no-price listings are placeholder/third-party junk
+          if (price == null || price <= 0) continue;
+
           const url = item.url || item.product_url || item.link ||
             `${this.url}/dp/${asin}`;
           const fullUrl = url.startsWith('http') ? url : `${this.url}${url}`;
 
           const image = item.image || item.thumbnail || '';
-          const inStock = price != null;
+          const inStock = true; // If it passed the price check, it's purchasable
 
           const product = this.classify({
             sku: asin,
