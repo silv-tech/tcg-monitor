@@ -66,7 +66,7 @@ class DeliveryQueue {
           continue;
         }
         // Skip low-value products — single packs, blisters, structure decks not worth alerting on
-        const MIN_ALERT_PRICE = 30;
+        const MIN_ALERT_PRICE = 15;
         if (price < MIN_ALERT_PRICE) {
           logger.debug(`Low-value product filtered ($${price} < $${MIN_ALERT_PRICE}): ${event.product?.name || 'unknown'}`);
           continue;
