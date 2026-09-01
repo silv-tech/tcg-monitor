@@ -102,10 +102,10 @@
     "adapter": "shopify",
     "intervalMs": 45000,
     "proxyTier": "none",
-    "enabled": false,
+    "enabled": true,
     "color": "#ff6600",
-    "collections": ["pokemon-sealed-products", "one-piece-sealed-products"],
-    "searchKeywords": ["pokemon", "booster", "elite trainer", "one piece", "dragon ball"]
+    "collections": ["pokemon-scarlet-and-violet-sets", "pokemon-sword-shield-sets", "pokemon-prismatic-evolutions"],
+    "searchKeywords": ["pokemon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana"]
   },
   {
     "_phase": 2,
@@ -407,5 +407,18 @@
     "proxyTier": "none",
     "enabled": false,
     "color": "#00b894"
+  },
+  {
+    "_phase": 2,
+    "id": "kanzengames",
+    "name": "Kanzen Games",
+    "url": "https://kanzengames.com",
+    "adapter": "shopify",
+    "intervalMs": 45000,
+    "proxyTier": "none",
+    "enabled": true,
+    "color": "#1a1a2e",
+    "collections": ["booster-packs", "disney-lorcana-sealed-in-stock", "dragon-ball-fusion-world-sealed", "digimon-sealed-in-stock"],
+    "searchKeywords": ["pokemon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "sealed"]
   }
 ]
