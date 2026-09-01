@@ -14,17 +14,23 @@ const CREDIT_COSTS = {
 // Track credit usage per session
 const creditUsage = { total: 0, byRetailer: {}, sessionStart: Date.now() };
 
+// Rate limiter: prevent excessive ScraperAPI calls (costs money)
+const MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes between ScraperAPI calls per retailer
+const lastCallByRetailer = new Map(); // retailerId → timestamp
+
 /**
  * Fetch a URL through ScraperAPI's anti-bot proxy network.
+ * Rate-limited to 1 call per 5 minutes per retailer to control costs.
+ *
  * @param {string} targetUrl - The URL to scrape
  * @param {object} opts - Options
  * @param {boolean} opts.render - Enable JS rendering (5 credits)
- * @param {boolean} opts.premium - Enable premium anti-bot (10 credits) — needed for PerimeterX, Akamai, Incapsula
- * @param {boolean} opts.ultraPremium - Enable ultra premium (25 credits) — for the hardest sites
+ * @param {boolean} opts.premium - Enable premium anti-bot (10 credits)
+ * @param {boolean} opts.ultraPremium - Enable ultra premium (25 credits)
  * @param {string} opts.country - Country code for geo-targeting (default: 'ca')
  * @param {number} opts.timeoutMs - Request timeout (default: 60000)
- * @param {string} opts.retailerId - For credit tracking
- * @returns {string} HTML content
+ * @param {string} opts.retailerId - For credit tracking and rate limiting
+ * @returns {string|null} HTML content, or null if rate-limited
  */
 async function scraperFetch(targetUrl, opts = {}) {
   if (!SCRAPER_API_KEY) {
@@ -39,6 +45,16 @@ async function scraperFetch(targetUrl, opts = {}) {
     timeoutMs = 60000,
     retailerId = 'unknown',
   } = opts;
+
+  // Rate limit: skip if called too recently for this retailer
+  const now = Date.now();
+  const lastCall = lastCallByRetailer.get(retailerId) || 0;
+  if (now - lastCall < MIN_INTERVAL_MS) {
+    const waitSec = Math.round((MIN_INTERVAL_MS - (now - lastCall)) / 1000);
+    logger.debug(`ScraperAPI: rate-limited for ${retailerId}, next call in ${waitSec}s`);
+    return null;
+  }
+  lastCallByRetailer.set(retailerId, now);
 
   const params = new URLSearchParams({
     api_key: SCRAPER_API_KEY,
