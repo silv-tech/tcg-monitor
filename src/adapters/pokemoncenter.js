@@ -54,10 +54,21 @@ class PokemonCenterAdapter extends BaseAdapter {
   }
 
   /**
-   * Capture a Bearer token by solving Incapsula with Patchright
-   * and intercepting API requests made by the frontend.
+   * Get a Bearer token for direct API calls.
+   * Strategy 1: Call OAuth2 endpoint directly (no browser needed)
+   * Strategy 2: Use Patchright browser to solve Incapsula, then call OAuth2 with cookies
+   * Strategy 3: Intercept token from browser API requests
    */
   async captureToken() {
+    // Strategy 1: Try OAuth2 endpoint directly (cheapest — no browser)
+    try {
+      const token = await this._oauthDirect();
+      if (token) return token;
+    } catch (err) {
+      logger.debug(`Pokemon Center: direct OAuth failed: ${err.message}`);
+    }
+
+    // Strategy 2: Solve Incapsula with browser, then call OAuth2 with cookies
     if (!patchright) {
       logger.warn('Pokemon Center: patchright not available for token capture');
       return null;
@@ -92,73 +103,164 @@ class PokemonCenterAdapter extends BaseAdapter {
 
       let token = null;
 
-      // Intercept requests to capture Bearer token from API calls
+      // Intercept ALL requests to find Bearer tokens
       page.on('request', req => {
         const auth = req.headers()['authorization'];
-        if (auth?.startsWith('Bearer ') && req.url().includes('tpci-ecommweb-api')) {
+        if (auth?.startsWith('Bearer ')) {
           token = auth.slice(7);
+          logger.debug(`Pokemon Center: intercepted Bearer token from ${req.url().substring(0, 80)}`);
         }
       });
 
-      // Block heavy resources
+      // Also intercept responses for OAuth token responses
+      page.on('response', async res => {
+        if (res.url().includes('oauth2') || res.url().includes('token')) {
+          try {
+            const body = await res.json();
+            if (body?.access_token) {
+              token = body.access_token;
+              logger.debug(`Pokemon Center: captured token from OAuth response`);
+            }
+          } catch {}
+        }
+      });
+
+      // Block heavy resources but keep XHR/fetch
       await page.route('**/*', route => {
         const type = route.request().resourceType();
         if (['image', 'media', 'font'].includes(type)) return route.abort();
         return route.continue();
       });
 
-      // Visit homepage to solve Incapsula challenge
+      // Visit homepage to solve Incapsula
       await page.goto(this.seedUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(10000);
 
-      // If no token yet, visit a product page to trigger tpci-ecommweb-api calls
-      if (!token && this.sitemapProducts.size > 0) {
-        const firstUrl = [...this.sitemapProducts.values()][0]?.url;
-        if (firstUrl) {
-          logger.debug(`Pokemon Center: navigating to product page for token capture...`);
-          await page.goto(firstUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
-          await page.waitForTimeout(5000);
-        }
-      }
-
-      // Also try to extract token from page JS context
+      // Try calling OAuth2 from within the browser context (bypasses Incapsula)
       if (!token) {
         try {
-          token = await page.evaluate(() => {
-            // Check for token in common storage locations
-            const stored = sessionStorage.getItem('ep_token') ||
-              sessionStorage.getItem('bearer_token') ||
-              localStorage.getItem('ep_token') ||
-              localStorage.getItem('bearer_token');
-            if (stored) return stored;
-
-            // Check cookies
-            const cookies = document.cookie.split(';');
-            for (const c of cookies) {
-              const [name, val] = c.trim().split('=');
-              if (name?.includes('token') && val?.length > 20) return val;
-            }
-            return null;
+          token = await page.evaluate(async () => {
+            try {
+              const res = await fetch('/tpci-ecommweb-api/oauth2/tokens', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'grant_type=password&scope=TPCI&role=PUBLIC',
+              });
+              const data = await res.json();
+              return data?.access_token || null;
+            } catch { return null; }
           });
+          if (token) logger.info('Pokemon Center: got token via in-browser OAuth2 call');
         } catch {}
       }
 
+      // Visit a product page to trigger any API calls
+      if (!token && this.sitemapProducts.size > 0) {
+        const firstUrl = [...this.sitemapProducts.values()][0]?.url;
+        if (firstUrl) {
+          await page.goto(firstUrl, { timeout: 25000, waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(8000);
+        }
+      }
+
+      // Check localStorage/sessionStorage
+      if (!token) {
+        try {
+          token = await page.evaluate(() => {
+            for (const store of [sessionStorage, localStorage]) {
+              for (let i = 0; i < store.length; i++) {
+                const key = store.key(i);
+                const val = store.getItem(key);
+                if (key?.toLowerCase().includes('token') && val?.length > 20 && val?.length < 200) {
+                  return val;
+                }
+              }
+            }
+            return null;
+          });
+          if (token) logger.info('Pokemon Center: got token from browser storage');
+        } catch {}
+      }
+
+      // Get cookies for OAuth2 fallback
+      const cookies = await context.cookies();
       await context.close();
+
+      // Strategy 2b: Use captured cookies to call OAuth2 endpoint via HTTP
+      if (!token && cookies.length > 0) {
+        const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+        try {
+          const res = await fetch(`${this.API_BASE}/oauth2/tokens`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Cookie': cookieString,
+              'Origin': 'https://www.pokemoncenter.com',
+              'Referer': 'https://www.pokemoncenter.com/en-ca/',
+            },
+            body: 'grant_type=password&scope=TPCI&role=PUBLIC',
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.access_token) {
+              token = data.access_token;
+              logger.info('Pokemon Center: got token via cookie-authenticated OAuth2');
+            }
+          } else {
+            logger.debug(`Pokemon Center: cookie OAuth2 returned ${res.status}`);
+          }
+        } catch (err) {
+          logger.debug(`Pokemon Center: cookie OAuth2 failed: ${err.message}`);
+        }
+      }
 
       if (token) {
         this._bearerToken = token;
-        this._tokenExpiresAt = Date.now() + 6 * 60 * 60 * 1000; // 6 hours
-        logger.info(`Pokemon Center: Bearer token captured, cached for 6h`);
+        this._tokenExpiresAt = Date.now() + 6 * 60 * 60 * 1000;
+        logger.info(`Pokemon Center: Bearer token cached for 6h`);
         return token;
       }
 
-      logger.warn('Pokemon Center: could not capture Bearer token from browser session');
+      logger.warn('Pokemon Center: all token capture strategies failed');
       return null;
     } catch (err) {
       logger.warn(`Pokemon Center: token capture failed: ${err.message}`);
       return null;
     } finally {
       if (browser) await browser.close().catch(() => {});
+    }
+  }
+
+  /**
+   * Try to get an OAuth2 token directly without browser (fastest).
+   * Works if the OAuth endpoint is not behind Incapsula WAF.
+   */
+  async _oauthDirect() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(`${this.API_BASE}/oauth2/tokens`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Origin': 'https://www.pokemoncenter.com',
+        },
+        body: 'grant_type=password&scope=TPCI&role=PUBLIC',
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data?.access_token) {
+        this._bearerToken = data.access_token;
+        this._tokenExpiresAt = Date.now() + 6 * 60 * 60 * 1000;
+        logger.info('Pokemon Center: got token via direct OAuth2 (no browser needed!)');
+        return data.access_token;
+      }
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
     }
   }
 
