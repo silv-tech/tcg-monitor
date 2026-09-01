@@ -39,6 +39,9 @@ async function createBot() {
       case 'scan':
         await handleScan(interaction);
         break;
+      case 'test-asin':
+        await handleTestAsin(interaction);
+        break;
     }
   });
 
@@ -48,7 +51,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '2';
+const COMMANDS_VERSION = '3';
 
 async function registerCommands() {
   const commands = [
@@ -72,6 +75,13 @@ async function registerCommands() {
             { name: '12 hours', value: '12' },
             { name: '24 hours', value: '24' },
           )),
+    new SlashCommandBuilder()
+      .setName('test-asin')
+      .setDescription('Send a test alert for a specific Amazon ASIN (with OLID enrichment)')
+      .addStringOption(opt =>
+        opt.setName('asin')
+          .setDescription('Amazon ASIN (e.g. B0GW2DK37Q)')
+          .setRequired(true)),
   ].map(cmd => cmd.toJSON());
 
   // Skip re-registration if commands haven't changed (saves Discord API calls)
@@ -179,6 +189,46 @@ async function handleScan(interaction) {
     });
   } catch (err) {
     await interaction.editReply({ content: `Scan failed: ${err.message}` });
+  }
+}
+
+async function handleTestAsin(interaction) {
+  const asin = interaction.options.getString('asin').trim().toUpperCase();
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    // Try to find this ASIN in the cached Amazon products
+    const products = await state.getAllProducts('amazon');
+    const cached = products[asin];
+
+    const product = cached
+      ? { ...cached, retailerId: 'amazon' }
+      : {
+          sku: asin,
+          name: `Amazon Product ${asin}`,
+          price: 0,
+          url: `https://www.amazon.ca/dp/${asin}`,
+          retailer: 'Amazon Canada',
+          retailerId: 'amazon',
+          inStock: true,
+          category: 'pokemon',
+          lastSeen: Date.now(),
+        };
+
+    const event = {
+      type: 'RESTOCK',
+      product,
+      detail: `Test alert for ASIN ${asin} — enrichment pipeline active`,
+      _scanTier: 'scan', // Use scan tier so it goes to paid channel only, no dedup
+      _detectedAt: Date.now(),
+    };
+
+    await delivery.deliver([event], { skipDedup: true });
+    await interaction.editReply({
+      content: `✅ Test alert sent for **${asin}**${cached ? ' (from cache)' : ' (manual)'} — check paid channel for OLID!`,
+    });
+  } catch (err) {
+    await interaction.editReply({ content: `Failed: ${err.message}` });
   }
 }
 
