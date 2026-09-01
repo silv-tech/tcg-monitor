@@ -171,36 +171,81 @@ async function scrapeAmazonOfferListingId(asin, proxyUrl) {
     await page.goto(url, { timeout: 20000, waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
 
-    // Try multiple extraction methods
-    const olid = await page.evaluate(() => {
+    // Extract OLID and seller info from the same page visit (zero extra cost)
+    const result = await page.evaluate(() => {
+      // ── OLID extraction ──
+      let olid = null;
       // Method 1: Hidden input in add-to-cart form
       const input = document.querySelector('input[name="offerListingID"]');
-      if (input?.value) return input.value;
-
+      if (input?.value) olid = input.value;
       // Method 2: data-offer-id attribute
-      const el = document.querySelector('[data-offer-id]');
-      if (el?.getAttribute('data-offer-id')) return el.getAttribute('data-offer-id');
-
+      if (!olid) {
+        const el = document.querySelector('[data-offer-id]');
+        if (el?.getAttribute('data-offer-id')) olid = el.getAttribute('data-offer-id');
+      }
       // Method 3: Parse from twister/buy-box JSON embedded in page
-      const scripts = document.querySelectorAll('script[type="text/javascript"]');
-      for (const s of scripts) {
-        const text = s.textContent || '';
-        const match = text.match(/"offerListingID"\s*:\s*"([^"]+)"/);
-        if (match) return match[1];
+      if (!olid) {
+        const scripts = document.querySelectorAll('script[type="text/javascript"]');
+        for (const s of scripts) {
+          const text = s.textContent || '';
+          const match = text.match(/"offerListingID"\s*:\s*"([^"]+)"/);
+          if (match) { olid = match[1]; break; }
+        }
       }
 
-      return null;
+      // ── Seller extraction ──
+      let seller = null;
+      // Method 1: Tabular buybox "Sold by" row (modern Amazon layout)
+      const buyboxRows = document.querySelectorAll('.tabular-buybox-text, [class*="tabular-buybox"] span');
+      for (let i = 0; i < buyboxRows.length; i++) {
+        const attr = buyboxRows[i].getAttribute('tabular-attribute-name') || '';
+        if (attr.toLowerCase().includes('sold by') || attr.toLowerCase().includes('vendu par')) {
+          // The seller name is in this element or the next sibling
+          const text = buyboxRows[i].textContent.trim();
+          if (text) { seller = text; break; }
+        }
+      }
+      // Method 2: Seller profile link in buybox
+      if (!seller) {
+        const sellerLink = document.querySelector('#sellerProfileTriggerId');
+        if (sellerLink?.textContent?.trim()) seller = sellerLink.textContent.trim();
+      }
+      // Method 3: merchant-info div (older layout)
+      if (!seller) {
+        const merchantInfo = document.querySelector('#merchant-info');
+        if (merchantInfo) {
+          const text = merchantInfo.textContent.trim();
+          // Extract seller from "Ships from and sold by Amazon.ca" or "Sold by X and Fulfilled by Amazon"
+          const soldByMatch = text.match(/sold by\s+(.+?)(?:\s+and|\s*\.)/i);
+          if (soldByMatch) seller = soldByMatch[1].trim();
+          else seller = text;
+        }
+      }
+      // Method 4: "Ships from" / "Sold by" in buybox container
+      if (!seller) {
+        const offerDisplay = document.querySelector('#buybox-tabular, #newBuyBoxPrice, .a-box-inner');
+        if (offerDisplay) {
+          const text = offerDisplay.textContent;
+          const match = text.match(/[Ss]old by[:\s]+([^\n.]+)/);
+          if (match) seller = match[1].trim();
+        }
+      }
+
+      return { olid, seller };
     });
 
-    if (olid) {
-      logger.info(`Got OLID for ${asin}: ${olid.substring(0, 20)}...`);
+    if (result.olid) {
+      logger.info(`Got OLID for ${asin}: ${result.olid.substring(0, 20)}...`);
     } else {
       logger.debug(`No OLID found on page for ${asin}`);
     }
-    return olid;
+    if (result.seller) {
+      logger.info(`Seller for ${asin}: ${result.seller}`);
+    }
+    return result;
   } catch (err) {
-    logger.debug(`OLID scrape failed for ${asin}: ${err.message}`);
-    return null;
+    logger.debug(`OLID/seller scrape failed for ${asin}: ${err.message}`);
+    return { olid: null, seller: null };
   } finally {
     await context.close();
   }

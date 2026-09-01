@@ -62,7 +62,10 @@ class AmazonAdapter extends BaseAdapter {
             'trading card'].some(kw => lowerName.includes(kw));
           if (!isTCG) continue;
 
-          // Skip third-party sellers — allow Amazon-sold OR unknown seller (ScraperAPI often omits sold_by)
+          // Pre-filter: ScraperAPI search results rarely include sold_by, so this is
+          // a best-effort first pass. The real seller verification happens during
+          // alert enrichment (delivery.js) — we scrape the product page for OLID and
+          // seller name, and suppress alerts for third-party sellers there.
           const seller = (item.sold_by || item.seller || '').toLowerCase();
           if (seller && !seller.includes('amazon')) continue;
 

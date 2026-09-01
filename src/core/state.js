@@ -286,6 +286,20 @@ async function cacheOfferListingId(asin, olid) {
   await getRedis().set(key, olid, 'EX', OLID_TTL);
 }
 
+// ─── Amazon seller cache ────────────────────────────────────────
+const SELLER_TTL = 86400 * 30; // 30 days — same as OLID
+
+async function getSellerCache(asin) {
+  const key = `${PREFIX}seller:${asin}`;
+  return await getRedis().get(key);
+}
+
+async function cacheSellerInfo(asin, seller) {
+  if (!seller) return;
+  const key = `${PREFIX}seller:${asin}`;
+  await getRedis().set(key, seller, 'EX', SELLER_TTL);
+}
+
 async function shutdown() {
   if (redis) {
     await redis.quit();
@@ -319,5 +333,7 @@ module.exports = {
   getPriceHistory,
   getOfferListingId,
   cacheOfferListingId,
+  getSellerCache,
+  cacheSellerInfo,
   shutdown,
 };

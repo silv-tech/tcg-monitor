@@ -4,7 +4,7 @@ const logger = require('../monitoring/logger');
 const { buildAlertEmbed } = require('./embeds');
 const { filterDuplicates, markSent } = require('./dedup');
 const { recordAlertLatency } = require('../core/proxy');
-const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId } = require('../core/state');
+const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, cacheSellerInfo } = require('../core/state');
 const { scrapeAmazonOfferListingId } = require('../utils/browser');
 const { sleep } = require('../utils/helpers');
 
@@ -117,20 +117,42 @@ class DeliveryQueue {
       if (product.retailerId) {
         event._lastCheckedAt = await getLastCheck(product.retailerId);
       }
-      // Amazon Offer Listing ID — cache-first, scrape on miss
+      // Amazon Offer Listing ID + seller verification — cache-first, scrape on miss
       if (product.retailerId === 'amazon' && product.sku) {
         const asin = product.sku;
         let olid = await getOfferListingId(asin);
-        if (!olid) {
-          // Scrape product page with residential proxy (best-effort, don't block alert)
+        let seller = await getSellerCache(asin);
+
+        if (!olid || !seller) {
+          // Scrape product page — gets both OLID and seller in one visit (zero extra cost)
           try {
-            olid = await scrapeAmazonOfferListingId(asin, config.proxy.residentialUrl);
-            if (olid) await cacheOfferListingId(asin, olid);
+            const result = await scrapeAmazonOfferListingId(asin, config.proxy.residentialUrl);
+            if (result.olid && !olid) {
+              olid = result.olid;
+              await cacheOfferListingId(asin, olid);
+            }
+            if (result.seller && !seller) {
+              seller = result.seller;
+              await cacheSellerInfo(asin, seller);
+            }
           } catch (err) {
-            logger.debug(`OLID fetch failed for ${asin}: ${err.message}`);
+            logger.debug(`OLID/seller fetch failed for ${asin}: ${err.message}`);
           }
         }
+
         if (olid) event._offerListingId = olid;
+
+        // Seller verification: suppress third-party seller alerts
+        if (seller) {
+          const sellerLower = seller.toLowerCase();
+          const isSoldByAmazon = sellerLower.includes('amazon');
+          if (!isSoldByAmazon) {
+            event._thirdPartySeller = true;
+            event._seller = seller;
+            logger.info(`Third-party seller detected for ${asin}: "${seller}"`);
+          }
+        }
+        // If no seller info (scrape failed), fail-open — send the alert anyway
       }
     } catch (err) {
       logger.debug(`Event enrichment failed: ${err.message}`);
@@ -139,6 +161,13 @@ class DeliveryQueue {
 
   async routeEvent(event, queuedAt) {
     await this.enrichEvent(event);
+
+    // Skip Amazon third-party seller products (client wants "sold by Amazon" only)
+    if (event._thirdPartySeller) {
+      logger.info(`Suppressed third-party alert: ${event.product?.name} (seller: ${event._seller})`);
+      return;
+    }
+
     const { product } = event;
     const category = product.category || 'default';
     const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);
