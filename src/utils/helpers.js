@@ -24,14 +24,15 @@ function hashSku(retailer, sku) {
 
 // TCG sealed product keywords — matches actual sealed card products
 const TCG_KEYWORDS = [
+  'tcg', 'card game', 'trading card',
   'booster box', 'booster pack', 'booster bundle', 'booster display',
   'elite trainer', 'etb', 'blister', 'bundle box',
-  'collection box', 'premium collection', 'special collection',
+  'collection box', 'premium collection', 'special collection', 'collection',
   'build and battle', 'league battle', 'starter deck', 'structure deck',
   'ultra premium', 'poster collection', 'tech sticker',
   'trainer gallery', 'expansion pack',
   ' tin', 'tin ', ' box', 'box ', ' pack', 'pack ',
-  'sealed', 'card game', 'trading card',
+  'sealed', 'booster',
 ];
 
 const NON_TCG_KEYWORDS = [
