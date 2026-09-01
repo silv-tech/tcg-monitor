@@ -57,6 +57,15 @@ class DeliveryQueue {
         logger.debug(`Non-TCG product filtered: ${event.product?.name || 'unknown'}`);
         continue;
       }
+      // Skip low-value products — single packs, blisters, structure decks not worth alerting on
+      const MIN_ALERT_PRICE = 30;
+      if (!event._scanTier && event.product) {
+        const price = event.product.price;
+        if (price != null && price > 0 && price < MIN_ALERT_PRICE) {
+          logger.debug(`Low-value product filtered ($${price} < $${MIN_ALERT_PRICE}): ${event.product?.name || 'unknown'}`);
+          continue;
+        }
+      }
       // Skip events disabled by event type toggles (scan events always pass through)
       if (!event._scanTier && channelsConfig?.enabledEvents) {
         if (channelsConfig.enabledEvents[event.type] === false) {
