@@ -1,4 +1,4 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder } = require('discord.js');
 const { EVENT_TYPES } = require('../core/events');
 
 // ─── Event config ────────────────────────────────────────────────
@@ -6,37 +6,30 @@ const EVENT_CONFIG = {
   [EVENT_TYPES.RESTOCK]: {
     label: 'Restock',
     color: 0x57f287,
-    button: 'Buy Now',
   },
   [EVENT_TYPES.NEW_SKU]: {
     label: 'New Product',
     color: 0x5865f2,
-    button: 'View Product',
   },
   [EVENT_TYPES.PRICE_CHANGE]: {
     label: 'Price Drop',
     color: 0xed4245,
-    button: 'Buy Now',
   },
   [EVENT_TYPES.PREORDER_LIVE]: {
     label: 'Pre-Order Live',
     color: 0xfe7434,
-    button: 'Pre-Order Now',
   },
   [EVENT_TYPES.CART_AVAILABLE]: {
     label: 'Cart Available',
     color: 0x3498db,
-    button: 'Add to Cart',
   },
   [EVENT_TYPES.SHIPPING_CHANGE]: {
     label: 'Shipping Update',
     color: 0x95a5a6,
-    button: 'View Product',
   },
   [EVENT_TYPES.LISTING]: {
     label: 'Currently Listed',
     color: 0x9b59b6,
-    button: 'View Product',
   },
 };
 
@@ -53,7 +46,6 @@ function buildRestockHistoryValue(history) {
   if (!history || history.length === 0) return null;
   const last = history[history.length - 1];
   if (history.length === 1) return `Last: ${formatDaysAgo(last)}`;
-  // Average interval between restocks
   let totalGap = 0;
   for (let i = 1; i < history.length; i++) {
     totalGap += history[i] - history[i - 1];
@@ -72,7 +64,7 @@ function buildCrossRetailerValue(matches) {
 
 function buildPriceHistoryValue(history) {
   if (!history || history.length < 2) return null;
-  const entries = history.slice(-5); // last 5 price points
+  const entries = history.slice(-5);
   return entries.map(h => {
     const daysAgo = formatDaysAgo(h.time);
     return `$${h.price.toFixed(2)} (${daysAgo})`;
@@ -104,7 +96,6 @@ function buildAlertEmbed(event, tier) {
 
   // ── Title: product name (clickable link) ──
   embed.setTitle(product.name);
-  // Use short URL for Amazon (/dp/ASIN), truncate others to Discord's 2048 limit
   const safeUrl = isAmazon && product.sku
     ? `https://www.amazon.ca/dp/${product.sku}`
     : product.url && product.url.length <= 2048 ? product.url : null;
@@ -113,9 +104,9 @@ function buildAlertEmbed(event, tier) {
   // ── Thumbnail ──
   if (product.image) embed.setThumbnail(product.image);
 
-  // ── Inline fields (Zephyr style) ──
+  // ── Inline fields ──
 
-  // Price field
+  // Price
   if (type === EVENT_TYPES.PRICE_CHANGE && oldValue != null && newValue != null) {
     const saved = oldValue - newValue;
     if (saved > 0) {
@@ -130,50 +121,53 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Price', value: 'TBD', inline: true });
   }
 
-  // Type field
+  // Type
   embed.addFields({ name: 'Type', value: cfg.label, inline: true });
 
-  // SKU / ASIN field
+  // SKU / ASIN
   if (product.sku) {
     embed.addFields({ name: isAmazon ? 'ASIN' : 'SKU', value: String(product.sku), inline: true });
   }
 
-  // ── Stock (unified — count when known, 1+ when in stock, red when OOS) ──
+  // ── Stock ──
   if (product.stockCount != null && product.stockCount > 0) {
     embed.addFields({ name: 'Stock', value: String(product.stockCount), inline: true });
   } else {
     embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
   }
 
-  // ── Variant ID (Shopify only — useful for manual checkout) ──
+  // ── Variant ID (Shopify only) ──
   if (product._variantId) {
     embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
   }
 
-  // ── Offer Listing ID (Amazon only — scraped from product page, cached 30 days) ──
+  // ── Offer Listing ID (Amazon only) ──
   if (isAmazon && event._offerListingId) {
     embed.addFields({ name: 'Offer Id', value: event._offerListingId, inline: false });
   }
 
-  // ── Restock History (all retailers) ──
-  const restockValue = buildRestockHistoryValue(event._restockHistory);
-  if (restockValue) {
-    embed.addFields({ name: 'Restock History', value: restockValue, inline: false });
+  // ── One Click Checkout (markdown links in embed fields — matches client's preferred format) ──
+  if (isAmazon && product.sku) {
+    const asin = String(product.sku);
+    const atcBase = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+    embed.addFields(
+      { name: 'One Click Checkout', value: `[ATCx1](${atcBase}1) | [ATCx2](${atcBase}2)`, inline: false },
+      { name: 'One Click Checkout', value: `[ATCx3](${atcBase}3) | [ATCx12](${atcBase}12)`, inline: false },
+    );
+  } else if (product._variantId && product.url) {
+    try {
+      const origin = new URL(product.url).origin;
+      const vid = product._variantId;
+      embed.addFields(
+        { name: 'One Click Checkout', value: `[ATCx1](${origin}/cart/${vid}:1) | [ATCx2](${origin}/cart/${vid}:2)`, inline: false },
+        { name: 'One Click Checkout', value: `[ATCx3](${origin}/cart/${vid}:3)`, inline: false },
+      );
+    } catch {
+      // Invalid URL — skip ATC
+    }
   }
 
-  // ── Price History (all retailers) ──
-  const priceValue = buildPriceHistoryValue(event._priceHistory);
-  if (priceValue) {
-    embed.addFields({ name: 'Price History', value: priceValue, inline: false });
-  }
-
-  // ── Cross-Retailer Price Check (all retailers) ──
-  const crossValue = buildCrossRetailerValue(event._crossRetailer);
-  if (crossValue) {
-    embed.addFields({ name: 'Also In Stock', value: crossValue, inline: false });
-  }
-
-  // ── Links (all retailers get eBay, Amazon gets extras) ──
+  // ── Links ──
   const encodedName = encodeURIComponent(product.name || '');
   const links = [];
   if (isAmazon && product.sku) {
@@ -191,6 +185,24 @@ function buildAlertEmbed(event, tier) {
   );
   embed.addFields({ name: 'Links', value: links.join(' | '), inline: false });
 
+  // ── Restock History ──
+  const restockValue = buildRestockHistoryValue(event._restockHistory);
+  if (restockValue) {
+    embed.addFields({ name: 'Restock History', value: restockValue, inline: false });
+  }
+
+  // ── Price History ──
+  const priceValue = buildPriceHistoryValue(event._priceHistory);
+  if (priceValue) {
+    embed.addFields({ name: 'Price History', value: priceValue, inline: false });
+  }
+
+  // ── Cross-Retailer Price Check ──
+  const crossValue = buildCrossRetailerValue(event._crossRetailer);
+  if (crossValue) {
+    embed.addFields({ name: 'Also In Stock', value: crossValue, inline: false });
+  }
+
   // ── Footer with detection speed + freshness ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
   let footerText = `Pulse Watch  ·  ${tierLabel}`;
@@ -205,51 +217,8 @@ function buildAlertEmbed(event, tier) {
   }
   embed.setFooter({ text: footerText });
 
-  // ── Buttons (real Discord buttons, not markdown links) ──
+  // No Discord buttons — all ATC links are markdown in embed fields (client preferred format)
   const components = [];
-
-  // Row 1: Buy Now / View Product
-  const buttonUrl = isAmazon && product.sku
-    ? `https://www.amazon.ca/dp/${product.sku}`
-    : product.url;
-  if (buttonUrl && buttonUrl.length <= 512) {
-    components.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel(cfg.button)
-          .setURL(buttonUrl)
-          .setStyle(ButtonStyle.Link)
-      )
-    );
-  }
-
-  // Row 2: ATC buttons (Amazon: cart/add API, Shopify: /cart/variant:qty)
-  if (isAmazon && product.sku) {
-    const asin = String(product.sku);
-    const atcBase = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
-    components.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('ATCx1').setURL(`${atcBase}1`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('ATCx2').setURL(`${atcBase}2`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('ATCx3').setURL(`${atcBase}3`).setStyle(ButtonStyle.Link),
-        new ButtonBuilder().setLabel('ATCx12').setURL(`${atcBase}12`).setStyle(ButtonStyle.Link),
-      )
-    );
-  } else if (product._variantId && product.url) {
-    try {
-      const origin = new URL(product.url).origin;
-      const vid = product._variantId;
-      components.push(
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel('ATCx1').setURL(`${origin}/cart/${vid}:1`).setStyle(ButtonStyle.Link),
-          new ButtonBuilder().setLabel('ATCx2').setURL(`${origin}/cart/${vid}:2`).setStyle(ButtonStyle.Link),
-          new ButtonBuilder().setLabel('ATCx3').setURL(`${origin}/cart/${vid}:3`).setStyle(ButtonStyle.Link),
-        )
-      );
-    } catch {
-      // Invalid URL — skip ATC buttons
-    }
-  }
 
   return { embed, components };
 }

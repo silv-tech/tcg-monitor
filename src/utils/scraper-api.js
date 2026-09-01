@@ -300,9 +300,10 @@ async function walmartSearch(query, opts = {}) {
 }
 
 /**
- * Fetch Amazon Offer Listing ID + seller via ScraperAPI's structured Offers API.
- * Returns clean JSON — no HTML parsing needed. 5 credits per call.
- * Rate-limited per ASIN (5-min cooldown). Cached by caller in Redis for 30 days.
+ * Fetch Amazon Offer Listing ID + seller via Amazon's AOD (All Offers Display) endpoint.
+ * Routed through ScraperAPI premium proxy. Returns the OLID from the pinned (Buy Box)
+ * offer, or the first listed offer if no Buy Box winner exists.
+ * 10 credits per call (premium proxy). Rate-limited per ASIN (5-min cooldown).
  *
  * @param {string} asin - Amazon ASIN
  * @returns {{ olid: string|null, seller: string|null }}
@@ -318,67 +319,85 @@ async function fetchAmazonOlidAndSeller(asin) {
   if (now - lastCall < MIN_INTERVAL_MS) return { olid: null, seller: null };
   lastCallByRetailer.set(rateKey, now);
 
+  // Fetch Amazon's AOD (All Offers Display) page via ScraperAPI premium proxy
+  // This internal AJAX endpoint returns HTML with offerListingId values per seller
+  const targetUrl = `https://www.amazon.ca/gp/product/ajax/aodAjaxMain/?asin=${asin}`;
   const params = new URLSearchParams({
     api_key: SCRAPER_API_KEY,
-    asin,
-    tld: 'ca',
+    url: targetUrl,
+    premium: 'true',
     country_code: 'ca',
   });
 
-  const apiUrl = `https://api.scraperapi.com/structured/amazon/offers?${params}`;
-  const cost = 5;
+  const apiUrl = `${SCRAPER_API_BASE}?${params}`;
+  const cost = 10; // Premium proxy tier
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
     const response = await fetch(apiUrl, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (!response.ok) {
-      throw new Error(`ScraperAPI Offers API: HTTP ${response.status}`);
+      throw new Error(`ScraperAPI AOD: HTTP ${response.status}`);
     }
 
-    const data = await response.json();
+    const html = await response.text();
 
     creditUsage.total += cost;
     creditUsage.byRetailer['amazon-olid'] = (creditUsage.byRetailer['amazon-olid'] || 0) + cost;
     checkBudget();
 
-    // Extract OLID and seller from first offer (buy box winner)
     let olid = null;
     let seller = null;
 
-    const offers = data.offers || data.results || [];
-    if (offers.length > 0) {
-      const topOffer = offers[0];
-      olid = topOffer.offer_id || topOffer.offer_listing_id || topOffer.offerListingId || null;
-      seller = topOffer.seller_name || topOffer.sold_by || topOffer.seller || null;
-
-      // If no offer_id in structured fields, check nested objects
-      if (!olid && topOffer.offer) {
-        olid = topOffer.offer.id || topOffer.offer.offer_id || null;
+    // 1) Try pinned offer first (Buy Box winner — this is the Amazon.ca direct offer)
+    const pinnedMatch = html.match(/aod-pinned-offer([\s\S]*?)(?=aod-offer-list|$)/);
+    if (pinnedMatch) {
+      const pinnedBlock = pinnedMatch[1];
+      const pinnedOlid = pinnedBlock.match(/offerListingId\]\s*"\s*value="([^"]+)"/);
+      if (pinnedOlid && pinnedOlid[1]) {
+        olid = pinnedOlid[1];
+      }
+      const pinnedSeller = pinnedBlock.match(/aod-offer-soldBy[\s\S]*?<a[^>]*role="link"[^>]*>([^<]+)<\/a>/);
+      if (pinnedSeller) {
+        seller = pinnedSeller[1].trim();
       }
     }
 
-    // Also check top-level fields (some API responses put buy box info at root)
-    if (!olid && data.offer_id) olid = data.offer_id;
-    if (!seller && data.seller_name) seller = data.seller_name;
-    if (!seller && data.sold_by) seller = data.sold_by;
+    // 2) If no pinned OLID, grab the first listed offer's OLID
+    if (!olid) {
+      const firstOlid = html.match(/offerListingId\]\s*"\s*value="([^"]+)"/);
+      if (firstOlid && firstOlid[1]) {
+        olid = firstOlid[1];
+      }
+    }
 
-    if (olid) logger.info(`ScraperAPI Offers: OLID for ${asin}: ${olid.substring(0, 20)}...`);
-    if (seller) logger.info(`ScraperAPI Offers: Seller for ${asin}: ${seller}`);
+    // 3) If no pinned seller, grab first seller from offer list
+    if (!seller) {
+      const sellerMatches = [...html.matchAll(/aod-offer-soldBy[\s\S]*?<a[^>]*role="link"[^>]*>([^<]+)<\/a>/g)];
+      if (sellerMatches.length > 0) {
+        seller = sellerMatches[0][1].trim();
+      }
+    }
+
+    // Count total offers for logging
+    const totalOlids = (html.match(/offerListingId\]\s*"\s*value="[^"]+"/g) || []).length;
+
+    if (olid) logger.info(`ScraperAPI AOD: OLID for ${asin}: ${olid.substring(0, 30)}... (${totalOlids} total offers)`);
+    if (seller) logger.info(`ScraperAPI AOD: Seller for ${asin}: ${seller}`);
     if (!olid && !seller) {
-      logger.debug(`ScraperAPI Offers: no OLID/seller found for ${asin} (${offers.length} offers, keys: ${Object.keys(data).join(', ')})`);
+      logger.debug(`ScraperAPI AOD: no OLID/seller found for ${asin} (page size: ${html.length})`);
     }
 
     return { olid, seller };
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') {
-      logger.debug(`ScraperAPI Offers: timeout for ${asin}`);
+      logger.debug(`ScraperAPI AOD: timeout for ${asin}`);
     } else {
-      logger.debug(`ScraperAPI Offers: failed for ${asin}: ${err.message}`);
+      logger.debug(`ScraperAPI AOD: failed for ${asin}: ${err.message}`);
     }
     return { olid: null, seller: null };
   }
