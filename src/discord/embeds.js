@@ -152,7 +152,7 @@ function buildAlertEmbed(event, tier) {
     // ── Amazon-specific fields ──
     const asin = String(product.sku);
 
-    // One Click Checkout — CA (ATCx1 | ATCx2 row, ATCx3 | ATCx8 row)
+    // One Click Checkout — CA only (ATCx1 | ATCx2 row, ATCx3 | ATCx12 row)
     const atcCa = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
     embed.addFields({
       name: 'One Click Checkout',
@@ -161,20 +161,7 @@ function buildAlertEmbed(event, tier) {
     });
     embed.addFields({
       name: 'One Click Checkout',
-      value: `[ATCx3](${atcCa}3) | [ATCx8](${atcCa}8)`,
-      inline: false,
-    });
-
-    // One Click Checkout — US
-    const atcUs = `https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
-    embed.addFields({
-      name: '\u{1F1FA}\u{1F1F8} One Click Checkout',
-      value: `[ATCx1](${atcUs}1) | [ATCx2](${atcUs}2)`,
-      inline: false,
-    });
-    embed.addFields({
-      name: '\u{1F1FA}\u{1F1F8} One Click Checkout',
-      value: `[ATCx3](${atcUs}3) | [ATCx8](${atcUs}8)`,
+      value: `[ATCx3](${atcCa}3) | [ATCx12](${atcCa}12)`,
       inline: false,
     });
 
