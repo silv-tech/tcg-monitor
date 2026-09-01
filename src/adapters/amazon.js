@@ -7,7 +7,7 @@ class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.domain = 'www.amazon.ca';
-    // Search queries for ScraperAPI structured endpoint
+    // Search queries — autoparse with emi= filter ensures "sold by Amazon" only
     this.searchQueries = [
       'pokemon tcg booster box',
       'pokemon elite trainer box',
@@ -26,7 +26,7 @@ class AmazonAdapter extends BaseAdapter {
     // Parallel search queries (#6) — all queries fire simultaneously
     const searchResults = await Promise.allSettled(
       this.searchQueries.map(query =>
-        amazonSearch(query, { tld: 'ca', retailerId: this.id })
+        amazonSearch(query, { retailerId: this.id })
           .then(data => ({ query, data }))
       )
     );
@@ -42,15 +42,18 @@ class AmazonAdapter extends BaseAdapter {
         continue;
       }
 
-      const results = data.results || data.organic_results || data.search_results || [];
+      // Autoparse returns results in various field names — try all known variants
+      const results = data.results || data.organic_results || data.search_results ||
+        data.items || data.ads || [];
       if (results.length === 0) {
-        logger.warn(`Amazon: 0 results from structured API for "${query}"`, { reason: 'empty_response' });
+        // Log top-level keys to help debug response format
+        logger.warn(`Amazon: 0 results for "${query}" (keys: ${Object.keys(data).join(', ')})`);
         continue;
       }
 
       for (const item of results) {
         try {
-          const asin = item.asin;
+          const asin = item.asin || item.ASIN;
           if (!asin) continue;
 
           const name = item.name || item.title;
@@ -62,15 +65,13 @@ class AmazonAdapter extends BaseAdapter {
             'trading card'].some(kw => lowerName.includes(kw));
           if (!isTCG) continue;
 
-          // Pre-filter: ScraperAPI search results rarely include sold_by, so this is
-          // a best-effort first pass. The real seller verification happens during
-          // alert enrichment (delivery.js) — we scrape the product page for OLID and
-          // seller name, and suppress alerts for third-party sellers there.
+          // emi= URL filter already restricts to "sold by Amazon.ca" at search level.
+          // Double-check if seller data is present in autoparse response.
           const seller = (item.sold_by || item.seller || '').toLowerCase();
           if (seller && !seller.includes('amazon')) continue;
 
           const price = typeof item.price === 'number' ? item.price :
-            normalizePrice(item.price_string || item.price);
+            normalizePrice(item.price_string || item.price || item.current_price);
 
           const url = item.url || item.product_url || item.link ||
             `${this.url}/dp/${asin}`;

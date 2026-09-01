@@ -188,7 +188,7 @@ async function amazonSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
   if (budgetPaused) return null;
 
-  const { tld = 'ca', retailerId = 'amazon' } = opts;
+  const { retailerId = 'amazon' } = opts;
 
   // Rate limit
   const now = Date.now();
@@ -199,15 +199,18 @@ async function amazonSearch(query, opts = {}) {
   }
   lastCallByRetailer.set(`${retailerId}:${query}`, now);
 
+  // Use autoparse with full URL (same approach as Walmart) — allows emi= seller filter
+  // A3DWYIK6Y9EEQB = Amazon.ca's seller ID — filters to "sold by Amazon" only
+  const targetUrl = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&emi=A3DWYIK6Y9EEQB`;
   const params = new URLSearchParams({
     api_key: SCRAPER_API_KEY,
-    query,
-    tld,
-    country_code: tld,
+    url: targetUrl,
+    autoparse: 'true',
+    country_code: 'ca',
   });
 
-  const apiUrl = `${SCRAPER_API_BASE}/structured/amazon/search?${params}`;
-  const cost = 5; // Structured e-commerce endpoints cost 5 credits
+  const apiUrl = `${SCRAPER_API_BASE}?${params}`;
+  const cost = 5; // E-commerce domains cost 5 credits
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
