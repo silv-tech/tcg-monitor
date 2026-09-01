@@ -126,6 +126,7 @@ async function getSessionCookies(domain, seedUrl, opts = {}) {
     const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     cookieCache.set(domain, {
       cookieString,
+      cookies, // Keep full cookie objects for browser injection
       expiresAt: Date.now() + COOKIE_TTL,
     });
 
@@ -156,6 +157,14 @@ async function browserFetchWithCookies(url, opts = {}) {
   });
 
   try {
+    // Inject cached cookies so browser has existing Incapsula session
+    const domain = new URL(url).hostname;
+    const cached = cookieCache.get(domain);
+    if (cached && cached.cookies && cached.cookies.length > 0) {
+      await context.addCookies(cached.cookies);
+      logger.debug(`Cookie session: injected ${cached.cookies.length} cached cookies for ${domain}`);
+    }
+
     await page.goto(url, { timeout: timeoutMs, waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(8000);
 
@@ -174,7 +183,6 @@ async function browserFetchWithCookies(url, opts = {}) {
     }
 
     const html = await page.content();
-    const domain = new URL(url).hostname;
     const cookies = await context.cookies();
 
     logger.info(`Cookie session: browserFetch ${domain} — HTML: ${html.length} bytes, cookies: ${cookies.length}`);
@@ -183,6 +191,7 @@ async function browserFetchWithCookies(url, opts = {}) {
       const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       cookieCache.set(domain, {
         cookieString,
+        cookies, // Keep full cookie objects for future browser injection
         expiresAt: Date.now() + COOKIE_TTL,
       });
     }
