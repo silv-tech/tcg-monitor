@@ -195,7 +195,8 @@ class DeliveryQueue {
     await this.enrichEvent(event);
 
     // Skip Amazon third-party seller products (client wants "sold by Amazon" only)
-    if (event._thirdPartySeller) {
+    // Scan/test events bypass this filter — admin needs to see all alerts
+    if (event._thirdPartySeller && !event._scanTier) {
       logger.info(`Suppressed third-party alert: ${event.product?.name} (seller: ${event._seller})`);
       return;
     }
