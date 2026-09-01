@@ -160,7 +160,7 @@ class BaseAdapter {
     return scraperApi.scraperFetch(url, {
       render: true,
       premium: true,
-      country: 'ca',
+      country: 'us',
       ...scraperOpts,
       retailerId: this.id,
     });

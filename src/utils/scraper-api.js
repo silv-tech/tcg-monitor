@@ -47,14 +47,15 @@ async function scraperFetch(targetUrl, opts = {}) {
   } = opts;
 
   // Rate limit: skip if called too recently for this retailer
-  const now = Date.now();
-  const lastCall = lastCallByRetailer.get(retailerId) || 0;
-  if (now - lastCall < MIN_INTERVAL_MS) {
-    const waitSec = Math.round((MIN_INTERVAL_MS - (now - lastCall)) / 1000);
-    logger.debug(`ScraperAPI: rate-limited for ${retailerId}, next call in ${waitSec}s`);
-    return null;
-  }
-  lastCallByRetailer.set(retailerId, now);
+  // TODO: re-enable after testing is complete
+  // const now = Date.now();
+  // const lastCall = lastCallByRetailer.get(retailerId) || 0;
+  // if (now - lastCall < MIN_INTERVAL_MS) {
+  //   const waitSec = Math.round((MIN_INTERVAL_MS - (now - lastCall)) / 1000);
+  //   logger.debug(`ScraperAPI: rate-limited for ${retailerId}, next call in ${waitSec}s`);
+  //   return null;
+  // }
+  // lastCallByRetailer.set(retailerId, now);
 
   const params = new URLSearchParams({
     api_key: SCRAPER_API_KEY,
