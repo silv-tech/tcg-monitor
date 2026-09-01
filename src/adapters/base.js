@@ -71,7 +71,7 @@ class BaseAdapter {
 
   async browserFetch(url, opts = {}) {
     if (!browserModule) {
-      throw new Error('Browser fallback unavailable — install playwright-core');
+      throw new Error('Browser fallback unavailable — install patchright');
     }
     const { url: proxyUrl, proxyObj } = this.getProxy();
     try {

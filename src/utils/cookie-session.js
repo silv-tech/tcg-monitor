@@ -1,6 +1,6 @@
 const logger = require('../monitoring/logger');
 
-let playwright;
+let patchright;
 
 // Browser cache: proxyUrl -> browser instance
 const browserCache = new Map();
@@ -30,19 +30,17 @@ async function ensureBrowser(proxyUrl) {
 
   launching.add(cacheKey);
   try {
-    if (!playwright) playwright = require('playwright-core');
+    if (!patchright) patchright = require('patchright');
   } catch {
     launching.delete(cacheKey);
-    throw new Error('playwright-core not installed');
+    throw new Error('patchright not installed');
   }
 
   const opts = {
     headless: true,
     args: [
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-setuid-sandbox',
     ],
   };
 
@@ -59,7 +57,7 @@ async function ensureBrowser(proxyUrl) {
     }
   }
 
-  const browser = await playwright.chromium.launch(opts);
+  const browser = await patchright.chromium.launch(opts);
   browserCache.set(cacheKey, browser);
   launching.delete(cacheKey);
   logger.info(`Cookie session: browser launched (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
@@ -67,20 +65,11 @@ async function ensureBrowser(proxyUrl) {
 }
 
 async function createStealthContext(browser) {
+  // Patchright handles UA, webdriver, automation signals natively — no manual patches needed
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
     locale: 'en-CA',
     timezoneId: 'America/Toronto',
     viewport: { width: 1920, height: 1080 },
-  });
-
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    delete window.__playwright;
-    delete window.__pw_manual;
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-CA', 'en-US', 'en'],
-    });
   });
 
   return context;

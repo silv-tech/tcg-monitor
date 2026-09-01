@@ -1,17 +1,14 @@
 const logger = require('../monitoring/logger');
 
-let playwright;
-// P2-9: Cache browsers per proxy URL to prevent proxy conflicts between adapters
+let patchright;
+// Cache browsers per proxy URL to prevent proxy conflicts between adapters
 const browsers = new Map(); // proxyUrl → { browser, launching }
 const NO_PROXY = '__direct__';
 
 /**
- * Optional headless browser fallback for sites that block all HTTP clients.
- * Requires: npm install playwright-core
- * And a Chromium install: npx playwright install chromium
- *
- * Usage in adapters:
- *   const html = await browserFetch(url, { proxyUrl });
+ * Patchright-based browser fetch — drop-in replacement for playwright-core
+ * with built-in anti-detection (CDP leak fix, automation signal removal).
+ * No manual stealth patches needed — Patchright handles them natively.
  */
 
 async function getBrowser(proxyUrl) {
@@ -27,20 +24,19 @@ async function getBrowser(proxyUrl) {
 
   browsers.set(key, { browser: null, launching: true });
 
-  if (!playwright) {
+  if (!patchright) {
     try {
-      playwright = require('playwright-core');
+      patchright = require('patchright');
     } catch {
-      throw new Error('playwright-core not installed. Run: npm install playwright-core && npx playwright install chromium');
+      throw new Error('patchright not installed. Run: npm install patchright && npx patchright install chromium');
     }
   }
 
   const launchOpts = {
     headless: true,
     args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
       '--no-sandbox',
+      '--disable-dev-shm-usage',
     ],
   };
 
@@ -53,9 +49,9 @@ async function getBrowser(proxyUrl) {
     };
   }
 
-  const browser = await playwright.chromium.launch(launchOpts);
+  const browser = await patchright.chromium.launch(launchOpts);
   browsers.set(key, { browser, launching: false });
-  logger.info(`Browser launched for stealth fetching (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
+  logger.info(`Patchright browser launched (proxy: ${proxyUrl ? 'yes' : 'direct'})`);
   return browser;
 }
 
@@ -63,62 +59,11 @@ async function browserFetch(url, opts = {}) {
   const { proxyUrl, timeoutMs = 30000, waitForSelector, extractJson = false } = opts;
 
   const b = await getBrowser(proxyUrl);
+  // Patchright handles UA, sec-ch-ua, and all fingerprint consistency automatically
   const context = await b.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
     locale: 'en-CA',
     timezoneId: 'America/Toronto',
     viewport: { width: 1920, height: 1080 },
-    extraHTTPHeaders: {
-      'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
-    },
-  });
-
-  // Anti-detection: hide Playwright/headless markers
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    delete window.__playwright;
-    delete window.__pw_manual;
-
-    // Chrome runtime mock
-    if (!window.chrome) window.chrome = {};
-    if (!window.chrome.runtime) window.chrome.runtime = { id: undefined };
-
-    // Permissions API — match real Chrome behavior
-    const origQuery = window.Permissions?.prototype?.query;
-    if (origQuery) {
-      window.Permissions.prototype.query = function (params) {
-        if (params.name === 'notifications') {
-          return Promise.resolve({ state: Notification.permission });
-        }
-        return origQuery.call(this, params);
-      };
-    }
-
-    // Plugin/MimeType arrays — real Chrome has at least 2 plugins
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => {
-        const arr = [
-          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-        ];
-        arr.item = i => arr[i];
-        arr.namedItem = n => arr.find(p => p.name === n);
-        arr.refresh = () => {};
-        return arr;
-      },
-    });
-
-    // Languages
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-CA', 'en-US', 'en'] });
-
-    // Connection
-    if (!navigator.connection) {
-      Object.defineProperty(navigator, 'connection', {
-        get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false }),
-      });
-    }
   });
 
   const page = await context.newPage();
@@ -139,8 +84,9 @@ async function browserFetch(url, opts = {}) {
       await page.waitForSelector(waitForSelector, { timeout: timeoutMs });
     }
 
-    // Let JS execute — challenge pages need time to resolve
-    await page.waitForTimeout(3000);
+    // Randomized wait — let JS execute and challenge scripts resolve
+    const delay = 2000 + Math.floor(Math.random() * 2000);
+    await page.waitForTimeout(delay);
 
     let result;
     if (extractJson) {

@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install system dependencies for Playwright Chromium
+# Install system dependencies for Patchright/Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 \
@@ -11,18 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Store Playwright browsers inside /app so the non-root user can access them
+# Store browser binaries inside /app so the non-root user can access them
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
 
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
-# Install Playwright Chromium browser binaries (full + headless shell for 1.48+)
-RUN npx playwright install chromium chromium-headless-shell
+# Install Patchright Chromium browser binary
+RUN npx patchright install chromium
 
 COPY . .
 
-# P3-7: Run as non-root user for security
+# Run as non-root user for security
 RUN groupadd --system app && useradd --system --gid app app && \
     chown -R app:app /app
 USER app
