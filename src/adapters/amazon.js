@@ -27,6 +27,7 @@ class AmazonAdapter extends BaseAdapter {
     this.domain = 'www.amazon.ca';
     // Search queries — autoparse with emi= filter ensures "sold by Amazon" only
     this.searchQueries = [
+      // Pokemon (highest demand — multiple queries for coverage)
       'pokemon tcg booster box',
       'pokemon elite trainer box',
       'pokemon tcg collection box',
@@ -34,11 +35,19 @@ class AmazonAdapter extends BaseAdapter {
       'pokemon tcg preorder',
       'pokemon tcg booster bundle',
       'pokemon tcg ultra premium collection',
+      // Other TCGs
       'one piece card game booster box',
       'dragon ball super card game booster box',
       'yu-gi-oh booster box',
       'lorcana booster box',
       'magic the gathering booster box',
+      'digimon card game booster box',
+      'flesh and blood tcg booster box',
+      'weiss schwarz booster box',
+      'cardfight vanguard booster box',
+      'union arena booster box',
+      'star wars unlimited booster box',
+      'naruto boruto card game',
     ];
   }
 
