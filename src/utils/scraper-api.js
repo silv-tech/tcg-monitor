@@ -299,8 +299,93 @@ async function walmartSearch(query, opts = {}) {
   }
 }
 
+/**
+ * Fetch Amazon Offer Listing ID + seller via ScraperAPI's structured Offers API.
+ * Returns clean JSON — no HTML parsing needed. 5 credits per call.
+ * Rate-limited per ASIN (5-min cooldown). Cached by caller in Redis for 30 days.
+ *
+ * @param {string} asin - Amazon ASIN
+ * @returns {{ olid: string|null, seller: string|null }}
+ */
+async function fetchAmazonOlidAndSeller(asin) {
+  if (!SCRAPER_API_KEY) return { olid: null, seller: null };
+  if (budgetPaused) return { olid: null, seller: null };
+
+  // Rate limit per ASIN — don't re-fetch same ASIN within 5 minutes
+  const rateKey = `amazon-olid-${asin}`;
+  const now = Date.now();
+  const lastCall = lastCallByRetailer.get(rateKey) || 0;
+  if (now - lastCall < MIN_INTERVAL_MS) return { olid: null, seller: null };
+  lastCallByRetailer.set(rateKey, now);
+
+  const params = new URLSearchParams({
+    api_key: SCRAPER_API_KEY,
+    asin,
+    tld: 'ca',
+    country_code: 'ca',
+  });
+
+  const apiUrl = `https://api.scraperapi.com/structured/amazon/offers?${params}`;
+  const cost = 5;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch(apiUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`ScraperAPI Offers API: HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    creditUsage.total += cost;
+    creditUsage.byRetailer['amazon-olid'] = (creditUsage.byRetailer['amazon-olid'] || 0) + cost;
+    checkBudget();
+
+    // Extract OLID and seller from first offer (buy box winner)
+    let olid = null;
+    let seller = null;
+
+    const offers = data.offers || data.results || [];
+    if (offers.length > 0) {
+      const topOffer = offers[0];
+      olid = topOffer.offer_id || topOffer.offer_listing_id || topOffer.offerListingId || null;
+      seller = topOffer.seller_name || topOffer.sold_by || topOffer.seller || null;
+
+      // If no offer_id in structured fields, check nested objects
+      if (!olid && topOffer.offer) {
+        olid = topOffer.offer.id || topOffer.offer.offer_id || null;
+      }
+    }
+
+    // Also check top-level fields (some API responses put buy box info at root)
+    if (!olid && data.offer_id) olid = data.offer_id;
+    if (!seller && data.seller_name) seller = data.seller_name;
+    if (!seller && data.sold_by) seller = data.sold_by;
+
+    if (olid) logger.info(`ScraperAPI Offers: OLID for ${asin}: ${olid.substring(0, 20)}...`);
+    if (seller) logger.info(`ScraperAPI Offers: Seller for ${asin}: ${seller}`);
+    if (!olid && !seller) {
+      logger.debug(`ScraperAPI Offers: no OLID/seller found for ${asin} (${offers.length} offers, keys: ${Object.keys(data).join(', ')})`);
+    }
+
+    return { olid, seller };
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') {
+      logger.debug(`ScraperAPI Offers: timeout for ${asin}`);
+    } else {
+      logger.debug(`ScraperAPI Offers: failed for ${asin}: ${err.message}`);
+    }
+    return { olid: null, seller: null };
+  }
+}
+
 function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, amazonSearch, walmartSearch, getCreditUsage, getBudgetStatus, resetBudget, isConfigured };
+module.exports = { scraperFetch, amazonSearch, walmartSearch, fetchAmazonOlidAndSeller, getCreditUsage, getBudgetStatus, resetBudget, isConfigured };

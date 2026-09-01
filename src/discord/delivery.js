@@ -6,6 +6,7 @@ const { filterDuplicates, markSent } = require('./dedup');
 const { recordAlertLatency } = require('../core/proxy');
 const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, cacheSellerInfo } = require('../core/state');
 const { scrapeAmazonOfferListingId } = require('../utils/browser');
+const { fetchAmazonOlidAndSeller } = require('../utils/scraper-api');
 const { sleep } = require('../utils/helpers');
 
 // Event priority for delivery ordering (#7) — lower number = higher priority
@@ -131,14 +132,31 @@ class DeliveryQueue {
       if (product.retailerId) {
         event._lastCheckedAt = await getLastCheck(product.retailerId);
       }
-      // Amazon Offer Listing ID + seller verification — cache-first, scrape on miss
+      // Amazon Offer Listing ID + seller verification — cache-first, ScraperAPI on miss, Playwright fallback
       if (product.retailerId === 'amazon' && product.sku) {
         const asin = product.sku;
         let olid = await getOfferListingId(asin);
         let seller = await getSellerCache(asin);
 
         if (!olid || !seller) {
-          // Scrape product page — gets both OLID and seller in one visit (zero extra cost)
+          // Try ScraperAPI first (reliable — handles Amazon anti-bot, 5 credits)
+          try {
+            const result = await fetchAmazonOlidAndSeller(asin);
+            if (result.olid && !olid) {
+              olid = result.olid;
+              await cacheOfferListingId(asin, olid);
+            }
+            if (result.seller && !seller) {
+              seller = result.seller;
+              await cacheSellerInfo(asin, seller);
+            }
+          } catch (err) {
+            logger.debug(`ScraperAPI OLID/seller fetch failed for ${asin}: ${err.message}`);
+          }
+        }
+
+        if (!olid || !seller) {
+          // Fallback: Playwright through residential proxy (less reliable but free)
           try {
             const result = await scrapeAmazonOfferListingId(asin, config.proxy.residentialUrl);
             if (result.olid && !olid) {
@@ -150,7 +168,7 @@ class DeliveryQueue {
               await cacheSellerInfo(asin, seller);
             }
           } catch (err) {
-            logger.debug(`OLID/seller fetch failed for ${asin}: ${err.message}`);
+            logger.debug(`Playwright OLID/seller fallback failed for ${asin}: ${err.message}`);
           }
         }
 
