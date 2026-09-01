@@ -174,9 +174,6 @@ function buildAlertEmbed(event, tier) {
       inline: false,
     });
 
-    // Offer Id (ASIN in code block)
-    embed.addFields({ name: 'Offer Id', value: `\`${asin}\``, inline: false });
-
     // Links
     const encodedName = encodeURIComponent(product.name || '');
     const links = [
