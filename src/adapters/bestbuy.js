@@ -32,6 +32,8 @@ class BestBuyAdapter extends BaseAdapter {
           if (!item.sku || !item.name) continue;
           // Skip non-visible or in-store-only items
           if (!item.isVisible) continue;
+          // Skip third-party marketplace sellers — only show sold by Best Buy
+          if (item.isMarketplace) continue;
 
           const price = item.salePrice || item.regularPrice;
           products[item.sku] = this.classify({
