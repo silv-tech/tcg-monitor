@@ -15,12 +15,13 @@ const CREDIT_COSTS = {
 const creditUsage = { total: 0, byRetailer: {}, sessionStart: Date.now() };
 
 // Rate limiter: prevent excessive ScraperAPI calls (costs money)
-const MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes between ScraperAPI calls per retailer
+// Budget: 100K credits/month. At 20 min intervals: ~75K credits/month (safe margin)
+const MIN_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes between ScraperAPI calls per retailer
 const lastCallByRetailer = new Map(); // retailerId → timestamp
 
 /**
  * Fetch a URL through ScraperAPI's anti-bot proxy network.
- * Rate-limited to 1 call per 5 minutes per retailer to control costs.
+ * Rate-limited to 1 call per 20 minutes per retailer to control costs.
  *
  * @param {string} targetUrl - The URL to scrape
  * @param {object} opts - Options
@@ -47,15 +48,14 @@ async function scraperFetch(targetUrl, opts = {}) {
   } = opts;
 
   // Rate limit: skip if called too recently for this retailer
-  // TODO: re-enable after testing is complete
-  // const now = Date.now();
-  // const lastCall = lastCallByRetailer.get(retailerId) || 0;
-  // if (now - lastCall < MIN_INTERVAL_MS) {
-  //   const waitSec = Math.round((MIN_INTERVAL_MS - (now - lastCall)) / 1000);
-  //   logger.debug(`ScraperAPI: rate-limited for ${retailerId}, next call in ${waitSec}s`);
-  //   return null;
-  // }
-  // lastCallByRetailer.set(retailerId, now);
+  const now = Date.now();
+  const lastCall = lastCallByRetailer.get(retailerId) || 0;
+  if (now - lastCall < MIN_INTERVAL_MS) {
+    const waitSec = Math.round((MIN_INTERVAL_MS - (now - lastCall)) / 1000);
+    logger.debug(`ScraperAPI: rate-limited for ${retailerId}, next call in ${waitSec}s`);
+    return null;
+  }
+  lastCallByRetailer.set(retailerId, now);
 
   const params = new URLSearchParams({
     api_key: SCRAPER_API_KEY,
