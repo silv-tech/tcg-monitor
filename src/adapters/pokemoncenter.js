@@ -32,9 +32,9 @@ class PokemonCenterAdapter extends BaseAdapter {
     this.lastSitemapScan = 0;
     this.SITEMAP_INTERVAL = 30 * 60 * 1000; // 30 minutes
 
-    // Availability check rotation
+    // Availability check rotation — ScraperAPI costs 25 credits/check, keep low
     this.checkIndex = 0;
-    this.CHECKS_PER_POLL = 12;
+    this.CHECKS_PER_POLL = 3;
   }
 
   isChallengePage(html) {
@@ -176,14 +176,13 @@ class PokemonCenterAdapter extends BaseAdapter {
   async checkProductAvailability(sku, meta) {
     let html;
 
-    // Try cookieFetch first (reuses Incapsula session cookies — fast HTTP, no browser per page)
+    // Use protectedFetch: tries browser first (free), falls back to ScraperAPI ultra_premium
+    // cookieFetch can't bypass Incapsula on product pages, but ScraperAPI ultra_premium can
     try {
-      html = await this.cookieFetch(meta.url, {
-        domain: this.domain,
-        seedUrl: this.seedUrl,
+      html = await this.protectedFetch(meta.url, {
+        timeoutMs: 30000,
         challengeDetector: (h) => this.isChallengePage(h),
-        timeoutMs: 15000,
-        waitForSelector: '[data-testid="add-to-cart"]',
+        scraperOpts: { ultraPremium: true },
       });
     } catch (err) {
       const reason = classifyError(err);
