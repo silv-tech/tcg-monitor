@@ -104,6 +104,7 @@
     "proxyTier": "none",
     "enabled": true,
     "color": "#ff6600",
+    "maxProducts": 2500,
     "collections": [],
     "searchKeywords": ["pokemon", "pokémon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "yugioh", "yu-gi-oh", "digimon", "magic the gathering", "flesh and blood", "weiss schwarz", "cardfight vanguard", "union arena", "star wars unlimited", "sealed", "tcg", "trading card"]
   },
@@ -418,6 +419,7 @@
     "proxyTier": "none",
     "enabled": true,
     "color": "#1a1a2e",
+    "maxProducts": 4000,
     "collections": [],
     "searchKeywords": ["pokemon", "pokémon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "yugioh", "yu-gi-oh", "digimon", "magic the gathering", "flesh and blood", "weiss schwarz", "cardfight vanguard", "union arena", "star wars unlimited", "sealed", "tcg", "trading card"]
   }
