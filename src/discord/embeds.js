@@ -1,5 +1,6 @@
 const { EmbedBuilder } = require('discord.js');
 const { EVENT_TYPES } = require('../core/events');
+const { truncate } = require('../utils/helpers');
 
 // ─── Event config ────────────────────────────────────────────────
 const EVENT_CONFIG = {
@@ -95,7 +96,7 @@ function buildAlertEmbed(event, tier) {
   embed.setAuthor({ name: product.retailer });
 
   // ── Title: product name (clickable link) ──
-  embed.setTitle(product.name);
+  embed.setTitle(truncate(product.name, 256));
   const safeUrl = isAmazon && product.sku
     ? `https://www.amazon.ca/dp/${product.sku}`
     : product.url && product.url.length <= 2048 ? product.url : null;
@@ -183,7 +184,8 @@ function buildAlertEmbed(event, tier) {
     `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
     `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
   );
-  embed.addFields({ name: 'Links', value: links.join(' | '), inline: false });
+  const linksValue = truncate(links.join(' | '), 1024);
+  embed.addFields({ name: 'Links', value: linksValue, inline: false });
 
   // ── Restock History ──
   const restockValue = buildRestockHistoryValue(event._restockHistory);

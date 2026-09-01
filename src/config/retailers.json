@@ -42,7 +42,8 @@
     "adapter": "amazon",
     "intervalMs": 120000,
     "proxyTier": "residential-us",
-    "enabled": true
+    "enabled": true,
+    "color": "#ff9900"
   },
   {
     "_phase": 1,

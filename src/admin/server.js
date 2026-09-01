@@ -83,6 +83,15 @@ function createAdminServer() {
   const LOGIN_LIMIT = 5;
   const LOGIN_WINDOW_MS = 60000;
 
+  // Clean up stale login attempt entries every 5 minutes
+  const loginCleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [ip, window] of loginAttempts) {
+      if (now - window.start > LOGIN_WINDOW_MS * 2) loginAttempts.delete(ip);
+    }
+  }, 5 * 60 * 1000);
+  loginCleanup.unref();
+
   app.post('/api/login', (req, res) => {
     const ip = req.ip;
     const now = Date.now();

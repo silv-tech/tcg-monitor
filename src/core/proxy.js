@@ -180,11 +180,12 @@ function getProxyPoolStats() {
 async function testProxy(proxyUrl, label = 'proxy') {
   if (!proxyUrl) return { ok: false, error: 'No proxy URL configured' };
   try {
+    const nodeFetch = require('node-fetch');
     const { HttpsProxyAgent } = require('https-proxy-agent');
     const agent = new HttpsProxyAgent(proxyUrl);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch('https://httpbin.org/ip', { agent, signal: controller.signal });
+    const res = await nodeFetch('https://httpbin.org/ip', { agent, signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     const data = await res.json();

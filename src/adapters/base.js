@@ -251,6 +251,7 @@ class BaseAdapter {
     product.retailer = this.name;
     product.retailerId = this.id;
     product.lastSeen = Date.now();
+    if (product.isPreorderable === undefined) product.isPreorderable = false;
     return product;
   }
 

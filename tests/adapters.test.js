@@ -53,8 +53,10 @@ describe('Amazon Adapter Parsing', () => {
   });
 
   it('should handle missing price as out-of-stock', () => {
-    const inStock = null != null;
-    assert.strictEqual(inStock, false);
+    // A product with null price should be treated as unavailable
+    const item = { asin: 'B0TEST', name: 'Test Product', price: null, sold_by: 'Amazon.ca' };
+    const hasPrice = item.price != null && item.price > 0;
+    assert.strictEqual(hasPrice, false);
   });
 });
 

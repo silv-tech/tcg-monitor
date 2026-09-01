@@ -82,12 +82,18 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
   } else {
     const staleSkus = Object.keys(oldProducts).filter(sku => !(sku in newProducts));
     if (staleSkus.length > 0) {
-      const delPipeline = state.getRedis().pipeline();
+      // Mark stale products as OOS instead of deleting — prevents mass false NEW_SKU on next poll (#C-1)
+      const pipeline = state.getRedis().pipeline();
       for (const sku of staleSkus) {
-        delPipeline.del(`tcg:product:${hashSku(adapter.id, sku)}`);
+        const product = oldProducts[sku];
+        product.inStock = false;
+        product.canAddToCart = false;
+        product.lastSeen = Date.now();
+        const key = `tcg:product:${hashSku(adapter.id, sku)}`;
+        pipeline.set(key, JSON.stringify(product), 'EX', 86400 * 7);
       }
-      await delPipeline.exec();
-      logger.info(`${adapter.name}: cleaned up ${staleSkus.length} stale products from Redis`);
+      await pipeline.exec();
+      logger.info(`${adapter.name}: marked ${staleSkus.length} stale products as OOS`);
     }
   }
 

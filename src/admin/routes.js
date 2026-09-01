@@ -66,6 +66,10 @@ router.patch('/retailers/:id', async (req, res) => {
   if (Object.keys(changes).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
 
   await state.setRetailerOverride(req.params.id, changes);
+
+  // Apply changes live — no restart needed
+  scheduler.updateAdapter(req.params.id, changes);
+
   res.json({ ...retailer, ...changes });
 });
 

@@ -38,7 +38,8 @@ function detectEvents(oldProduct, newProduct) {
     oldProduct.price != null &&
     newProduct.price != null &&
     oldProduct.price !== newProduct.price &&
-    oldProduct.price > 0
+    oldProduct.price > 0 &&
+    newProduct.price > 0
   ) {
     const pctChange = ((newProduct.price - oldProduct.price) / oldProduct.price) * 100;
     events.push({

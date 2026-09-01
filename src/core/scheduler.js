@@ -235,6 +235,39 @@ class Scheduler {
     logger.info('Scheduler stopped');
   }
 
+  /**
+   * Live-update an adapter's interval or enabled state without restarting.
+   * Called from admin PATCH /api/retailers/:id.
+   */
+  updateAdapter(adapterId, changes) {
+    const adapter = this.adapters.get(adapterId);
+    if (!adapter) return;
+
+    // Apply changes to the live adapter instance
+    if (changes.intervalMs !== undefined) adapter.intervalMs = changes.intervalMs;
+    if (changes.enabled !== undefined) adapter.enabled = changes.enabled;
+
+    // Clear existing timer
+    const existingTimer = this.timers.get(adapterId);
+    if (existingTimer) {
+      clearInterval(existingTimer);
+      this.timers.delete(adapterId);
+    }
+
+    if (!this.running) return;
+
+    if (adapter.enabled) {
+      // Create new timer with updated interval
+      const timer = setInterval(() => {
+        if (this.running) this.pollAdapter(adapter);
+      }, adapter.intervalMs);
+      this.timers.set(adapterId, timer);
+      logger.info(`${adapter.name}: live-updated — polling every ${adapter.intervalMs}ms`);
+    } else {
+      logger.info(`${adapter.name}: live-disabled — polling stopped`);
+    }
+  }
+
   // Expose circuit breaker status for the admin API
   getCircuitStatus() {
     const status = {};
