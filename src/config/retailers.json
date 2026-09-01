@@ -104,8 +104,8 @@
     "proxyTier": "none",
     "enabled": true,
     "color": "#ff6600",
-    "collections": ["pokemon-scarlet-and-violet-sets", "pokemon-sword-shield-sets", "pokemon-prismatic-evolutions"],
-    "searchKeywords": ["pokemon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana"]
+    "collections": [],
+    "searchKeywords": ["pokemon", "pokémon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "yugioh", "yu-gi-oh", "digimon", "magic the gathering", "flesh and blood", "weiss schwarz", "cardfight vanguard", "union arena", "star wars unlimited", "sealed", "tcg", "trading card"]
   },
   {
     "_phase": 2,

@@ -29,8 +29,13 @@ class AmazonAdapter extends BaseAdapter {
     this.searchQueries = [
       'pokemon tcg booster box',
       'pokemon elite trainer box',
-      'one piece card game booster box',
       'pokemon tcg collection box',
+      'pokemon tcg sealed',
+      'one piece card game booster box',
+      'dragon ball super card game booster box',
+      'yu-gi-oh booster box',
+      'lorcana booster box',
+      'magic the gathering booster box',
     ];
   }
 
