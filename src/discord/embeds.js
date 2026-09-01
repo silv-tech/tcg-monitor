@@ -174,6 +174,11 @@ function buildAlertEmbed(event, tier) {
       inline: false,
     });
 
+    // Offer Listing ID (scraped from product page, cached 30 days)
+    if (event._offerListingId) {
+      embed.addFields({ name: 'Offer Id', value: event._offerListingId, inline: false });
+    }
+
     // Links
     const encodedName = encodeURIComponent(product.name || '');
     const links = [

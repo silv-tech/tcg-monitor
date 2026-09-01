@@ -4,7 +4,8 @@ const logger = require('../monitoring/logger');
 const { buildAlertEmbed } = require('./embeds');
 const { filterDuplicates, markSent } = require('./dedup');
 const { recordAlertLatency } = require('../core/proxy');
-const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory } = require('../core/state');
+const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId } = require('../core/state');
+const { scrapeAmazonOfferListingId } = require('../utils/browser');
 const { sleep } = require('../utils/helpers');
 
 // Event priority for delivery ordering (#7) — lower number = higher priority
@@ -115,6 +116,21 @@ class DeliveryQueue {
       // Freshness: when was this retailer last checked? (#10)
       if (product.retailerId) {
         event._lastCheckedAt = await getLastCheck(product.retailerId);
+      }
+      // Amazon Offer Listing ID — cache-first, scrape on miss
+      if (product.retailerId === 'amazon' && product.sku) {
+        const asin = product.sku;
+        let olid = await getOfferListingId(asin);
+        if (!olid) {
+          // Scrape product page with residential proxy (best-effort, don't block alert)
+          try {
+            olid = await scrapeAmazonOfferListingId(asin, config.proxy.residentialUrl);
+            if (olid) await cacheOfferListingId(asin, olid);
+          } catch (err) {
+            logger.debug(`OLID fetch failed for ${asin}: ${err.message}`);
+          }
+        }
+        if (olid) event._offerListingId = olid;
       }
     } catch (err) {
       logger.debug(`Event enrichment failed: ${err.message}`);

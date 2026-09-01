@@ -272,6 +272,20 @@ async function getPriceHistory(retailerId, sku) {
   return raw ? safeParse(raw, []) : [];
 }
 
+// ─── Amazon Offer Listing ID cache ──────────────────────────────
+const OLID_TTL = 86400 * 30; // 30 days — OLIDs rarely change for same seller
+
+async function getOfferListingId(asin) {
+  const key = `${PREFIX}olid:${asin}`;
+  return await getRedis().get(key);
+}
+
+async function cacheOfferListingId(asin, olid) {
+  if (!olid) return;
+  const key = `${PREFIX}olid:${asin}`;
+  await getRedis().set(key, olid, 'EX', OLID_TTL);
+}
+
 async function shutdown() {
   if (redis) {
     await redis.quit();
@@ -303,5 +317,7 @@ module.exports = {
   findCrossRetailerMatches,
   recordPrice,
   getPriceHistory,
+  getOfferListingId,
+  cacheOfferListingId,
   shutdown,
 };

@@ -143,4 +143,67 @@ async function closeBrowser() {
   logger.info('All browsers closed');
 }
 
-module.exports = { browserFetch, closeBrowser };
+/**
+ * Scrape Amazon product page for the Offer Listing ID.
+ * Only called on alert (not every poll) — result is cached in Redis for 30 days.
+ */
+async function scrapeAmazonOfferListingId(asin, proxyUrl) {
+  const url = `https://www.amazon.ca/dp/${asin}`;
+  logger.info(`Scraping Amazon OLID for ${asin}`);
+
+  const b = await getBrowser(proxyUrl);
+  const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+  const context = await b.newContext({
+    locale: 'en-CA',
+    timezoneId: 'America/Toronto',
+    viewport,
+  });
+  const page = await context.newPage();
+
+  // Block images/media only
+  await page.route('**/*', route => {
+    const type = route.request().resourceType();
+    if (['image', 'media'].includes(type)) return route.abort();
+    return route.continue();
+  });
+
+  try {
+    await page.goto(url, { timeout: 20000, waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
+
+    // Try multiple extraction methods
+    const olid = await page.evaluate(() => {
+      // Method 1: Hidden input in add-to-cart form
+      const input = document.querySelector('input[name="offerListingID"]');
+      if (input?.value) return input.value;
+
+      // Method 2: data-offer-id attribute
+      const el = document.querySelector('[data-offer-id]');
+      if (el?.getAttribute('data-offer-id')) return el.getAttribute('data-offer-id');
+
+      // Method 3: Parse from twister/buy-box JSON embedded in page
+      const scripts = document.querySelectorAll('script[type="text/javascript"]');
+      for (const s of scripts) {
+        const text = s.textContent || '';
+        const match = text.match(/"offerListingID"\s*:\s*"([^"]+)"/);
+        if (match) return match[1];
+      }
+
+      return null;
+    });
+
+    if (olid) {
+      logger.info(`Got OLID for ${asin}: ${olid.substring(0, 20)}...`);
+    } else {
+      logger.debug(`No OLID found on page for ${asin}`);
+    }
+    return olid;
+  } catch (err) {
+    logger.debug(`OLID scrape failed for ${asin}: ${err.message}`);
+    return null;
+  } finally {
+    await context.close();
+  }
+}
+
+module.exports = { browserFetch, closeBrowser, scrapeAmazonOfferListingId };
