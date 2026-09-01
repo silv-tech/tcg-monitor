@@ -91,7 +91,7 @@
     "proxyTier": "none",
     "enabled": false,
     "color": "#2d5a27",
-    "collections": ["pokemon-sealed-products"],
+    "collections": ["pokemon-sealed", "pokemon-new-releases-and-preorders"],
     "searchKeywords": ["pokemon", "booster box", "etb", "one piece", "dragon ball"]
   },
   {

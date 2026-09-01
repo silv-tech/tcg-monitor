@@ -28,8 +28,8 @@ class ShopifyAdapter extends BaseAdapter {
       }
     }
 
-    // Method 2: Fetch all products (fallback if no collections configured)
-    if (this.collections.length === 0) {
+    // Method 2: Fetch all products (fallback if no collections configured OR collections returned nothing)
+    if (this.collections.length === 0 || Object.keys(products).length === 0) {
       try {
         await this.fetchAllProducts(products);
       } catch (err) {
