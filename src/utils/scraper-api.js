@@ -199,7 +199,7 @@ async function amazonSearch(query, opts = {}) {
 async function walmartSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
 
-  const { tld = 'ca', retailerId = 'walmart' } = opts;
+  const { retailerId = 'walmart' } = opts;
 
   // Rate limit
   const now = Date.now();
@@ -210,15 +210,17 @@ async function walmartSearch(query, opts = {}) {
   }
   lastCallByRetailer.set(`${retailerId}:${query}`, now);
 
+  // Use autoparse with full walmart.ca URL — structured endpoint doesn't support
+  // Canada geo on the Hobby plan, but autoparse with the .ca URL works fine
+  const targetUrl = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
   const params = new URLSearchParams({
     api_key: SCRAPER_API_KEY,
-    query,
-    tld,
-    country_code: tld,
+    url: targetUrl,
+    autoparse: 'true',
   });
 
-  const apiUrl = `${SCRAPER_API_BASE}/structured/walmart/search?${params}`;
-  const cost = 5;
+  const apiUrl = `${SCRAPER_API_BASE}?${params}`;
+  const cost = 5; // E-commerce domains cost 5 credits
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);

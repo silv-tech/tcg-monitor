@@ -36,8 +36,8 @@ class WalmartAdapter extends BaseAdapter {
           continue;
         }
 
-        // ScraperAPI structured endpoint returns { results: [...] } or { search_results: [...] }
-        const results = data.results || data.search_results || data.organic_results || [];
+        // ScraperAPI autoparse returns { items: [...], meta: { page, pages } }
+        const results = data.items || data.results || data.search_results || [];
 
         if (results.length === 0) {
           logger.warn(`Walmart: 0 results from structured API for "${query}"`, { reason: 'empty_response' });
