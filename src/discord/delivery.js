@@ -58,10 +58,10 @@ class DeliveryQueue {
         logger.debug(`Non-TCG product filtered: ${event.product?.name || 'unknown'}`);
         continue;
       }
-      // Skip out-of-stock products — only alert on items actually available to buy
-      // RESTOCK and PREORDER_LIVE events are exempt (they explicitly signal availability changes)
+      // Skip out-of-stock products — ONLY alert on items actually available to buy
+      // RESTOCK and PREORDER_LIVE events are exempt (they signal availability changes)
       if (!event._scanTier && event.product && event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE') {
-        if (event.product.inStock === false) {
+        if (!event.product.inStock) {
           logger.debug(`OOS product filtered: ${event.type} — ${event.product?.name || 'unknown'}`);
           continue;
         }
