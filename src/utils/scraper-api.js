@@ -414,7 +414,7 @@ async function fetchAmazonOlidAndSeller(asin) {
  * @param {string} opts.retailerId - For credit tracking
  * @returns {object|null} Parsed product JSON, or null if rate-limited/not found
  */
-const WATCHLIST_INTERVAL_MS = 30 * 1000; // 30s between lookups per SKU (watchlist fast-poll)
+const WATCHLIST_INTERVAL_MS = 10 * 1000; // 10s between lookups per SKU (fallback only — stealth handles most)
 async function walmartProductLookup(productId, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
   if (budgetPaused) return null;

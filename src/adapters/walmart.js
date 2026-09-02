@@ -1,7 +1,9 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { walmartSearch, isConfigured } = require('../utils/scraper-api');
+const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
+const { getProxyUrl } = require('../core/proxy');
+const { stealthGet, _clearCache } = require('../utils/stealth-http');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -33,48 +35,83 @@ class WalmartAdapter extends BaseAdapter {
 
   /**
    * Fetch a single product page by Walmart SKU/product ID.
-   * Uses cookieFetch: Playwright solves Walmart's JS challenge ONCE, caches cookies
-   * for 15 min, then uses fast stealth HTTP (impit) with cached cookies.
-   * Zero ScraperAPI credits. ~98% success rate.
+   * Hybrid approach for near-100% success + minimal cost:
+   *  1. Try stealth HTTP + residential proxy (FREE, ~60-70% success)
+   *  2. On challenge, fall back to ScraperAPI (5 credits, 100% success)
+   * Saves 60-70% of ScraperAPI costs vs pure ScraperAPI polling.
    */
   async fetchProductPage(productId) {
     const url = `https://www.walmart.ca/ip/${productId}`;
+    const proxyUrl = getProxyUrl('residential');
 
+    // Step 1: Try free stealth fetch
     try {
-      const html = await this.cookieFetch(url, {
-        domain: 'www.walmart.ca',
-        seedUrl: 'https://www.walmart.ca',
-        challengeDetector: (html) =>
-          html.includes('Verify Your Identity') ||
-          html.includes('captcha') ||
-          (html.length < 10000 && !html.includes('application/ld+json')),
-        timeoutMs: 20000,
-        waitForSelector: 'script[type="application/ld+json"]',
+      const html = await stealthGet(url, {
+        proxyUrl,
+        maxRetries: 1,
+        timeoutMs: 12000,
       });
 
-      if (!html || html.length < 500) {
-        logger.warn(`Walmart: watchlist ${productId} — empty/short response (${html ? html.length : 0} bytes)`);
-        return null;
-      }
-
-      // Parse JSON-LD from product page
-      const product = this._parseProductPage(html, productId);
-      if (!product) {
-        if (html.includes('not found') || html.includes('currently unavailable') || html.includes('not exist')) {
-          logger.info(`Walmart: watchlist ${productId} — not found/unavailable`);
-        } else {
-          const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-          const title = titleMatch ? titleMatch[1].trim() : 'no-title';
-          logger.warn(`Walmart: watchlist ${productId} — unparseable (${html.length}b) | title="${title}"`);
+      if (html && html.length > 500 && !html.includes('Verify Your Identity')) {
+        const product = this._parseProductPage(html, productId);
+        if (product) {
+          product._watchlist = true;
+          logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} (stealth)`);
+          return product;
         }
-        return null;
       }
 
+      // Challenge page or unparseable — rotate IP for next attempt
+      if (proxyUrl) _clearCache(proxyUrl);
+    } catch {
+      // Stealth failed — rotate IP
+      if (proxyUrl) _clearCache(proxyUrl);
+    }
+
+    // Step 2: Fall back to ScraperAPI (5 credits, reliable)
+    try {
+      const data = await walmartProductLookup(productId, { retailerId: this.id });
+      if (!data) return null; // rate-limited or 404
+
+      const name = data.product_name || data.name || data.title;
+      if (!name) return null;
+
+      const price = typeof data.price === 'number' ? data.price :
+        normalizePrice(data.price_string || data.price || data.product_price);
+
+      let inStock = false;
+      if (data.offers && Array.isArray(data.offers)) {
+        for (const offer of data.offers) {
+          const avail = (offer.availability || '').toLowerCase();
+          if (avail.includes('instock') || avail.includes('in stock') || avail.includes('in_stock')) {
+            inStock = true;
+            break;
+          }
+        }
+      } else {
+        const avail = (data.availability || data.stock_status || '').toLowerCase();
+        inStock = avail.includes('in stock') || avail.includes('instock') || avail.includes('in_stock');
+      }
+
+      const image = data.image || data.product_image || data.thumbnail || '';
+      const productUrl = data.url || data.product_url || url;
+
+      const product = this.classify({
+        sku: String(productId),
+        name,
+        price: price || 0,
+        currency: 'CAD',
+        url: productUrl,
+        image,
+        inStock,
+        canAddToCart: inStock,
+        shipsToHome: true,
+      });
       product._watchlist = true;
-      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'}`);
+      logger.info(`Walmart: WATCHLIST ${productId} — "${name}" | inStock=${inStock} | $${price || '?'} (scraper fallback)`);
       return product;
     } catch (err) {
-      logger.warn(`Walmart: watchlist ${productId} — fetch failed: ${err.message}`);
+      logger.warn(`Walmart: watchlist ${productId} — both methods failed: ${err.message}`);
       return null;
     }
   }
