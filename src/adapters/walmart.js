@@ -45,6 +45,7 @@ class WalmartAdapter extends BaseAdapter {
     const proxyUrl = getProxyUrl('residential');
 
     // Step 1: Try free stealth fetch
+    let stealthParsed = false; // true if page was parseable (even if third-party seller)
     try {
       const html = await stealthGet(url, {
         proxyUrl,
@@ -59,6 +60,13 @@ class WalmartAdapter extends BaseAdapter {
           logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} (stealth)`);
           return product;
         }
+        // If _parseProductPage returned null, it could be:
+        // a) third-party seller (logged inside _buildProduct) — don't waste credits on ScraperAPI
+        // b) unparseable page — fall through to ScraperAPI
+        // Check if JSON-LD was found (third-party) vs truly unparseable
+        if (html.includes('application/ld+json') || html.includes('__NEXT_DATA__')) {
+          stealthParsed = true; // page had data, just not a Walmart offer
+        }
       }
 
       // Challenge page or unparseable — rotate IP for next attempt
@@ -67,6 +75,9 @@ class WalmartAdapter extends BaseAdapter {
       // Stealth failed — rotate IP
       if (proxyUrl) _clearCache(proxyUrl);
     }
+
+    // Skip ScraperAPI if stealth confirmed it's a third-party seller — saves 5 credits
+    if (stealthParsed) return null;
 
     // Step 2: Fall back to ScraperAPI (5 credits, reliable)
     try {
