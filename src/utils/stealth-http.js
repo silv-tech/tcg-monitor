@@ -107,4 +107,12 @@ async function stealthGet(url, opts = {}) {
   throw new Error(`Stealth: failed after ${maxRetries} attempts: ${url}`);
 }
 
-module.exports = { stealthGet };
+/**
+ * Clear a cached impit instance — forces a new connection (and new IP with rotating proxies).
+ */
+function _clearCache(proxyUrl) {
+  const cacheKey = proxyUrl || '__direct__';
+  impitCache.delete(cacheKey);
+}
+
+module.exports = { stealthGet, _clearCache };

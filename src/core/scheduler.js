@@ -219,9 +219,9 @@ class Scheduler {
       if (adapter.watchlist && adapter.watchlist.size > 0) {
         const wlTimer = setInterval(() => {
           if (this.running) this.pollWatchlist(adapter);
-        }, 3000);
+        }, 5000);
         this.timers.set(`${id}:watchlist`, wlTimer);
-        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} SKUs every 3s`);
+        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} SKUs every 5s`);
       }
 
       stagger += 3000;
@@ -311,9 +311,9 @@ class Scheduler {
 
     const wlTimer = setInterval(() => {
       if (this.running) this.pollWatchlist(adapter);
-    }, 3000);
+    }, 5000);
     this.timers.set(timerKey, wlTimer);
-    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every 3s`);
+    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every 5s`);
   }
 
   // Expose circuit breaker status for the admin API

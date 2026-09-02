@@ -46,7 +46,7 @@ class WalmartAdapter extends BaseAdapter {
     try {
       const html = await stealthGet(url, {
         proxyUrl,
-        maxRetries: 2,
+        maxRetries: 1,
         timeoutMs: 15000,
       });
 
@@ -55,22 +55,32 @@ class WalmartAdapter extends BaseAdapter {
         return null;
       }
 
-      // Parse JSON-LD from product page (same approach as Costco adapter)
+      // Detect "Verify Your Identity" bot challenge page
+      if (html.includes('Verify Your Identity') || html.includes('robot') || html.includes('captcha')) {
+        // Force fresh proxy connection on next request by clearing impit cache
+        this._clearStealthCache(proxyUrl);
+        this._challengeCount = (this._challengeCount || 0) + 1;
+        // Exponential backoff: after repeated challenges, wait longer
+        if (this._challengeCount >= 3) {
+          const backoffMs = Math.min(this._challengeCount * 5000, 30000);
+          logger.warn(`Walmart: watchlist ${productId} — challenge page (${this._challengeCount}x), backing off ${backoffMs / 1000}s`);
+          await new Promise(r => setTimeout(r, backoffMs));
+        }
+        return null;
+      }
+
+      // Reset challenge counter on successful non-challenge response
+      this._challengeCount = 0;
+
+      // Parse JSON-LD from product page
       const product = this._parseProductPage(html, productId);
       if (!product) {
         if (html.includes('not found') || html.includes('currently unavailable') || html.includes('not exist')) {
           logger.info(`Walmart: watchlist ${productId} — not found/unavailable`);
         } else {
-          // Diagnostic: log what's in the unparseable page so we can fix the parser
-          const hasJsonLd = html.includes('application/ld+json');
-          const hasNextData = html.includes('__NEXT_DATA__');
-          const hasPreload = html.includes('__PRELOADED_STATE__') || html.includes('__INITIAL_STATE__');
-          const hasAkamai = html.includes('akamai') || html.includes('_abck') || html.includes('sensor_data');
           const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
           const title = titleMatch ? titleMatch[1].trim() : 'no-title';
-          logger.warn(`Walmart: watchlist ${productId} — unparseable (${html.length}b) | title="${title}" | jsonLd=${hasJsonLd} nextData=${hasNextData} preload=${hasPreload} akamai=${hasAkamai}`);
-          // Log first 500 chars for debugging (one-time diagnostic)
-          logger.warn(`Walmart: watchlist ${productId} — HTML preview: ${html.substring(0, 500).replace(/\n/g, ' ')}`);
+          logger.warn(`Walmart: watchlist ${productId} — unparseable (${html.length}b) | title="${title}"`);
         }
         return null;
       }
@@ -79,7 +89,8 @@ class WalmartAdapter extends BaseAdapter {
       logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'}`);
       return product;
     } catch (err) {
-      // Log at WARN so we can see failures in production logs
+      // Force fresh connection on any error
+      this._clearStealthCache(proxyUrl);
       if (err.message.includes('Blocked') || err.message.includes('403') || err.message.includes('503')) {
         logger.warn(`Walmart: watchlist ${productId} — blocked (${err.message})`);
       } else {
@@ -87,6 +98,18 @@ class WalmartAdapter extends BaseAdapter {
       }
       return null;
     }
+  }
+
+  /**
+   * Clear cached impit instance to force a fresh proxy IP on next request.
+   * Residential proxies rotate IPs per connection — new connection = new IP.
+   */
+  _clearStealthCache(proxyUrl) {
+    try {
+      // Access the impit cache from stealth-http module and delete our entry
+      const stealthModule = require('../utils/stealth-http');
+      if (stealthModule._clearCache) stealthModule._clearCache(proxyUrl);
+    } catch {}
   }
 
   /**
