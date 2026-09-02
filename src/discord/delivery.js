@@ -281,8 +281,12 @@ class DeliveryQueue {
     const FREE_EVENTS = new Set(['RESTOCK', 'NEW_SKU', 'PREORDER_LIVE']);
     if (!FREE_EVENTS.has(event.type)) return;
 
-    // Free tier only gets big 5 retailers (specialty Shopify stores are paid-only)
-    const FREE_RETAILERS = new Set(['amazon', 'walmart', 'bestbuy', 'costco', 'pokemoncenter']);
+    // Free tier: big 5 + 10 popular stores (20+ specialty stores remain paid-only)
+    const FREE_RETAILERS = new Set([
+      'amazon', 'walmart', 'bestbuy', 'costco', 'pokemoncenter',
+      '401games', 'facetoface', 'hobbiesville', 'chimeragaming', 'untouchables',
+      'pokechalet', 'catchacard', 'kanzengames', 'deckoutgaming', 'fusiongaming',
+    ]);
     if (!FREE_RETAILERS.has(retailerId)) return;
 
     const freeChannel = this.resolveFreeChannel(category);

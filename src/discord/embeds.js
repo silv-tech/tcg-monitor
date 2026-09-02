@@ -240,7 +240,7 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Links', value: freeLinks.join(' | '), inline: false });
 
     // Upgrade CTA
-    embed.addFields({ name: '\u200B', value: '\u{1F512} *Upgrade to Premium for ATC links, stock counts, restock history, price tracking & 30+ specialty stores*', inline: false });
+    embed.addFields({ name: '\u200B', value: '\u{1F512} *Upgrade to Premium for instant alerts, ATC links, stock counts, restock history, price tracking & 20+ more stores*', inline: false });
   }
 
   // ── Footer ──
