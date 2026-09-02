@@ -360,6 +360,8 @@ class WalmartAdapter extends BaseAdapter {
               id: item.usItemId || item.id || item.productId,
               price: item.price || item.priceInfo?.currentPrice?.price,
               seller: item.sellerName || item.seller || item.soldBy || '',
+              fulfillmentType: item.fulfillmentType || item.fulfillment?.type || '',
+              sellerDisplayName: item.sellerDisplayName || '',
               url: item.canonicalUrl || item.url || '',
               image: item.imageInfo?.thumbnailUrl || item.image || item.thumbnail || '',
               availability: item.availabilityStatusV2?.value || item.availabilityStatus || '',
@@ -389,6 +391,7 @@ class WalmartAdapter extends BaseAdapter {
                   id: prod.sku || prod.productID,
                   price: prod.offers?.price,
                   seller: prod.offers?.seller?.name || '',
+                  fulfillmentType: '',
                   url: prod.url || '',
                   image: typeof prod.image === 'string' ? prod.image : '',
                   availability: prod.offers?.availability || '',
@@ -530,14 +533,40 @@ class WalmartAdapter extends BaseAdapter {
    * Shared by both stealth and ScraperAPI search paths.
    */
   _processSearchItems(items, products) {
+    let skippedSeller = 0;
+    let skippedFulfillment = 0;
+    let skippedUnknown = 0;
+
     for (const item of items) {
       try {
         if (!item.name && !item.title) continue;
         const name = item.name || item.title;
 
-        // Skip third-party sellers (#9)
-        const seller = (item.seller || item.sold_by || item.sellerName || '').toLowerCase();
-        if (seller && !seller.includes('walmart')) continue;
+        // STRICT seller filter — only Walmart-sold items (#9)
+        const seller = (item.seller || item.sold_by || item.sellerName || item.sellerDisplayName || '').toLowerCase();
+        const fulfillment = (item.fulfillmentType || item.fulfillment_type || '').toUpperCase();
+
+        // Explicit third-party seller → always skip
+        if (seller && !seller.includes('walmart')) {
+          skippedSeller++;
+          continue;
+        }
+
+        // If fulfillment type says marketplace → skip
+        if (fulfillment === 'MP' || fulfillment === 'MARKETPLACE') {
+          skippedFulfillment++;
+          continue;
+        }
+
+        // Positively confirmed Walmart: seller says walmart OR fulfillment says FC/FFC
+        const confirmedWalmart = seller.includes('walmart') ||
+          fulfillment === 'FC' || fulfillment === 'FFC';
+
+        // If we can't confirm it's Walmart-sold → skip (better to miss than send third-party alert)
+        if (!confirmedWalmart) {
+          skippedUnknown++;
+          continue;
+        }
 
         const sku = item.id || item.product_id || item.us_item_id || item.usItemId ||
           name.replace(/\s+/g, '-').toLowerCase().slice(0, 50);
@@ -569,6 +598,10 @@ class WalmartAdapter extends BaseAdapter {
       } catch (err) {
         logger.debug(`Walmart: failed to parse item: ${err.message}`);
       }
+    }
+
+    if (skippedSeller + skippedFulfillment + skippedUnknown > 0) {
+      logger.info(`Walmart: seller filter — skipped ${skippedSeller} third-party, ${skippedFulfillment} marketplace, ${skippedUnknown} unconfirmed`);
     }
   }
 }
