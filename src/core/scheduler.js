@@ -5,6 +5,7 @@ const { recordPollLatency } = require('./proxy');
 const { sleep } = require('../utils/helpers');
 const { recordProductCount } = require('../monitoring/health');
 const { pollAdapterOnce } = require('./poll-adapter');
+const { recordRestock, recordPrice } = require('./state');
 
 // Circuit breaker thresholds
 const CIRCUIT_ERROR_THRESHOLD = 5;   // consecutive errors to trip
@@ -148,12 +149,20 @@ class Scheduler {
 
         if (oldProduct) {
           // Already known — check for stock changes (RESTOCK, PRICE_CHANGE)
-          const { diffProducts } = require('./events');
           const events = diffProducts({ [key]: oldProduct }, { [key]: product });
           if (events.length > 0) {
             const detectedAt = Date.now();
             for (const event of events) {
               event._detectedAt = detectedAt;
+            }
+            // Record restock/price history for watchlist events
+            for (const event of events) {
+              if (event.type === EVENT_TYPES.RESTOCK && event.product?.sku) {
+                await recordRestock(adapter.id, event.product.sku);
+              }
+              if (event.product?.sku && event.product?.price > 0) {
+                await recordPrice(adapter.id, event.product.sku, event.product.price);
+              }
             }
             logger.info(`WATCHLIST: ${adapter.name} — ${events.length} event(s) for ${productId}: ${events.map(e => e.type).join(', ')}`);
             if (this.onEvents) {
@@ -164,12 +173,17 @@ class Scheduler {
           await state.setProduct(adapter.id, key, product);
         } else {
           // NEW product from watchlist — fire NEW_SKU event
-          const { diffProducts } = require('./events');
           const events = diffProducts({}, { [key]: product });
           if (events.length > 0) {
             const detectedAt = Date.now();
             for (const event of events) {
               event._detectedAt = detectedAt;
+            }
+            // Record price for new watchlist products
+            for (const event of events) {
+              if (event.product?.sku && event.product?.price > 0) {
+                await recordPrice(adapter.id, event.product.sku, event.product.price);
+              }
             }
             logger.info(`WATCHLIST: ${adapter.name} — NEW product ${productId}: ${events.map(e => e.type).join(', ')}`);
             if (this.onEvents) {
