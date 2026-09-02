@@ -3,7 +3,7 @@ const logger = require('../monitoring/logger');
 const { normalizePrice, sleep } = require('../utils/helpers');
 const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
-const { stealthGet, stealthWarmup, clearWarmupCookies, _clearCache } = require('../utils/stealth-http');
+const { stealthGet, _clearCache } = require('../utils/stealth-http');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -44,18 +44,13 @@ class WalmartAdapter extends BaseAdapter {
     const url = `https://www.walmart.ca/ip/${productId}`;
     const proxyUrl = getProxyUrl('residential');
 
-    // Step 1: Try free stealth fetch (with warmup cookies from same TLS fingerprint)
+    // Step 1: Try free stealth fetch
     let stealthParsed = false; // true if page was parseable (even if third-party seller)
     try {
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 12000,
-        useCookieJar: true,
-        headers: {
-          'Referer': 'https://www.walmart.ca/',
-          'Sec-Fetch-Site': 'same-origin',
-        },
       });
 
       if (html && html.length > 500 && !html.includes('Verify Your Identity')) {
@@ -329,27 +324,6 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   /**
-   * Warm up impit session by visiting Walmart homepage.
-   * Collects Set-Cookie headers (non-JS cookies like _pxvid, _astc, session cookies)
-   * which help establish a returning visitor profile for subsequent search requests.
-   * Does NOT include _px3 (requires JS) — that's intentional, because _px3 from a
-   * different fingerprint causes PerimeterX to block harder.
-   */
-  async _warmupSession(proxyUrl) {
-    try {
-      // Clear any stale warmup cookies from a previous session
-      clearWarmupCookies(proxyUrl);
-
-      // Visit homepage to collect Set-Cookie headers
-      await stealthWarmup('https://www.walmart.ca', { proxyUrl, timeoutMs: 12000 });
-      return true;
-    } catch (err) {
-      logger.warn(`Walmart: warmup failed: ${err.message}`);
-      return false;
-    }
-  }
-
-  /**
    * Stealth-fetch a Walmart search page and parse __NEXT_DATA__ for results.
    * Returns array of product items (same shape as ScraperAPI) or null on failure.
    */
@@ -362,11 +336,6 @@ class WalmartAdapter extends BaseAdapter {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 15000,
-        useCookieJar: true, // inject warmup cookies from same TLS fingerprint
-        headers: {
-          'Referer': 'https://www.walmart.ca/',
-          'Sec-Fetch-Site': 'same-origin', // looks like internal navigation
-        },
       });
 
       if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
@@ -448,12 +417,7 @@ class WalmartAdapter extends BaseAdapter {
     const failedQueries = []; // queries that need ScraperAPI fallback
     let stealthHits = 0;
 
-    // Step 0: Warmup — visit Walmart homepage via impit to collect session cookies
-    // This gets non-JS cookies (_pxvid, _astc, etc.) from the SAME TLS fingerprint
-    // that will make subsequent search requests, avoiding fingerprint mismatch
-    await this._warmupSession(proxyUrl);
-
-    // Step 1: Try queries via stealth (free) — batches of 4 with 1s delay to avoid rate limiting
+    // Step 1: Try queries via stealth (free) — batches of 4 with jitter to avoid rate limiting
     const BATCH_SIZE = 4;
     for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
       const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
@@ -487,13 +451,51 @@ class WalmartAdapter extends BaseAdapter {
       }
     }
 
-    // If most queries failed, clear warmup cookies for next cycle
-    if (failedQueries.length > this.searchQueries.length * 0.5) {
-      clearWarmupCookies(proxyUrl);
-      logger.warn(`Walmart: ${failedQueries.length}/${this.searchQueries.length} stealth failed — cleared warmup cookies for next cycle`);
+    // Step 1.5: Retry failed queries with fresh IPs (free) before burning ScraperAPI credits
+    if (failedQueries.length > 0) {
+      const retryQueries = [...failedQueries];
+      failedQueries.length = 0; // clear for second pass
+
+      // Rotate to fresh IP for retries
+      const retryProxy = getProxyUrl('residential');
+      if (retryProxy) _clearCache(retryProxy);
+      await sleep(2000 + Math.floor(Math.random() * 2000)); // 2-4s cool-off
+
+      // Retry in smaller batches of 2 with more jitter
+      const RETRY_BATCH = 2;
+      for (let i = 0; i < retryQueries.length; i += RETRY_BATCH) {
+        const batch = retryQueries.slice(i, i + RETRY_BATCH);
+        const retryResults = await Promise.allSettled(
+          batch.map(query =>
+            this._stealthSearch(query).then(items => ({ query, items }))
+          )
+        );
+
+        for (const result of retryResults) {
+          if (result.status === 'rejected') {
+            failedQueries.push(result.reason?.query || 'unknown');
+            continue;
+          }
+          const { query, items } = result.value;
+          if (!items || items.length === 0) {
+            failedQueries.push(query);
+            continue;
+          }
+
+          stealthHits++;
+          this._processSearchItems(items, products);
+          logger.info(`Walmart: "${query}" — ${items.length} results (stealth retry, free)`);
+        }
+
+        if (i + RETRY_BATCH < retryQueries.length) {
+          const px = getProxyUrl('residential');
+          if (px) _clearCache(px);
+          await sleep(1500 + Math.floor(Math.random() * 1500));
+        }
+      }
     }
 
-    // Step 2: ScraperAPI fallback for failed queries only
+    // Step 2: ScraperAPI fallback for queries that failed both stealth passes
     if (failedQueries.length > 0 && isConfigured()) {
       const scraperResults = await Promise.allSettled(
         failedQueries.map(query =>
