@@ -1,7 +1,9 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
+const { walmartSearch, isConfigured } = require('../utils/scraper-api');
+const { getProxyUrl } = require('../core/proxy');
+const { stealthGet } = require('../utils/stealth-http');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -33,66 +35,164 @@ class WalmartAdapter extends BaseAdapter {
 
   /**
    * Fetch a single product page by Walmart SKU/product ID.
-   * Used by scheduler.pollWatchlist() for early SKU detection.
-   * Returns null if product isn't live yet (404) or rate-limited.
+   * Uses residential proxy + stealth TLS fingerprint directly — NO ScraperAPI credits.
+   * Parses JSON-LD from the product page HTML for structured product data.
+   * Returns null if product isn't live yet (404) or blocked.
    */
   async fetchProductPage(productId) {
-    if (!isConfigured()) return null;
+    const url = `https://www.walmart.ca/ip/${productId}`;
+    const proxyUrl = getProxyUrl('residential');
 
     try {
-      const data = await walmartProductLookup(productId, { retailerId: this.id });
-      if (!data) return null; // rate-limited or 404
+      const html = await stealthGet(url, {
+        proxyUrl,
+        maxRetries: 1,       // don't waste time retrying on watchlist fast-poll
+        timeoutMs: 15000,
+      });
 
-      // ScraperAPI autoparse returns product data in various formats
-      // Try to extract from structured response
-      const name = data.product_name || data.name || data.title;
-      if (!name) {
-        logger.debug(`Walmart: watchlist ${productId} — page returned but no product name (may be placeholder)`);
+      if (!html || html.length < 500) {
+        logger.debug(`Walmart: watchlist ${productId} — empty/short response`);
         return null;
       }
 
-      const price = typeof data.price === 'number' ? data.price :
-        normalizePrice(data.price_string || data.price || data.product_price);
-
-      // Check offers array if present (ScraperAPI structured format)
-      let inStock = false;
-      let canAddToCart = false;
-      if (data.offers && Array.isArray(data.offers)) {
-        for (const offer of data.offers) {
-          const avail = (offer.availability || '').toLowerCase();
-          if (avail.includes('instock') || avail.includes('in stock') || avail.includes('in_stock')) {
-            inStock = true;
-            canAddToCart = true;
-            break;
-          }
+      // Parse JSON-LD from product page (same approach as Costco adapter)
+      const product = this._parseProductPage(html, productId);
+      if (!product) {
+        // Check if it's a "not found" or placeholder page
+        if (html.includes('not found') || html.includes('currently unavailable') || html.includes('not exist')) {
+          logger.debug(`Walmart: watchlist ${productId} — product page says not found/unavailable`);
+        } else {
+          logger.debug(`Walmart: watchlist ${productId} — page returned (${html.length} bytes) but couldn't parse product data`);
         }
-      } else {
-        // Fallback: check top-level availability
-        const avail = (data.availability || data.stock_status || '').toLowerCase();
-        inStock = avail.includes('in stock') || avail.includes('instock') || avail.includes('in_stock');
-        canAddToCart = inStock;
+        return null;
       }
 
-      const image = data.image || data.product_image || data.thumbnail || '';
-      const url = data.url || data.product_url || `https://www.walmart.ca/ip/${productId}`;
-
-      const product = this.classify({
-        sku: String(productId),
-        name,
-        price: price || 0,
-        currency: 'CAD',
-        url,
-        image,
-        inStock,
-        canAddToCart,
-        shipsToHome: true,
-      });
-
       product._watchlist = true;
-      logger.info(`Walmart: WATCHLIST ${productId} — "${name}" | inStock=${inStock} | $${price || '?'}`);
+      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'}`);
       return product;
     } catch (err) {
-      logger.debug(`Walmart: watchlist ${productId} fetch failed: ${err.message}`);
+      // 403/503 = bot detection, log but don't crash
+      if (err.message.includes('Blocked') || err.message.includes('403') || err.message.includes('503')) {
+        logger.debug(`Walmart: watchlist ${productId} — blocked by bot protection, will retry`);
+      } else {
+        logger.debug(`Walmart: watchlist ${productId} fetch failed: ${err.message}`);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Parse Walmart product page HTML for JSON-LD structured data.
+   * Walmart embeds a <script type="application/ld+json"> with Product schema.
+   */
+  _parseProductPage(html, productId) {
+    // Method 1: JSON-LD (most reliable)
+    let idx = 0;
+    while ((idx = html.indexOf('application/ld+json', idx)) !== -1) {
+      const start = html.indexOf('>', idx) + 1;
+      const end = html.indexOf('</script>', start);
+      if (end === -1) break;
+
+      try {
+        const json = JSON.parse(html.substring(start, end).trim());
+        // Could be a single Product or an array
+        const productData = json['@type'] === 'Product' ? json :
+          (Array.isArray(json) ? json.find(j => j['@type'] === 'Product') : null);
+
+        if (productData) {
+          return this._buildProduct(productData, productId);
+        }
+      } catch (e) {
+        // skip malformed JSON-LD blocks
+      }
+      idx = end;
+    }
+
+    // Method 2: __NEXT_DATA__ (Walmart uses Next.js)
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (nextDataMatch) {
+      try {
+        const nextData = JSON.parse(nextDataMatch[1]);
+        const product = this._parseNextData(nextData, productId);
+        if (product) return product;
+      } catch (e) {
+        logger.debug(`Walmart: __NEXT_DATA__ parse failed for ${productId}: ${e.message}`);
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Build classified product from JSON-LD Product schema.
+   */
+  _buildProduct(data, productId) {
+    const name = data.name;
+    if (!name) return null;
+
+    const offers = data.offers;
+    let price = null;
+    let inStock = false;
+
+    if (offers) {
+      // offers can be a single object or array
+      const offerList = Array.isArray(offers) ? offers : [offers];
+      for (const offer of offerList) {
+        if (offer.price != null) {
+          price = typeof offer.price === 'number' ? offer.price : normalizePrice(String(offer.price));
+        }
+        const avail = (offer.availability || '').toLowerCase();
+        if (avail.includes('instock')) {
+          inStock = true;
+        }
+      }
+    }
+
+    const image = typeof data.image === 'string' ? data.image :
+      (Array.isArray(data.image) ? data.image[0] : (data.image?.url || ''));
+
+    return this.classify({
+      sku: data.sku || String(productId),
+      name,
+      price: price || 0,
+      currency: 'CAD',
+      url: data.url || `https://www.walmart.ca/ip/${productId}`,
+      image,
+      inStock,
+      canAddToCart: inStock,
+      shipsToHome: true,
+    });
+  }
+
+  /**
+   * Parse __NEXT_DATA__ for product info (fallback if no JSON-LD).
+   */
+  _parseNextData(nextData, productId) {
+    try {
+      // Navigate Next.js data structure — Walmart puts product data in props
+      const props = nextData?.props?.pageProps;
+      if (!props) return null;
+
+      // Look for product data in various locations
+      const item = props.product || props.item || props.initialData?.data?.product;
+      if (!item || !item.name) return null;
+
+      const price = item.price?.currentPrice || item.priceInfo?.currentPrice?.price;
+      const avail = (item.availabilityStatus || item.availability || '').toLowerCase();
+      const inStock = avail.includes('in_stock') || avail.includes('available');
+
+      return this.classify({
+        sku: item.usItemId || item.id || String(productId),
+        name: item.name,
+        price: price || 0,
+        currency: 'CAD',
+        url: `https://www.walmart.ca/ip/${productId}`,
+        image: item.imageInfo?.thumbnailUrl || item.image || '',
+        inStock,
+        canAddToCart: inStock,
+        shipsToHome: true,
+      });
+    } catch {
       return null;
     }
   }

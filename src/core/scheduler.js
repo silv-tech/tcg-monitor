@@ -193,13 +193,14 @@ class Scheduler {
         this.timers.set(id, timer);
       }, stagger);
 
-      // Fast watchlist polling (every 5s) for adapters that have one
+      // Fast watchlist polling (every 3s) for adapters that have one
+      // Uses direct stealth fetch (free) not ScraperAPI, so high frequency is fine
       if (adapter.watchlist && adapter.watchlist.size > 0) {
         const wlTimer = setInterval(() => {
           if (this.running) this.pollWatchlist(adapter);
-        }, 5000);
+        }, 3000);
         this.timers.set(`${id}:watchlist`, wlTimer);
-        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} PIDs every 5s`);
+        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} SKUs every 3s`);
       }
 
       stagger += 3000;
@@ -289,9 +290,9 @@ class Scheduler {
 
     const wlTimer = setInterval(() => {
       if (this.running) this.pollWatchlist(adapter);
-    }, 5000);
+    }, 3000);
     this.timers.set(timerKey, wlTimer);
-    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every 5s`);
+    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every 3s`);
   }
 
   // Expose circuit breaker status for the admin API
