@@ -142,11 +142,9 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
   }
 
-  // ── Offer Id (all big stores — monospace for easy copy) ──
+  // ── Offer Id (Amazon only — different from ASIN, used for direct cart links) ──
   if (isAmazon && event._offerListingId) {
     embed.addFields({ name: 'Offer Id', value: `\`${event._offerListingId}\``, inline: false });
-  } else if (product.sku && ['walmart', 'costco', 'pokemoncenter', 'bestbuy'].includes(product.retailerId)) {
-    embed.addFields({ name: 'Offer Id', value: `\`${product.sku}\``, inline: false });
   }
 
   // ── One Click Checkout (markdown links in embed fields — matches client's preferred format) ──
