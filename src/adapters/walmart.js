@@ -46,23 +46,22 @@ class WalmartAdapter extends BaseAdapter {
     try {
       const html = await stealthGet(url, {
         proxyUrl,
-        maxRetries: 1,       // don't waste time retrying on watchlist fast-poll
+        maxRetries: 2,
         timeoutMs: 15000,
       });
 
       if (!html || html.length < 500) {
-        logger.debug(`Walmart: watchlist ${productId} — empty/short response`);
+        logger.warn(`Walmart: watchlist ${productId} — empty/short response (${html ? html.length : 0} bytes)`);
         return null;
       }
 
       // Parse JSON-LD from product page (same approach as Costco adapter)
       const product = this._parseProductPage(html, productId);
       if (!product) {
-        // Check if it's a "not found" or placeholder page
         if (html.includes('not found') || html.includes('currently unavailable') || html.includes('not exist')) {
-          logger.debug(`Walmart: watchlist ${productId} — product page says not found/unavailable`);
+          logger.info(`Walmart: watchlist ${productId} — not found/unavailable`);
         } else {
-          logger.debug(`Walmart: watchlist ${productId} — page returned (${html.length} bytes) but couldn't parse product data`);
+          logger.warn(`Walmart: watchlist ${productId} — page returned (${html.length} bytes) but couldn't parse product data`);
         }
         return null;
       }
@@ -71,11 +70,11 @@ class WalmartAdapter extends BaseAdapter {
       logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'}`);
       return product;
     } catch (err) {
-      // 403/503 = bot detection, log but don't crash
+      // Log at WARN so we can see failures in production logs
       if (err.message.includes('Blocked') || err.message.includes('403') || err.message.includes('503')) {
-        logger.debug(`Walmart: watchlist ${productId} — blocked by bot protection, will retry`);
+        logger.warn(`Walmart: watchlist ${productId} — blocked (${err.message})`);
       } else {
-        logger.debug(`Walmart: watchlist ${productId} fetch failed: ${err.message}`);
+        logger.warn(`Walmart: watchlist ${productId} — fetch failed: ${err.message}`);
       }
       return null;
     }

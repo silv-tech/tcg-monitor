@@ -121,7 +121,8 @@ class Scheduler {
     }
   }
 
-  // Fast-poll only watchlist items (every ~5s) — separate from full adapter polls
+  // Fast-poll watchlist items — separate from full adapter polls
+  // Detects both NEW products and stock changes (OOS→in-stock) on watched SKUs
   async pollWatchlist(adapter) {
     const watchlistKey = `${adapter.id}:watchlist`;
     if (this.polling.has(watchlistKey)) return;
@@ -134,32 +135,52 @@ class Scheduler {
     this.polling.add(watchlistKey);
     try {
       for (const productId of adapter.watchlist) {
-        const product = await adapter.fetchProductPage(productId);
-        if (!product) continue; // still 404 — not live yet
+        // Random jitter (0-2s) so requests don't look like a fixed-interval bot
+        const jitter = Math.floor(Math.random() * 2000);
+        if (jitter > 500) await sleep(jitter);
 
-        // Product went live! Check against state
+        const product = await adapter.fetchProductPage(productId);
+        if (!product) continue; // 404, blocked, or parse failure
+
         const oldProducts = await state.getAllProducts(adapter.id);
         const key = product.sku;
-        if (oldProducts[key]) continue; // already known, skip
+        const oldProduct = oldProducts[key];
 
-        // NEW product from watchlist — fire event
-        const { diffProducts } = require('./events');
-        const events = diffProducts({}, { [key]: product });
-        if (events.length > 0) {
-          const detectedAt = Date.now();
-          for (const event of events) {
-            event._detectedAt = detectedAt;
+        if (oldProduct) {
+          // Already known — check for stock changes (RESTOCK, PRICE_CHANGE)
+          const { diffProducts } = require('./events');
+          const events = diffProducts({ [key]: oldProduct }, { [key]: product });
+          if (events.length > 0) {
+            const detectedAt = Date.now();
+            for (const event of events) {
+              event._detectedAt = detectedAt;
+            }
+            logger.info(`WATCHLIST: ${adapter.name} — ${events.length} event(s) for ${productId}: ${events.map(e => e.type).join(', ')}`);
+            if (this.onEvents) {
+              await this.onEvents(events);
+            }
           }
-          logger.info(`WATCHLIST: ${adapter.name} — ${events.length} event(s) for ${productId}`);
-          if (this.onEvents) {
-            await this.onEvents(events);
+          // Always update state with latest data
+          await state.setProduct(adapter.id, key, product);
+        } else {
+          // NEW product from watchlist — fire NEW_SKU event
+          const { diffProducts } = require('./events');
+          const events = diffProducts({}, { [key]: product });
+          if (events.length > 0) {
+            const detectedAt = Date.now();
+            for (const event of events) {
+              event._detectedAt = detectedAt;
+            }
+            logger.info(`WATCHLIST: ${adapter.name} — NEW product ${productId}: ${events.map(e => e.type).join(', ')}`);
+            if (this.onEvents) {
+              await this.onEvents(events);
+            }
           }
-          // Save state so we don't re-fire
           await state.setProduct(adapter.id, key, product);
         }
       }
     } catch (err) {
-      logger.debug(`${adapter.name}: watchlist fast-poll error: ${err.message}`);
+      logger.warn(`${adapter.name}: watchlist fast-poll error: ${err.message}`);
     } finally {
       this.polling.delete(watchlistKey);
     }
