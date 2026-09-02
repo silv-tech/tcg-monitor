@@ -202,6 +202,17 @@ class DeliveryQueue {
   async routeEvent(event, queuedAt) {
     await this.enrichEvent(event);
 
+    // FINAL SAFETY: Last-resort OOS guard before any Discord send
+    // Catches anything that slipped past the deliver() filter (defense in depth)
+    // RESTOCK and PREORDER_LIVE are exempt — they signal availability transitions
+    if (!event._scanTier && event.product &&
+        event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE') {
+      if (!event.product.inStock) {
+        logger.warn(`OOS guard (routeEvent): blocked ${event.type} — ${event.product?.name || 'unknown'} (inStock=${event.product.inStock})`);
+        return;
+      }
+    }
+
     // Skip Amazon third-party seller products (client wants "sold by Amazon" only)
     // Scan/test events bypass this filter — admin needs to see all alerts
     if (event._thirdPartySeller && !event._scanTier) {
