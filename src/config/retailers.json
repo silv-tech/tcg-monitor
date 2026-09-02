@@ -8,7 +8,8 @@
     "intervalMs": 60000,
     "proxyTier": "residential",
     "enabled": true,
-    "color": "#0071dc"
+    "color": "#0071dc",
+    "watchlist": ["6000208831664"]
   },
   {
     "_phase": 1,

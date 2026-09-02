@@ -1,12 +1,13 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { walmartSearch, isConfigured } = require('../utils/scraper-api');
+const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.domain = 'www.walmart.ca';
+    this.watchlist = new Set(config.watchlist || []);
     // Search queries for ScraperAPI structured endpoint
     this.searchQueries = [
       // Pokemon (highest demand — multiple queries for coverage)
@@ -28,6 +29,72 @@ class WalmartAdapter extends BaseAdapter {
       'star wars unlimited',
       'naruto boruto card game',
     ];
+  }
+
+  /**
+   * Fetch a single product page by Walmart SKU/product ID.
+   * Used by scheduler.pollWatchlist() for early SKU detection.
+   * Returns null if product isn't live yet (404) or rate-limited.
+   */
+  async fetchProductPage(productId) {
+    if (!isConfigured()) return null;
+
+    try {
+      const data = await walmartProductLookup(productId, { retailerId: this.id });
+      if (!data) return null; // rate-limited or 404
+
+      // ScraperAPI autoparse returns product data in various formats
+      // Try to extract from structured response
+      const name = data.product_name || data.name || data.title;
+      if (!name) {
+        logger.debug(`Walmart: watchlist ${productId} — page returned but no product name (may be placeholder)`);
+        return null;
+      }
+
+      const price = typeof data.price === 'number' ? data.price :
+        normalizePrice(data.price_string || data.price || data.product_price);
+
+      // Check offers array if present (ScraperAPI structured format)
+      let inStock = false;
+      let canAddToCart = false;
+      if (data.offers && Array.isArray(data.offers)) {
+        for (const offer of data.offers) {
+          const avail = (offer.availability || '').toLowerCase();
+          if (avail.includes('instock') || avail.includes('in stock') || avail.includes('in_stock')) {
+            inStock = true;
+            canAddToCart = true;
+            break;
+          }
+        }
+      } else {
+        // Fallback: check top-level availability
+        const avail = (data.availability || data.stock_status || '').toLowerCase();
+        inStock = avail.includes('in stock') || avail.includes('instock') || avail.includes('in_stock');
+        canAddToCart = inStock;
+      }
+
+      const image = data.image || data.product_image || data.thumbnail || '';
+      const url = data.url || data.product_url || `https://www.walmart.ca/ip/${productId}`;
+
+      const product = this.classify({
+        sku: String(productId),
+        name,
+        price: price || 0,
+        currency: 'CAD',
+        url,
+        image,
+        inStock,
+        canAddToCart,
+        shipsToHome: true,
+      });
+
+      product._watchlist = true;
+      logger.info(`Walmart: WATCHLIST ${productId} — "${name}" | inStock=${inStock} | $${price || '?'}`);
+      return product;
+    } catch (err) {
+      logger.debug(`Walmart: watchlist ${productId} fetch failed: ${err.message}`);
+      return null;
+    }
   }
 
   async fetchProducts() {

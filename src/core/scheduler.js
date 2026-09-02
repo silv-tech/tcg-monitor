@@ -268,6 +268,32 @@ class Scheduler {
     }
   }
 
+  /**
+   * Get a registered adapter by ID (for admin API watchlist management).
+   */
+  getAdapter(adapterId) {
+    return this.adapters.get(adapterId) || null;
+  }
+
+  /**
+   * Ensure a watchlist fast-poll timer exists for the given adapter.
+   * Called when a SKU is added to a watchlist at runtime.
+   */
+  ensureWatchlistTimer(adapterId) {
+    const timerKey = `${adapterId}:watchlist`;
+    if (this.timers.has(timerKey)) return; // already running
+    if (!this.running) return;
+
+    const adapter = this.adapters.get(adapterId);
+    if (!adapter || !adapter.watchlist || adapter.watchlist.size === 0) return;
+
+    const wlTimer = setInterval(() => {
+      if (this.running) this.pollWatchlist(adapter);
+    }, 5000);
+    this.timers.set(timerKey, wlTimer);
+    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every 5s`);
+  }
+
   // Expose circuit breaker status for the admin API
   getCircuitStatus() {
     const status = {};

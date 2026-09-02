@@ -324,6 +324,68 @@ router.get('/proxies', (req, res) => {
   res.json({ config, pool: getProxyPoolStats() });
 });
 
+// === Watchlist management (early SKU detection) ===
+
+// Get watchlist for a retailer
+router.get('/retailers/:id/watchlist', (req, res) => {
+  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+  const retailer = retailers.find(r => r.id === req.params.id);
+  if (!retailer) return res.status(404).json({ error: 'Retailer not found' });
+
+  const adapter = scheduler.getAdapter(req.params.id);
+  const liveWatchlist = adapter && adapter.watchlist ? [...adapter.watchlist] : [];
+  res.json({ retailerId: req.params.id, watchlist: liveWatchlist, config: retailer.watchlist || [] });
+});
+
+// Add SKU to watchlist
+router.post('/retailers/:id/watchlist', (req, res) => {
+  const { sku } = req.body;
+  if (!sku || typeof sku !== 'string') return res.status(400).json({ error: 'sku (string) required' });
+
+  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+  const retailer = retailers.find(r => r.id === req.params.id);
+  if (!retailer) return res.status(404).json({ error: 'Retailer not found' });
+
+  // Add to config file
+  if (!retailer.watchlist) retailer.watchlist = [];
+  if (retailer.watchlist.includes(sku)) return res.status(409).json({ error: 'SKU already in watchlist' });
+  retailer.watchlist.push(sku);
+  atomicWriteSync(retailersPath, JSON.stringify(retailers, null, 2));
+
+  // Add to live adapter
+  const adapter = scheduler.getAdapter(req.params.id);
+  if (adapter && adapter.watchlist) {
+    adapter.watchlist.add(sku);
+    // Ensure watchlist timer is running
+    scheduler.ensureWatchlistTimer(req.params.id);
+  }
+
+  logger.info(`Watchlist: added ${sku} to ${req.params.id}`);
+  res.status(201).json({ ok: true, watchlist: retailer.watchlist });
+});
+
+// Remove SKU from watchlist
+router.delete('/retailers/:id/watchlist/:sku', (req, res) => {
+  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
+  const retailer = retailers.find(r => r.id === req.params.id);
+  if (!retailer) return res.status(404).json({ error: 'Retailer not found' });
+
+  if (!retailer.watchlist || !retailer.watchlist.includes(req.params.sku)) {
+    return res.status(404).json({ error: 'SKU not in watchlist' });
+  }
+  retailer.watchlist = retailer.watchlist.filter(s => s !== req.params.sku);
+  atomicWriteSync(retailersPath, JSON.stringify(retailers, null, 2));
+
+  // Remove from live adapter
+  const adapter = scheduler.getAdapter(req.params.id);
+  if (adapter && adapter.watchlist) {
+    adapter.watchlist.delete(req.params.sku);
+  }
+
+  logger.info(`Watchlist: removed ${req.params.sku} from ${req.params.id}`);
+  res.json({ ok: true, watchlist: retailer.watchlist });
+});
+
 // Update proxy list
 router.put('/proxies', (req, res) => {
   if (!req.body || typeof req.body !== 'object') {
