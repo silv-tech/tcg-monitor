@@ -1,6 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { normalizePrice } = require('../utils/helpers');
+const { normalizePrice, sleep } = require('../utils/helpers');
 const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
@@ -417,27 +417,36 @@ class WalmartAdapter extends BaseAdapter {
     const failedQueries = []; // queries that need ScraperAPI fallback
     let stealthHits = 0;
 
-    // Step 1: Try all queries via stealth (free)
-    const stealthResults = await Promise.allSettled(
-      this.searchQueries.map(query =>
-        this._stealthSearch(query).then(items => ({ query, items }))
-      )
-    );
+    // Step 1: Try queries via stealth (free) — batches of 4 with 1s delay to avoid rate limiting
+    const BATCH_SIZE = 4;
+    for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
+      const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map(query =>
+          this._stealthSearch(query).then(items => ({ query, items }))
+        )
+      );
 
-    for (const result of stealthResults) {
-      if (result.status === 'rejected') {
-        failedQueries.push(result.reason?.query || 'unknown');
-        continue;
-      }
-      const { query, items } = result.value;
-      if (!items || items.length === 0) {
-        failedQueries.push(query);
-        continue;
+      for (const result of batchResults) {
+        if (result.status === 'rejected') {
+          failedQueries.push(result.reason?.query || 'unknown');
+          continue;
+        }
+        const { query, items } = result.value;
+        if (!items || items.length === 0) {
+          failedQueries.push(query);
+          continue;
+        }
+
+        stealthHits++;
+        this._processSearchItems(items, products);
+        logger.info(`Walmart: "${query}" — ${items.length} results (stealth, free)`);
       }
 
-      stealthHits++;
-      this._processSearchItems(items, products);
-      logger.info(`Walmart: "${query}" — ${items.length} results (stealth, free)`);
+      // Small delay between batches so Walmart doesn't see 16 rapid requests from same IP
+      if (i + BATCH_SIZE < this.searchQueries.length) {
+        await sleep(1000 + Math.floor(Math.random() * 1000)); // 1-2s jitter
+      }
     }
 
     // Step 2: ScraperAPI fallback for failed queries only
