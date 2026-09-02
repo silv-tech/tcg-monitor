@@ -86,7 +86,8 @@ async function createStealthContext(browser) {
  * then extracts cookies for use with impit stealth HTTP.
  */
 async function getSessionCookies(domain, seedUrl, opts = {}) {
-  const { proxyUrl, challengeWaitMs = 10000, forceRefresh = false } = opts;
+  const { proxyUrl, challengeWaitMs = 10000, forceRefresh = false, ttlMs } = opts;
+  const effectiveTTL = ttlMs || COOKIE_TTL;
 
   if (!forceRefresh) {
     const cached = cookieCache.get(domain);
@@ -136,10 +137,10 @@ async function getSessionCookies(domain, seedUrl, opts = {}) {
     cookieCache.set(domain, {
       cookieString,
       cookies, // Keep full cookie objects for browser injection
-      expiresAt: Date.now() + COOKIE_TTL,
+      expiresAt: Date.now() + effectiveTTL,
     });
 
-    logger.info(`Cookie session: ${domain} -- ${cookies.length} cookies cached for ${COOKIE_TTL / 60000} min`);
+    logger.info(`Cookie session: ${domain} -- ${cookies.length} cookies cached for ${effectiveTTL / 1000}s`);
     return cookieString;
   } finally {
     await context.close();

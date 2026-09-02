@@ -4,6 +4,10 @@ const { normalizePrice, sleep } = require('../utils/helpers');
 const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
+const { getSessionCookies, invalidateSession } = require('../utils/cookie-session');
+
+// Walmart PerimeterX _px3 cookie expires in ~60s — refresh at 45s
+const WALMART_COOKIE_TTL = 45 * 1000;
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -44,14 +48,28 @@ class WalmartAdapter extends BaseAdapter {
     const url = `https://www.walmart.ca/ip/${productId}`;
     const proxyUrl = getProxyUrl('residential');
 
-    // Step 1: Try free stealth fetch
+    // Step 1: Try free stealth fetch (with farmed cookies if available)
     let stealthParsed = false; // true if page was parseable (even if third-party seller)
     try {
-      const html = await stealthGet(url, {
+      const fetchOpts = {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 12000,
-      });
+      };
+
+      // Inject farmed cookies for watchlist too
+      try {
+        const cookies = await getSessionCookies('www.walmart.ca', 'https://www.walmart.ca', {
+          proxyUrl,
+          challengeWaitMs: 8000,
+          ttlMs: WALMART_COOKIE_TTL,
+        });
+        if (cookies) fetchOpts.headers = { Cookie: cookies };
+      } catch {
+        // No cookies — proceed without
+      }
+
+      const html = await stealthGet(url, fetchOpts);
 
       if (html && html.length > 500 && !html.includes('Verify Your Identity')) {
         const product = this._parseProductPage(html, productId);
@@ -327,16 +345,23 @@ class WalmartAdapter extends BaseAdapter {
    * Stealth-fetch a Walmart search page and parse __NEXT_DATA__ for results.
    * Returns array of product items (same shape as ScraperAPI) or null on failure.
    */
-  async _stealthSearch(query) {
+  async _stealthSearch(query, cookieString = null) {
     const url = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
     const proxyUrl = getProxyUrl('residential');
 
     try {
-      const html = await stealthGet(url, {
+      const fetchOpts = {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 15000,
-      });
+      };
+
+      // Inject farmed cookies (PerimeterX _px3 + Akamai _abck) if available
+      if (cookieString) {
+        fetchOpts.headers = { Cookie: cookieString };
+      }
+
+      const html = await stealthGet(url, fetchOpts);
 
       if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
         if (proxyUrl) _clearCache(proxyUrl);
@@ -417,13 +442,27 @@ class WalmartAdapter extends BaseAdapter {
     const failedQueries = []; // queries that need ScraperAPI fallback
     let stealthHits = 0;
 
+    // Step 0: Farm Walmart session cookies (PerimeterX _px3 + Akamai _abck)
+    // One Patchright session solves the JS challenge, then all 16 stealth HTTP queries reuse cookies
+    let cookieString = null;
+    try {
+      cookieString = await getSessionCookies('www.walmart.ca', 'https://www.walmart.ca/search?q=pokemon', {
+        proxyUrl,
+        challengeWaitMs: 8000,
+        ttlMs: WALMART_COOKIE_TTL,
+      });
+      logger.info(`Walmart: farmed session cookies (${cookieString.length} chars) — injecting into stealth searches`);
+    } catch (err) {
+      logger.warn(`Walmart: cookie farming failed (${err.message}) — stealth searches will run without cookies`);
+    }
+
     // Step 1: Try queries via stealth (free) — batches of 4 with 1s delay to avoid rate limiting
     const BATCH_SIZE = 4;
     for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
       const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.allSettled(
         batch.map(query =>
-          this._stealthSearch(query).then(items => ({ query, items }))
+          this._stealthSearch(query, cookieString).then(items => ({ query, items }))
         )
       );
 
@@ -449,6 +488,12 @@ class WalmartAdapter extends BaseAdapter {
         if (proxyUrl) _clearCache(proxyUrl);
         await sleep(1500 + Math.floor(Math.random() * 1500)); // 1.5-3s jitter
       }
+    }
+
+    // If most queries failed despite having cookies, invalidate for next cycle
+    if (cookieString && failedQueries.length > this.searchQueries.length * 0.5) {
+      invalidateSession('www.walmart.ca');
+      logger.warn(`Walmart: ${failedQueries.length}/${this.searchQueries.length} stealth failed — invalidated cookies for next cycle`);
     }
 
     // Step 2: ScraperAPI fallback for failed queries only
