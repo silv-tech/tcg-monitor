@@ -1,0 +1,28 @@
+# Slug tokens used to filter sitemap URLs by retailer.
+# Only URLs containing at least one of these tokens (case-insensitive) are kept.
+
+walmart:
+  - pokemon
+  - tcg
+  - pikachu
+  - charizard
+  - booster
+  - trainer-box
+  - elite-trainer
+  - paldea
+  - scarlet
+  - violet
+  - obsidian
+  - prismatic
+  - surging
+  - twilight
+  - shrouded
+  - stellar
+  - temporal
+  - paradox
+  - journey
+  - destined
+  - one-piece
+  - lorcana
+  - yu-gi-oh
+  - magic-gathering

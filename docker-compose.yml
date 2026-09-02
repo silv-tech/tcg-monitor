@@ -30,5 +30,38 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # Early SKU Detection — Python async service
+  early-sku-detector:
+    build:
+      context: ./early-sku-detector
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://detector:detector_local@postgres:5432/early_sku
+      - DATABASE_URL_SYNC=postgresql://detector:detector_local@postgres:5432/early_sku
+    env_file:
+      - ./early-sku-detector/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: detector
+      POSTGRES_PASSWORD: detector_local
+      POSTGRES_DB: early_sku
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U detector -d early_sku"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   redis_data:
+  pg_data:
