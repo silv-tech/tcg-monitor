@@ -76,8 +76,42 @@ class WalmartAdapter extends BaseAdapter {
       const name = data.product_name || data.name || data.title;
       if (!name) return null;
 
-      const price = typeof data.price === 'number' ? data.price :
-        normalizePrice(data.price_string || data.price || data.product_price);
+      // Check seller — only accept Walmart's own offers
+      const dataSeller = (data.seller || data.sold_by || '').toLowerCase();
+      if (dataSeller && !dataSeller.includes('walmart')) {
+        logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party seller: "${data.seller || data.sold_by}" (scraper)`);
+        return null;
+      }
+
+      // Check offers array for seller info too
+      if (data.offers && Array.isArray(data.offers)) {
+        const hasWalmartOffer = data.offers.some(o => {
+          const s = (o.seller?.name || o.seller || o.sold_by || '').toString().toLowerCase();
+          return !s || s.includes('walmart');
+        });
+        if (!hasWalmartOffer) {
+          const sellers = data.offers.map(o => o.seller?.name || o.seller || o.sold_by || 'unknown').join(', ');
+          logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party sellers: ${sellers} (scraper)`);
+          return null;
+        }
+      }
+
+      let price = null;
+      // Try to get price from Walmart's offer specifically
+      if (data.offers && Array.isArray(data.offers)) {
+        for (const offer of data.offers) {
+          const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
+          if (!s || s.includes('walmart')) {
+            price = typeof offer.price === 'number' ? offer.price :
+              normalizePrice(offer.price_string || offer.price);
+            break;
+          }
+        }
+      }
+      if (price == null) {
+        price = typeof data.price === 'number' ? data.price :
+          normalizePrice(data.price_string || data.price || data.product_price);
+      }
 
       // ScraperAPI autoparse doesn't reliably report Walmart CA stock status.
       // Only trust explicit InStock — don't let missing availability override
@@ -85,6 +119,8 @@ class WalmartAdapter extends BaseAdapter {
       let inStock = null; // null = unknown
       if (data.offers && Array.isArray(data.offers)) {
         for (const offer of data.offers) {
+          const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
+          if (s && !s.includes('walmart')) continue; // skip third-party offers
           const avail = (offer.availability || '').toLowerCase();
           if (avail.includes('instock') || avail.includes('in stock') || avail.includes('in_stock')) {
             inStock = true;
@@ -176,6 +212,7 @@ class WalmartAdapter extends BaseAdapter {
 
   /**
    * Build classified product from JSON-LD Product schema.
+   * Only considers offers sold by Walmart — third-party sellers are ignored.
    */
   _buildProduct(data, productId) {
     const name = data.name;
@@ -184,18 +221,37 @@ class WalmartAdapter extends BaseAdapter {
     const offers = data.offers;
     let price = null;
     let inStock = false;
+    let seller = null;
 
     if (offers) {
       // offers can be a single object or array
       const offerList = Array.isArray(offers) ? offers : [offers];
+
+      // First pass: find Walmart's own offer
+      let walmartOffer = null;
       for (const offer of offerList) {
-        if (offer.price != null) {
-          price = typeof offer.price === 'number' ? offer.price : normalizePrice(String(offer.price));
+        const sellerName = (offer.seller?.name || offer.seller || '').toString().toLowerCase();
+        if (sellerName.includes('walmart')) {
+          walmartOffer = offer;
+          seller = offer.seller?.name || offer.seller || 'Walmart';
+          break;
         }
-        const avail = (offer.availability || '').toLowerCase();
-        if (avail.includes('instock')) {
-          inStock = true;
-        }
+      }
+
+      // If no Walmart offer found, log all sellers and skip
+      if (!walmartOffer) {
+        const sellers = offerList.map(o => o.seller?.name || o.seller || 'unknown').join(', ');
+        logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party sellers: ${sellers}`);
+        return null;
+      }
+
+      // Use Walmart's offer for price/stock
+      if (walmartOffer.price != null) {
+        price = typeof walmartOffer.price === 'number' ? walmartOffer.price : normalizePrice(String(walmartOffer.price));
+      }
+      const avail = (walmartOffer.availability || '').toLowerCase();
+      if (avail.includes('instock')) {
+        inStock = true;
       }
     }
 
@@ -217,6 +273,7 @@ class WalmartAdapter extends BaseAdapter {
 
   /**
    * Parse __NEXT_DATA__ for product info (fallback if no JSON-LD).
+   * Only considers Walmart's own offers.
    */
   _parseNextData(nextData, productId) {
     try {
@@ -227,6 +284,13 @@ class WalmartAdapter extends BaseAdapter {
       // Look for product data in various locations
       const item = props.product || props.item || props.initialData?.data?.product;
       if (!item || !item.name) return null;
+
+      // Check seller — skip third-party
+      const sellerName = (item.seller || item.sellerName || item.soldBy || '').toLowerCase();
+      if (sellerName && !sellerName.includes('walmart')) {
+        logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party seller: "${item.seller || item.sellerName || item.soldBy}" (nextData)`);
+        return null;
+      }
 
       const price = item.price?.currentPrice || item.priceInfo?.currentPrice?.price;
       const avail = (item.availabilityStatus || item.availability || '').toLowerCase();
