@@ -79,7 +79,10 @@ class WalmartAdapter extends BaseAdapter {
       const price = typeof data.price === 'number' ? data.price :
         normalizePrice(data.price_string || data.price || data.product_price);
 
-      let inStock = false;
+      // ScraperAPI autoparse doesn't reliably report Walmart CA stock status.
+      // Only trust explicit InStock — don't let missing availability override
+      // a stealth-confirmed inStock=true (prevents false RESTOCK flip-flops).
+      let inStock = null; // null = unknown
       if (data.offers && Array.isArray(data.offers)) {
         for (const offer of data.offers) {
           const avail = (offer.availability || '').toLowerCase();
@@ -87,10 +90,23 @@ class WalmartAdapter extends BaseAdapter {
             inStock = true;
             break;
           }
+          if (avail.includes('outofstock') || avail.includes('out of stock')) {
+            inStock = false;
+          }
         }
       } else {
         const avail = (data.availability || data.stock_status || '').toLowerCase();
-        inStock = avail.includes('in stock') || avail.includes('instock') || avail.includes('in_stock');
+        if (avail.includes('instock') || avail.includes('in stock')) inStock = true;
+        else if (avail.includes('outofstock') || avail.includes('out of stock')) inStock = false;
+      }
+
+      // If ScraperAPI can't determine stock, keep last known value from Redis
+      if (inStock === null) {
+        const state = require('../core/state');
+        const oldProducts = await state.getAllProducts(this.id);
+        const old = oldProducts[String(productId)];
+        inStock = old ? old.inStock : false;
+        logger.info(`Walmart: WATCHLIST ${productId} — ScraperAPI stock unknown, keeping last known: inStock=${inStock}`);
       }
 
       const image = data.image || data.product_image || data.thumbnail || '';
