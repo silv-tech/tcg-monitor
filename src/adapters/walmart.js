@@ -443,9 +443,11 @@ class WalmartAdapter extends BaseAdapter {
         logger.info(`Walmart: "${query}" — ${items.length} results (stealth, free)`);
       }
 
-      // Small delay between batches so Walmart doesn't see 16 rapid requests from same IP
+      // Rotate IP + delay between batches to avoid Walmart flagging the same IP
       if (i + BATCH_SIZE < this.searchQueries.length) {
-        await sleep(1000 + Math.floor(Math.random() * 1000)); // 1-2s jitter
+        const proxyUrl = getProxyUrl('residential');
+        if (proxyUrl) _clearCache(proxyUrl);
+        await sleep(1500 + Math.floor(Math.random() * 1500)); // 1.5-3s jitter
       }
     }
 
