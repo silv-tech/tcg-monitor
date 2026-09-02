@@ -323,83 +323,198 @@ class WalmartAdapter extends BaseAdapter {
     }
   }
 
-  async fetchProducts() {
-    if (!isConfigured()) {
-      throw new Error('Walmart: SCRAPER_API_KEY not configured — structured endpoint required');
-    }
+  /**
+   * Stealth-fetch a Walmart search page and parse __NEXT_DATA__ for results.
+   * Returns array of product items (same shape as ScraperAPI) or null on failure.
+   */
+  async _stealthSearch(query) {
+    const url = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
+    const proxyUrl = getProxyUrl('residential');
 
-    const products = {};
+    try {
+      const html = await stealthGet(url, {
+        proxyUrl,
+        maxRetries: 1,
+        timeoutMs: 15000,
+      });
 
-    // Parallel search queries (#6)
-    const searchResults = await Promise.allSettled(
-      this.searchQueries.map(query =>
-        walmartSearch(query, { tld: 'ca', retailerId: this.id })
-          .then(data => ({ query, data }))
-      )
-    );
-
-    for (const result of searchResults) {
-      if (result.status === 'rejected') {
-        logger.warn(`Walmart: structured search failed: ${result.reason.message}`);
-        continue;
-      }
-      const { query, data } = result.value;
-      if (!data) {
-        logger.debug(`Walmart: rate-limited for "${query}"`);
-        continue;
+      if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
+        if (proxyUrl) _clearCache(proxyUrl);
+        return null;
       }
 
-      const results = data.items || data.results || data.search_results || [];
-      if (results.length === 0) {
-        logger.warn(`Walmart: 0 results from structured API for "${query}"`, { reason: 'empty_response' });
-        continue;
-      }
-
-      for (const item of results) {
+      // Parse __NEXT_DATA__ — Walmart search results live here
+      const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (nextDataMatch) {
         try {
-          if (!item.name && !item.title) continue;
-          const name = item.name || item.title;
+          const nextData = JSON.parse(nextDataMatch[1]);
+          const searchData = nextData?.props?.pageProps?.initialData?.searchResult?.itemStacks?.[0]?.items
+            || nextData?.props?.pageProps?.searchResult?.itemStacks?.[0]?.items
+            || nextData?.props?.pageProps?.items
+            || [];
 
-          // Skip third-party sellers (#9)
-          const seller = (item.seller || item.sold_by || '').toLowerCase();
-          if (seller && !seller.includes('walmart')) continue;
-
-          const sku = item.id || item.product_id || item.us_item_id ||
-            name.replace(/\s+/g, '-').toLowerCase().slice(0, 50);
-
-          const price = typeof item.price === 'number' ? item.price :
-            normalizePrice(item.price_string || item.price);
-
-          const url = item.url || item.product_url || item.link ||
-            `${this.url}/ip/${sku}`;
-          const fullUrl = url.startsWith('http') ? url : `${this.url}${url}`;
-
-          const image = item.image || item.thumbnail || '';
-          const avail = (item.availability || '').toLowerCase();
-          const inStock = avail ? avail.includes('in stock') || avail.includes('instock') : false;
-
-          const product = this.classify({
-            sku: String(sku),
-            name,
-            price,
-            currency: 'CAD',
-            url: fullUrl,
-            image,
-            inStock,
-            canAddToCart: inStock,
-            shipsToHome: true,
-          });
-
-          products[product.sku] = product;
-        } catch (err) {
-          logger.debug(`Walmart: failed to parse item: ${err.message}`);
+          if (searchData.length > 0) {
+            // Normalize to same shape the adapter expects
+            return searchData.map(item => ({
+              name: item.name || item.title,
+              id: item.usItemId || item.id || item.productId,
+              price: item.price || item.priceInfo?.currentPrice?.price,
+              seller: item.sellerName || item.seller || item.soldBy || '',
+              url: item.canonicalUrl || item.url || '',
+              image: item.imageInfo?.thumbnailUrl || item.image || item.thumbnail || '',
+              availability: item.availabilityStatusV2?.value || item.availabilityStatus || '',
+            })).filter(i => i.name);
+          }
+        } catch {
+          // JSON parse failed
         }
       }
 
-      logger.info(`Walmart: "${query}" returned ${results.length} results, ${Object.keys(products).length} total products`);
+      // Fallback: parse JSON-LD from search page
+      let idx = 0;
+      const items = [];
+      while ((idx = html.indexOf('application/ld+json', idx)) !== -1) {
+        const start = html.indexOf('>', idx) + 1;
+        const end = html.indexOf('</script>', start);
+        if (end === -1) break;
+        try {
+          const json = JSON.parse(html.substring(start, end).trim());
+          // ItemList schema from search
+          if (json['@type'] === 'ItemList' && json.itemListElement) {
+            for (const elem of json.itemListElement) {
+              const prod = elem.item || elem;
+              if (prod.name) {
+                items.push({
+                  name: prod.name,
+                  id: prod.sku || prod.productID,
+                  price: prod.offers?.price,
+                  seller: prod.offers?.seller?.name || '',
+                  url: prod.url || '',
+                  image: typeof prod.image === 'string' ? prod.image : '',
+                  availability: prod.offers?.availability || '',
+                });
+              }
+            }
+          }
+        } catch { /* skip */ }
+        idx = end;
+      }
+      if (items.length > 0) return items;
+
+      if (proxyUrl) _clearCache(proxyUrl);
+      return null;
+    } catch {
+      if (proxyUrl) _clearCache(proxyUrl);
+      return null;
+    }
+  }
+
+  async fetchProducts() {
+    const products = {};
+
+    // Hybrid search: stealth first (free), ScraperAPI fallback (5 credits each)
+    const proxyUrl = getProxyUrl('residential');
+    const failedQueries = []; // queries that need ScraperAPI fallback
+    let stealthHits = 0;
+
+    // Step 1: Try all queries via stealth (free)
+    const stealthResults = await Promise.allSettled(
+      this.searchQueries.map(query =>
+        this._stealthSearch(query).then(items => ({ query, items }))
+      )
+    );
+
+    for (const result of stealthResults) {
+      if (result.status === 'rejected') {
+        failedQueries.push(result.reason?.query || 'unknown');
+        continue;
+      }
+      const { query, items } = result.value;
+      if (!items || items.length === 0) {
+        failedQueries.push(query);
+        continue;
+      }
+
+      stealthHits++;
+      this._processSearchItems(items, products);
+      logger.info(`Walmart: "${query}" — ${items.length} results (stealth, free)`);
     }
 
+    // Step 2: ScraperAPI fallback for failed queries only
+    if (failedQueries.length > 0 && isConfigured()) {
+      const scraperResults = await Promise.allSettled(
+        failedQueries.map(query =>
+          walmartSearch(query, { tld: 'ca', retailerId: this.id })
+            .then(data => ({ query, data }))
+        )
+      );
+
+      for (const result of scraperResults) {
+        if (result.status === 'rejected') {
+          logger.warn(`Walmart: search failed: ${result.reason.message}`);
+          continue;
+        }
+        const { query, data } = result.value;
+        if (!data) continue;
+
+        const results = data.items || data.results || data.search_results || [];
+        if (results.length === 0) continue;
+
+        this._processSearchItems(results, products);
+        logger.info(`Walmart: "${query}" — ${results.length} results (scraper fallback, 5 credits)`);
+      }
+    }
+
+    logger.info(`Walmart: ${stealthHits}/${this.searchQueries.length} queries free (stealth), ${failedQueries.length} used ScraperAPI. ${Object.keys(products).length} total products.`);
+
     return products;
+  }
+
+  /**
+   * Process search result items into classified products.
+   * Shared by both stealth and ScraperAPI search paths.
+   */
+  _processSearchItems(items, products) {
+    for (const item of items) {
+      try {
+        if (!item.name && !item.title) continue;
+        const name = item.name || item.title;
+
+        // Skip third-party sellers (#9)
+        const seller = (item.seller || item.sold_by || item.sellerName || '').toLowerCase();
+        if (seller && !seller.includes('walmart')) continue;
+
+        const sku = item.id || item.product_id || item.us_item_id || item.usItemId ||
+          name.replace(/\s+/g, '-').toLowerCase().slice(0, 50);
+
+        const price = typeof item.price === 'number' ? item.price :
+          normalizePrice(item.price_string || item.price);
+
+        const url = item.url || item.product_url || item.link || item.canonicalUrl ||
+          `${this.url}/ip/${sku}`;
+        const fullUrl = url.startsWith('http') ? url : `${this.url}${url}`;
+
+        const image = item.image || item.thumbnail || '';
+        const avail = (item.availability || item.availabilityStatus || '').toLowerCase();
+        const inStock = avail ? avail.includes('in stock') || avail.includes('instock') || avail.includes('in_stock') : false;
+
+        const product = this.classify({
+          sku: String(sku),
+          name,
+          price,
+          currency: 'CAD',
+          url: fullUrl,
+          image,
+          inStock,
+          canAddToCart: inStock,
+          shipsToHome: true,
+        });
+
+        products[product.sku] = product;
+      } catch (err) {
+        logger.debug(`Walmart: failed to parse item: ${err.message}`);
+      }
+    }
   }
 }
 
