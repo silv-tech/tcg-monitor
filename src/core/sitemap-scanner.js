@@ -4,6 +4,9 @@
  * Fetches Walmart's 1P product sitemaps every 12h, diffs against Redis,
  * and fires EARLY_SKU events for new TCG products found before search indexing.
  *
+ * Uses the same stealth HTTP (impit + residential proxy) that already
+ * bypasses Walmart's PerimeterX in our Walmart adapter.
+ *
  * Sitemap structure:
  *   https://www.walmart.ca/sitemap-product-1p-en.xml  (index → 5 child .xml.gz files)
  *   Child sitemaps are gzipped XML containing ~40K product URLs each.
@@ -15,11 +18,19 @@
 
 const { promisify } = require('util');
 const zlib = require('zlib');
-const fetch = require('node-fetch');
 const logger = require('../monitoring/logger');
 const state = require('./state');
+const { stealthGet, _clearCache } = require('../utils/stealth-http');
+const { getProxyUrl } = require('./proxy');
 
 const gunzip = promisify(zlib.gunzip);
+
+// Lazy-load impit for binary fetches (gzipped sitemaps)
+let _impitModule;
+async function getImpit() {
+  if (!_impitModule) _impitModule = await import('impit');
+  return _impitModule.Impit;
+}
 
 const SITEMAP_INDEX_URL = 'https://www.walmart.ca/sitemap-product-1p-en.xml';
 const REDIS_KNOWN_KEY = 'tcg:sitemap:known';
@@ -89,50 +100,80 @@ function extractLocs(xml) {
 }
 
 /**
- * Fetch the sitemap index (plain XML) and return child sitemap URLs.
+ * Fetch the sitemap index (plain XML) using stealth HTTP + residential proxy.
+ * Same bypass that already works for Walmart search/product pages.
  */
 async function fetchSitemapIndex() {
+  const proxyUrl = getProxyUrl('residential');
+
   try {
-    const res = await fetch(SITEMAP_INDEX_URL, {
+    const xml = await stealthGet(SITEMAP_INDEX_URL, {
+      proxyUrl,
+      maxRetries: 3,
+      timeoutMs: 30000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'application/xml, text/xml, */*',
       },
-      timeout: 30000,
     });
 
-    if (!res.ok) {
-      logger.error(`Sitemap index fetch failed: HTTP ${res.status}`);
+    if (!xml || xml.length < 100) {
+      logger.error('Early SKU: Sitemap index response too short or empty');
       return [];
     }
 
-    const xml = await res.text();
-    return extractLocs(xml);
+    const locs = extractLocs(xml);
+    if (locs.length === 0) {
+      // Log first 500 chars for debugging
+      logger.error(`Early SKU: No <loc> tags found in sitemap index (${xml.length} chars). Preview: ${xml.substring(0, 500)}`);
+    }
+    return locs;
   } catch (err) {
-    logger.error(`Sitemap index fetch error: ${err.message}`);
+    logger.error(`Early SKU: Sitemap index fetch error: ${err.message}`);
+    if (proxyUrl) _clearCache(proxyUrl);
     return [];
   }
 }
 
 /**
- * Fetch a gzipped sitemap (.xml.gz) and return product URLs.
+ * Fetch a gzipped sitemap (.xml.gz) using impit + residential proxy.
+ * Needs raw binary buffer access for gzip decompression.
  */
 async function fetchSitemapGz(url) {
+  const proxyUrl = getProxyUrl('residential');
+
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-      },
-      timeout: 60000,
+    const Impit = await getImpit();
+    const impit = new Impit({
+      browser: 'chrome',
+      proxyUrl: proxyUrl || undefined,
+      ignoreTlsErrors: false,
     });
 
-    if (!res.ok) {
-      logger.warn(`Sitemap fetch failed: HTTP ${res.status} — ${url}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+
+    const response = await impit.fetch(url, {
+      headers: {
+        'Accept': '*/*',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Upgrade-Insecure-Requests': '1',
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status !== 200) {
+      logger.warn(`Early SKU: Sitemap fetch HTTP ${response.status} — ${url}`);
       return [];
     }
 
-    const buffer = await res.buffer();
+    const arrayBuf = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
 
     // Decompress gzip
     let xmlText;
@@ -140,12 +181,13 @@ async function fetchSitemapGz(url) {
       const decompressed = await gunzip(buffer);
       xmlText = decompressed.toString('utf-8');
     } catch {
+      // Might already be decompressed (impit handles content-encoding)
       xmlText = buffer.toString('utf-8');
     }
 
     return extractLocs(xmlText);
   } catch (err) {
-    logger.warn(`Sitemap fetch error: ${err.message} — ${url}`);
+    logger.warn(`Early SKU: Sitemap fetch error: ${err.message} — ${url}`);
     return [];
   }
 }
