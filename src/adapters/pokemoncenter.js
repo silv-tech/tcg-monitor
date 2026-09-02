@@ -1,7 +1,9 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { normalizePrice } = require('../utils/helpers');
+const { normalizePrice, sleep } = require('../utils/helpers');
 const { FAILURE_REASONS, classifyError } = require('../core/failure-reasons');
+const { stealthGet } = require('../utils/stealth-http');
+const { getProxyUrl } = require('../core/proxy');
 
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
@@ -28,29 +30,45 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     // Product cache from sitemap — persists across polls
     this.sitemapProducts = new Map(); // sku -> { url, name }
-    this.availabilityCache = new Map(); // sku -> { inStock, price, image }
+    this.availabilityCache = new Map(); // sku -> { inStock, price, image, checkedAt }
     this.lastSitemapScan = 0;
-    this.SITEMAP_INTERVAL = 30 * 60 * 1000; // 30 minutes
+    this.SITEMAP_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours (products don't change that fast)
 
-    // Availability check rotation — ScraperAPI costs 25 credits/check, keep low
+    // Availability check rotation
     this.checkIndex = 0;
-    this.CHECKS_PER_POLL = 15;
+    this.CHECKS_PER_POLL = 10;
+
+    // Track consecutive full-poll failures to avoid noisy error logging
+    this._consecutiveFailures = 0;
   }
 
   isChallengePage(html) {
+    if (!html || html.length < 500) return true; // Too short = challenge or error
     return html.includes('Pardon Our Interruption') ||
       html.includes('distil_referrer') ||
       html.includes('Incapsula') ||
+      html.includes('Access Denied') ||
+      html.includes('Please verify you are a human') ||
       (html.length < 5000 && !html.includes('<loc>') && !html.includes('<html'));
   }
 
   async fetchProducts() {
     const products = {};
 
-    // Phase 1: Discover products from sitemap (every 30 min)
+    // Phase 1: Discover products from sitemap (every 4 hours)
+    // NEVER throw if sitemap fails — use cached products instead
     if (Date.now() - this.lastSitemapScan > this.SITEMAP_INTERVAL || this.sitemapProducts.size === 0) {
-      await this.scanSitemap();
-      this.lastSitemapScan = Date.now();
+      try {
+        await this.scanSitemap();
+        this.lastSitemapScan = Date.now();
+      } catch (err) {
+        if (this.sitemapProducts.size > 0) {
+          logger.warn(`Pokemon Center: sitemap failed (${err.message}), using ${this.sitemapProducts.size} cached products`);
+        } else {
+          // No cached products — this is the only case we propagate the error
+          throw new Error(`Pokemon Center: no products — sitemap failed: ${err.message}`);
+        }
+      }
     }
 
     if (this.sitemapProducts.size === 0) {
@@ -70,6 +88,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       try {
         const { data, failReason } = await this.checkProductAvailability(sku, meta);
         if (data) {
+          data.checkedAt = Date.now();
           this.availabilityCache.set(sku, data);
           checked++;
         } else if (failReason) {
@@ -78,14 +97,15 @@ class PokemonCenterAdapter extends BaseAdapter {
       } catch (err) {
         const reason = classifyError(err);
         failureCounts[reason] = (failureCounts[reason] || 0) + 1;
-        logger.debug(`Pokemon Center: check failed for ${sku}: ${err.message}`);
       }
+      // Small delay between checks to avoid triggering rate limits
+      if (i < batchSize - 1) await sleep(500 + Math.floor(Math.random() * 1000));
     }
     this.checkIndex = (start + batchSize) % entries.length;
 
     // Phase 3: Build full product list — use cached availability for all products
+    // Keep last-known availability (even if stale) — prevents false OOS events
     for (const [sku, meta] of this.sitemapProducts) {
-      // Default to NOT in stock for unchecked products — avoids false restock alerts
       const avail = this.availabilityCache.get(sku) || { inStock: false, price: null, image: '' };
       products[sku] = this.classify({
         sku,
@@ -100,17 +120,49 @@ class PokemonCenterAdapter extends BaseAdapter {
       });
     }
 
-    const failureSummary = Object.keys(failureCounts).length > 0
-      ? Object.entries(failureCounts).map(([r, c]) => `${r}:${c}`).join(', ')
-      : 'none';
-    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} checked) — failures: ${failureSummary}`);
+    // Track consecutive failures
+    if (checked === 0 && batchSize > 0) {
+      this._consecutiveFailures++;
+      if (this._consecutiveFailures <= 3 || this._consecutiveFailures % 10 === 0) {
+        const failureSummary = Object.entries(failureCounts).map(([r, c]) => `${r}:${c}`).join(', ');
+        logger.warn(`Pokemon Center: 0/${batchSize} checks succeeded (attempt ${this._consecutiveFailures}) — ${failureSummary}`);
+      }
+    } else {
+      if (this._consecutiveFailures > 0) {
+        logger.info(`Pokemon Center: recovered after ${this._consecutiveFailures} failed polls`);
+      }
+      this._consecutiveFailures = 0;
+    }
+
+    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} fresh, ${this.availabilityCache.size} cached)`);
     return products;
   }
 
   async scanSitemap() {
     let xml;
 
-    // Try cookieFetch first (solves Incapsula once, caches cookies for reuse)
+    // Method 1: Stealth HTTP (impit) — fastest, free, works if sitemap isn't behind challenge
+    try {
+      const proxyUrl = getProxyUrl('residential');
+      xml = await stealthGet(this.sitemapUrl, {
+        proxyUrl,
+        maxRetries: 2,
+        timeoutMs: 20000,
+        headers: {
+          'Accept': 'application/xml, text/xml, */*',
+        },
+      });
+      if (xml && xml.includes('<loc>') && !this.isChallengePage(xml)) {
+        logger.info('Pokemon Center: sitemap fetched via stealth HTTP (free)');
+        this._parseSitemap(xml);
+        return;
+      }
+      logger.debug('Pokemon Center: stealth HTTP sitemap returned challenge/empty');
+    } catch (err) {
+      logger.debug(`Pokemon Center: stealth HTTP sitemap failed: ${err.message}`);
+    }
+
+    // Method 2: Cookie-assisted fetch (Patchright cookies + impit)
     try {
       xml = await this.cookieFetch(this.sitemapUrl, {
         domain: this.domain,
@@ -118,33 +170,40 @@ class PokemonCenterAdapter extends BaseAdapter {
         challengeDetector: (h) => !h.includes('<loc>') || this.isChallengePage(h),
         timeoutMs: 45000,
       });
-    } catch (err) {
-      logger.debug(`Pokemon Center: cookieFetch sitemap failed: ${err.message}`);
-      // Fall back to protectedFetch (browser → ScraperAPI)
-      try {
-        xml = await this.protectedFetch(this.sitemapUrl, {
-          timeoutMs: 45000,
-          challengeDetector: (h) => !h.includes('<loc>') || this.isChallengePage(h),
-          scraperOpts: { render: false, ultraPremium: true },
-        });
-      } catch (err2) {
-        if (this.sitemapProducts.size > 0) {
-          logger.warn(`Pokemon Center: sitemap fetch failed, using ${this.sitemapProducts.size} cached products`);
-          return;
-        }
-        throw new Error(`Sitemap unreachable: ${err2.message}`);
-      }
-    }
-
-    if (!xml || !xml.includes('<loc>') || this.isChallengePage(xml)) {
-      if (this.sitemapProducts.size > 0) {
-        logger.warn('Pokemon Center: sitemap returned challenge/empty, using cached products');
+      if (xml && xml.includes('<loc>') && !this.isChallengePage(xml)) {
+        logger.info('Pokemon Center: sitemap fetched via cookie fetch');
+        this._parseSitemap(xml);
         return;
       }
-      throw new Error('Sitemap returned challenge page — all methods failed');
+    } catch (err) {
+      logger.debug(`Pokemon Center: cookieFetch sitemap failed: ${err.message}`);
     }
 
-    // Parse product URLs from sitemap
+    // Method 3: protectedFetch (browser → ScraperAPI)
+    try {
+      xml = await this.protectedFetch(this.sitemapUrl, {
+        timeoutMs: 45000,
+        challengeDetector: (h) => !h.includes('<loc>') || this.isChallengePage(h),
+        scraperOpts: { render: false, ultraPremium: true },
+      });
+      if (xml && xml.includes('<loc>') && !this.isChallengePage(xml)) {
+        logger.info('Pokemon Center: sitemap fetched via protectedFetch');
+        this._parseSitemap(xml);
+        return;
+      }
+    } catch (err) {
+      logger.debug(`Pokemon Center: protectedFetch sitemap failed: ${err.message}`);
+    }
+
+    // All methods failed — keep existing cached products
+    if (this.sitemapProducts.size > 0) {
+      logger.warn(`Pokemon Center: all sitemap methods failed, keeping ${this.sitemapProducts.size} cached products`);
+      return;
+    }
+    throw new Error('Sitemap unreachable and no cached products');
+  }
+
+  _parseSitemap(xml) {
     const urlMatches = xml.match(/<loc>([^<]+)<\/loc>/g) || [];
     const newProducts = new Map();
 
@@ -169,51 +228,67 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     if (newProducts.size > 0) {
       this.sitemapProducts = newProducts;
+      logger.info(`Pokemon Center: sitemap parsed — ${newProducts.size} TCG products (${urlMatches.length} total URLs)`);
+    } else if (urlMatches.length > 0) {
+      logger.warn(`Pokemon Center: sitemap had ${urlMatches.length} URLs but 0 matched TCG keywords`);
     }
-
-    logger.info(`Pokemon Center: sitemap found ${newProducts.size} TCG products (${urlMatches.length} total URLs)`);
   }
 
   async checkProductAvailability(sku, meta) {
-    let html;
-
-    // Use protectedFetch: tries browser first (free), falls back to ScraperAPI ultra_premium
-    // cookieFetch can't bypass Incapsula on product pages, but ScraperAPI ultra_premium can
+    // Method 1: Stealth HTTP (impit) — free, fast
+    // Many product pages serve JSON-LD and __NEXT_DATA__ even without JS execution
     try {
-      html = await this.protectedFetch(meta.url, {
+      const proxyUrl = getProxyUrl('residential');
+      const html = await stealthGet(meta.url, {
+        proxyUrl,
+        maxRetries: 1,
+        timeoutMs: 15000,
+      });
+
+      if (html && !this.isChallengePage(html)) {
+        const data = this._parseProductHtml(html);
+        if (data) return { data, failReason: null };
+      }
+    } catch {
+      // Stealth failed — try next method
+    }
+
+    // Method 2: protectedFetch (browser → ScraperAPI) — expensive fallback
+    try {
+      const html = await this.protectedFetch(meta.url, {
         timeoutMs: 30000,
         challengeDetector: (h) => this.isChallengePage(h),
         scraperOpts: { ultraPremium: true },
       });
+
+      if (!html) {
+        return { data: null, failReason: FAILURE_REASONS.EMPTY_RESPONSE };
+      }
+      if (this.isChallengePage(html)) {
+        return { data: null, failReason: FAILURE_REASONS.BOT_CHALLENGE };
+      }
+
+      const data = this._parseProductHtml(html);
+      if (data) return { data, failReason: null };
+
+      return { data: null, failReason: FAILURE_REASONS.NO_MARKERS };
     } catch (err) {
       const reason = classifyError(err);
-      logger.warn(`Pokemon Center: fetch failed for ${sku}`, { reason, url: meta.url, error: err.message });
       return { data: null, failReason: reason };
     }
+  }
 
-    if (!html) {
-      logger.debug(`Pokemon Center: empty response for ${sku}`);
-      return { data: null, failReason: FAILURE_REASONS.EMPTY_RESPONSE };
-    }
-    if (this.isChallengePage(html)) {
-      logger.debug(`Pokemon Center: challenge page for ${sku}`);
-      return { data: null, failReason: FAILURE_REASONS.BOT_CHALLENGE };
-    }
-
+  _parseProductHtml(html) {
     // Try JSON-LD first (most reliable)
     const jsonLd = this.parseJsonLd(html);
-    if (jsonLd) return { data: jsonLd, failReason: null };
+    if (jsonLd) return jsonLd;
 
     // Try __NEXT_DATA__ embedded JSON
     const nextData = this.parseNextData(html);
-    if (nextData) return { data: nextData, failReason: null };
+    if (nextData) return nextData;
 
     // Fallback: HTML text markers
-    const markers = this.parseHtmlMarkers(html);
-    if (markers) return { data: markers, failReason: null };
-
-    logger.debug(`Pokemon Center: no parseable data for ${sku}`);
-    return { data: null, failReason: FAILURE_REASONS.NO_MARKERS };
+    return this.parseHtmlMarkers(html);
   }
 
   parseJsonLd(html) {

@@ -4,7 +4,15 @@ const state = require('../core/state');
 const logger = require('../monitoring/logger');
 
 const retailersPath = path.join(__dirname, '../config/retailers.json');
-const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes without check = stale
+
+// Stale threshold: 3x the adapter's polling interval (min 5 min, max 30 min)
+// This prevents false STALE alerts for slow-polling adapters like Pokemon Center (5 min interval)
+const MIN_STALE_MS = 5 * 60 * 1000;
+const MAX_STALE_MS = 30 * 60 * 1000;
+function getStaleThreshold(retailer) {
+  const interval = retailer.intervalMs || 60000;
+  return Math.max(MIN_STALE_MS, Math.min(interval * 3, MAX_STALE_MS));
+}
 
 // Adapter health: track consecutive 0-product polls (#4)
 // Threshold 6 accounts for ScraperAPI rate limiting (5-min intervals) — adapters
@@ -27,7 +35,8 @@ async function checkHealth() {
     const lastCheck = await state.getLastCheck(retailer.id);
     const now = Date.now();
 
-    const isStale = lastCheck && (now - lastCheck) > STALE_THRESHOLD_MS;
+    const staleThreshold = getStaleThreshold(retailer);
+    const isStale = lastCheck && (now - lastCheck) > staleThreshold;
     const zeroCount = zeroProductPolls.get(retailer.id) || 0;
     const healthy = status.healthy && !isStale && zeroCount < ZERO_PRODUCT_THRESHOLD;
 
