@@ -142,9 +142,10 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
   }
 
-  // ── Offer Id (Amazon only — different from ASIN, used for direct cart links) ──
-  if (isAmazon && event._offerListingId) {
-    embed.addFields({ name: 'Offer Id', value: `\`${event._offerListingId}\``, inline: false });
+  // ── Offer Id (Amazon OLID or Walmart offerId — per-seller, used for ATC) ──
+  const offerId = (isAmazon && event._offerListingId) ? event._offerListingId : product._offerId;
+  if (offerId) {
+    embed.addFields({ name: 'Offer Id', value: `\`${offerId}\``, inline: false });
   }
 
   // ── One Click Checkout (markdown links in embed fields — matches client's preferred format) ──

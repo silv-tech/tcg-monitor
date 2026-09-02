@@ -171,7 +171,23 @@ class WalmartAdapter extends BaseAdapter {
         shipsToHome: true,
       });
       product._watchlist = true;
-      logger.info(`Walmart: WATCHLIST ${productId} — "${name}" | inStock=${inStock} | $${price || '?'} (scraper fallback)`);
+
+      // Extract offerId from ScraperAPI offers if available
+      if (data.offers && Array.isArray(data.offers)) {
+        for (const offer of data.offers) {
+          const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
+          if ((!s || s.includes('walmart')) && offer.offerId) {
+            product._offerId = offer.offerId;
+            break;
+          }
+        }
+      }
+      // Also check root-level offerId
+      if (!product._offerId && data.offerId) {
+        product._offerId = data.offerId;
+      }
+
+      logger.info(`Walmart: WATCHLIST ${productId} — "${name}" | inStock=${inStock} | $${price || '?'} | offerId=${product._offerId || 'none'} (scraper fallback)`);
       return product;
     } catch (err) {
       logger.warn(`Walmart: watchlist ${productId} — both methods failed: ${err.message}`);
@@ -184,7 +200,19 @@ class WalmartAdapter extends BaseAdapter {
    * Walmart embeds a <script type="application/ld+json"> with Product schema.
    */
   _parseProductPage(html, productId) {
-    // Method 1: JSON-LD (most reliable)
+    // Method 1: __NEXT_DATA__ (preferred — has offerId for marketplace identification)
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (nextDataMatch) {
+      try {
+        const nextData = JSON.parse(nextDataMatch[1]);
+        const product = this._parseNextData(nextData, productId);
+        if (product) return product;
+      } catch (e) {
+        logger.debug(`Walmart: __NEXT_DATA__ parse failed for ${productId}: ${e.message}`);
+      }
+    }
+
+    // Method 2: JSON-LD fallback (no offerId available here)
     let idx = 0;
     while ((idx = html.indexOf('application/ld+json', idx)) !== -1) {
       const start = html.indexOf('>', idx) + 1;
@@ -193,7 +221,6 @@ class WalmartAdapter extends BaseAdapter {
 
       try {
         const json = JSON.parse(html.substring(start, end).trim());
-        // Could be a single Product or an array
         const productData = json['@type'] === 'Product' ? json :
           (Array.isArray(json) ? json.find(j => j['@type'] === 'Product') : null);
 
@@ -204,18 +231,6 @@ class WalmartAdapter extends BaseAdapter {
         // skip malformed JSON-LD blocks
       }
       idx = end;
-    }
-
-    // Method 2: __NEXT_DATA__ (Walmart uses Next.js)
-    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (nextDataMatch) {
-      try {
-        const nextData = JSON.parse(nextDataMatch[1]);
-        const product = this._parseNextData(nextData, productId);
-        if (product) return product;
-      } catch (e) {
-        logger.debug(`Walmart: __NEXT_DATA__ parse failed for ${productId}: ${e.message}`);
-      }
     }
 
     return null;
@@ -297,17 +312,23 @@ class WalmartAdapter extends BaseAdapter {
       if (!item || !item.name) return null;
 
       // Check seller — skip third-party
-      const sellerName = (item.seller || item.sellerName || item.soldBy || '').toLowerCase();
+      const sellerName = (item.seller || item.sellerName || item.soldBy || item.sellerDisplayName || '').toLowerCase();
       if (sellerName && !sellerName.includes('walmart')) {
-        logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party seller: "${item.seller || item.sellerName || item.soldBy}" (nextData)`);
+        logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party seller: "${item.seller || item.sellerName || item.soldBy || item.sellerDisplayName}" (nextData)`);
         return null;
       }
+
+      // Extract offerId — 32-char hex string unique to this seller's offer
+      // Check root level first, then buyBox.products[0] (Buy Box winner)
+      const offerId = item.offerId
+        || item.buyBox?.products?.[0]?.offerId
+        || null;
 
       const price = item.price?.currentPrice || item.priceInfo?.currentPrice?.price;
       const avail = (item.availabilityStatus || item.availability || '').toLowerCase();
       const inStock = avail.includes('in_stock') || avail.includes('available');
 
-      return this.classify({
+      const product = this.classify({
         sku: item.usItemId || item.id || String(productId),
         name: item.name,
         price: price || 0,
@@ -318,6 +339,14 @@ class WalmartAdapter extends BaseAdapter {
         canAddToCart: inStock,
         shipsToHome: true,
       });
+
+      // Attach offerId outside classify() — it's metadata, not a standard product field
+      if (offerId) {
+        product._offerId = offerId;
+        logger.debug(`Walmart: ${productId} offerId=${offerId}`);
+      }
+
+      return product;
     } catch {
       return null;
     }
