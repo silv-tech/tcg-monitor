@@ -61,7 +61,16 @@ class WalmartAdapter extends BaseAdapter {
         if (html.includes('not found') || html.includes('currently unavailable') || html.includes('not exist')) {
           logger.info(`Walmart: watchlist ${productId} — not found/unavailable`);
         } else {
-          logger.warn(`Walmart: watchlist ${productId} — page returned (${html.length} bytes) but couldn't parse product data`);
+          // Diagnostic: log what's in the unparseable page so we can fix the parser
+          const hasJsonLd = html.includes('application/ld+json');
+          const hasNextData = html.includes('__NEXT_DATA__');
+          const hasPreload = html.includes('__PRELOADED_STATE__') || html.includes('__INITIAL_STATE__');
+          const hasAkamai = html.includes('akamai') || html.includes('_abck') || html.includes('sensor_data');
+          const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+          const title = titleMatch ? titleMatch[1].trim() : 'no-title';
+          logger.warn(`Walmart: watchlist ${productId} — unparseable (${html.length}b) | title="${title}" | jsonLd=${hasJsonLd} nextData=${hasNextData} preload=${hasPreload} akamai=${hasAkamai}`);
+          // Log first 500 chars for debugging (one-time diagnostic)
+          logger.warn(`Walmart: watchlist ${productId} — HTML preview: ${html.substring(0, 500).replace(/\n/g, ' ')}`);
         }
         return null;
       }
