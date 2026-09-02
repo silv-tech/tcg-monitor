@@ -87,6 +87,7 @@ function buildAlertEmbed(event, tier) {
   const cfg = EVENT_CONFIG[type] || EVENT_CONFIG[EVENT_TYPES.RESTOCK];
 
   const isAmazon = product.retailerId === 'amazon';
+  const isFree = tier === 'free';
 
   const embed = new EmbedBuilder()
     .setColor(cfg.color)
@@ -125,124 +126,140 @@ function buildAlertEmbed(event, tier) {
   // Type
   embed.addFields({ name: 'Type', value: cfg.label, inline: true });
 
-  // SKU / ASIN
-  if (product.sku) {
-    embed.addFields({ name: isAmazon ? 'ASIN' : 'SKU', value: String(product.sku), inline: true });
-  }
-
-  // ── Stock ──
-  if (product.stockCount != null && product.stockCount > 0) {
-    embed.addFields({ name: 'Stock', value: String(product.stockCount), inline: true });
-  } else {
-    embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
-  }
-
-  // ── Variant ID (Shopify only) ──
-  if (product._variantId) {
-    embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
-  }
-
-  // ── Offer Id (Amazon OLID or Walmart offerId — per-seller, used for ATC) ──
-  const offerId = (isAmazon && event._offerListingId) ? event._offerListingId : product._offerId;
-  if (offerId) {
-    embed.addFields({ name: 'Offer Id', value: `\`${offerId}\``, inline: false });
-  }
-
-  // ── One Click Checkout (markdown links in embed fields — matches client's preferred format) ──
-  if (isAmazon && product.sku) {
-    const asin = String(product.sku);
-    const atcBase = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
-    embed.addFields(
-      { name: 'One Click Checkout', value: `[ATCx1](${atcBase}1) | [ATCx2](${atcBase}2)`, inline: false },
-      { name: 'One Click Checkout', value: `[ATCx3](${atcBase}3) | [ATCx12](${atcBase}12)`, inline: false },
-    );
-  } else if (product._variantId && product.url) {
-    try {
-      const origin = new URL(product.url).origin;
-      const vid = product._variantId;
-      embed.addFields(
-        { name: 'One Click Checkout', value: `[ATCx1](${origin}/cart/${vid}:1) | [ATCx2](${origin}/cart/${vid}:2)`, inline: false },
-        { name: 'One Click Checkout', value: `[ATCx3](${origin}/cart/${vid}:3)`, inline: false },
-      );
-    } catch {
-      // Invalid URL — skip ATC
+  // ── PAID-ONLY FIELDS ──────────────────────────────────────────
+  if (!isFree) {
+    // SKU / ASIN
+    if (product.sku) {
+      embed.addFields({ name: isAmazon ? 'ASIN' : 'SKU', value: String(product.sku), inline: true });
     }
+
+    // Stock
+    if (product.stockCount != null && product.stockCount > 0) {
+      embed.addFields({ name: 'Stock', value: String(product.stockCount), inline: true });
+    } else {
+      embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
+    }
+
+    // Variant ID (Shopify only)
+    if (product._variantId) {
+      embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
+    }
+
+    // Offer Id (Amazon OLID or Walmart offerId — per-seller, used for ATC)
+    const offerId = (isAmazon && event._offerListingId) ? event._offerListingId : product._offerId;
+    if (offerId) {
+      embed.addFields({ name: 'Offer Id', value: `\`${offerId}\``, inline: false });
+    }
+
+    // One Click Checkout
+    if (isAmazon && product.sku) {
+      const asin = String(product.sku);
+      const atcBase = `https://www.amazon.ca/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=`;
+      embed.addFields(
+        { name: 'One Click Checkout', value: `[ATCx1](${atcBase}1) | [ATCx2](${atcBase}2)`, inline: false },
+        { name: 'One Click Checkout', value: `[ATCx3](${atcBase}3) | [ATCx12](${atcBase}12)`, inline: false },
+      );
+    } else if (product._variantId && product.url) {
+      try {
+        const origin = new URL(product.url).origin;
+        const vid = product._variantId;
+        embed.addFields(
+          { name: 'One Click Checkout', value: `[ATCx1](${origin}/cart/${vid}:1) | [ATCx2](${origin}/cart/${vid}:2)`, inline: false },
+          { name: 'One Click Checkout', value: `[ATCx3](${origin}/cart/${vid}:3)`, inline: false },
+        );
+      } catch {
+        // Invalid URL — skip ATC
+      }
+    }
+
+    // Links (store-specific + universal)
+    const encodedName = encodeURIComponent(product.name || '');
+    const links = [];
+    if (isAmazon && product.sku) {
+      const asin = String(product.sku);
+      links.push(
+        `[Login](https://www.amazon.ca/ap/signin)`,
+        `[Cart](https://www.amazon.ca/gp/cart/view.html)`,
+        `[Amazon Business](https://www.amazon.ca/business)`,
+        `[Keepa](https://keepa.com/#!product/6-${asin})`,
+      );
+    } else if (product.retailerId === 'walmart') {
+      links.push(
+        `[Login](https://www.walmart.ca/sign-in)`,
+        `[Cart](https://www.walmart.ca/cart)`,
+      );
+      if (product.sku) links.push(`[Product](https://www.walmart.ca/en/ip/${product.sku})`);
+    } else if (product.retailerId === 'costco') {
+      links.push(
+        `[Login](https://www.costco.ca/LogonForm)`,
+        `[Cart](https://www.costco.ca/AjaxOrderItemDisplayView)`,
+      );
+    } else if (product.retailerId === 'pokemoncenter') {
+      links.push(
+        `[Login](https://www.pokemoncenter.com/login)`,
+        `[Cart](https://www.pokemoncenter.com/cart)`,
+      );
+    } else if (product.retailerId === 'bestbuy') {
+      links.push(
+        `[Login](https://www.bestbuy.ca/identity/global/signin)`,
+        `[Cart](https://www.bestbuy.ca/en-ca/basket)`,
+      );
+      if (product.sku) links.push(`[Product](https://www.bestbuy.ca/en-ca/product/${product.sku})`);
+    }
+    links.push(
+      `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
+      `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
+    );
+    const linksValue = truncate(links.join(' | '), 1024);
+    embed.addFields({ name: 'Links', value: linksValue, inline: false });
+
+    // Restock History
+    const restockValue = buildRestockHistoryValue(event._restockHistory);
+    if (restockValue) {
+      embed.addFields({ name: 'Restock History', value: restockValue, inline: false });
+    }
+
+    // Price History
+    const priceValue = buildPriceHistoryValue(event._priceHistory);
+    if (priceValue) {
+      embed.addFields({ name: 'Price History', value: priceValue, inline: false });
+    }
+
+    // Cross-Retailer Price Check
+    const crossValue = buildCrossRetailerValue(event._crossRetailer);
+    if (crossValue) {
+      embed.addFields({ name: 'Also In Stock', value: crossValue, inline: false });
+    }
+  } else {
+    // ── FREE TIER: minimal links ──
+    const encodedName = encodeURIComponent(product.name || '');
+    const freeLinks = [
+      `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
+      `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
+    ];
+    embed.addFields({ name: 'Links', value: freeLinks.join(' | '), inline: false });
+
+    // Upgrade CTA
+    embed.addFields({ name: '\u200B', value: '\u{1F512} *Upgrade to Premium for ATC links, stock counts, restock history, price tracking & 30+ specialty stores*', inline: false });
   }
 
-  // ── Links (store-specific + universal) ──
-  const encodedName = encodeURIComponent(product.name || '');
-  const links = [];
-  if (isAmazon && product.sku) {
-    const asin = String(product.sku);
-    links.push(
-      `[Login](https://www.amazon.ca/ap/signin)`,
-      `[Cart](https://www.amazon.ca/gp/cart/view.html)`,
-      `[Amazon Business](https://www.amazon.ca/business)`,
-      `[Keepa](https://keepa.com/#!product/6-${asin})`,
-    );
-  } else if (product.retailerId === 'walmart') {
-    links.push(
-      `[Login](https://www.walmart.ca/sign-in)`,
-      `[Cart](https://www.walmart.ca/cart)`,
-    );
-    if (product.sku) links.push(`[Product](https://www.walmart.ca/en/ip/${product.sku})`);
-  } else if (product.retailerId === 'costco') {
-    links.push(
-      `[Login](https://www.costco.ca/LogonForm)`,
-      `[Cart](https://www.costco.ca/AjaxOrderItemDisplayView)`,
-    );
-  } else if (product.retailerId === 'pokemoncenter') {
-    links.push(
-      `[Login](https://www.pokemoncenter.com/login)`,
-      `[Cart](https://www.pokemoncenter.com/cart)`,
-    );
-  } else if (product.retailerId === 'bestbuy') {
-    links.push(
-      `[Login](https://www.bestbuy.ca/identity/global/signin)`,
-      `[Cart](https://www.bestbuy.ca/en-ca/basket)`,
-    );
-    if (product.sku) links.push(`[Product](https://www.bestbuy.ca/en-ca/product/${product.sku})`);
-  }
-  links.push(
-    `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
-    `[Ebay Sales](https://www.ebay.ca/sch/i.html?_nkw=${encodedName}&LH_Complete=1&LH_Sold=1)`,
-  );
-  const linksValue = truncate(links.join(' | '), 1024);
-  embed.addFields({ name: 'Links', value: linksValue, inline: false });
-
-  // ── Restock History ──
-  const restockValue = buildRestockHistoryValue(event._restockHistory);
-  if (restockValue) {
-    embed.addFields({ name: 'Restock History', value: restockValue, inline: false });
-  }
-
-  // ── Price History ──
-  const priceValue = buildPriceHistoryValue(event._priceHistory);
-  if (priceValue) {
-    embed.addFields({ name: 'Price History', value: priceValue, inline: false });
-  }
-
-  // ── Cross-Retailer Price Check ──
-  const crossValue = buildCrossRetailerValue(event._crossRetailer);
-  if (crossValue) {
-    embed.addFields({ name: 'Also In Stock', value: crossValue, inline: false });
-  }
-
-  // ── Footer with detection speed + freshness ──
+  // ── Footer ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
   let footerText = `Nocturne Monitors  ·  ${tierLabel}`;
-  if (event._detectedAt) {
+  // Detection speed + freshness — paid only
+  if (!isFree && event._detectedAt) {
     const speedMs = Date.now() - event._detectedAt;
     const speedSec = (speedMs / 1000).toFixed(1);
     footerText += `  ·  \u26A1 ${speedSec}s`;
   }
-  const freshness = formatFreshness(event._lastCheckedAt);
-  if (freshness) {
-    footerText += `  ·  Checked: ${freshness}`;
+  if (!isFree) {
+    const freshness = formatFreshness(event._lastCheckedAt);
+    if (freshness) {
+      footerText += `  ·  Checked: ${freshness}`;
+    }
   }
   embed.setFooter({ text: footerText });
 
-  // No Discord buttons — all ATC links are markdown in embed fields (client preferred format)
   const components = [];
 
   return { embed, components };

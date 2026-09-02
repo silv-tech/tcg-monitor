@@ -274,8 +274,17 @@ class DeliveryQueue {
       logger.info(`Paid alert sent in ${latency}ms (e2e: ${e2eLatency}ms): ${event.type} — ${product.name}`);
     }
 
-    // --- FREE TIER: send after delay (best-effort — lost on restart, paid tier already delivered) ---
-    if (channelsConfig?.tiers?.free?.enabled === false) return; // Free tier disabled by client
+    // --- FREE TIER: delayed, limited events, big stores only ---
+    if (channelsConfig?.tiers?.free?.enabled === false) return;
+
+    // Free tier only gets high-impact events (no price drops, cart updates, shipping)
+    const FREE_EVENTS = new Set(['RESTOCK', 'NEW_SKU', 'PREORDER_LIVE']);
+    if (!FREE_EVENTS.has(event.type)) return;
+
+    // Free tier only gets big 5 retailers (specialty Shopify stores are paid-only)
+    const FREE_RETAILERS = new Set(['amazon', 'walmart', 'bestbuy', 'costco', 'pokemoncenter']);
+    if (!FREE_RETAILERS.has(retailerId)) return;
+
     const freeChannel = this.resolveFreeChannel(category);
     if (freeChannel) {
       const delay = channelsConfig?.tiers?.free?.delay || config.delivery.freeTierDelayMs;

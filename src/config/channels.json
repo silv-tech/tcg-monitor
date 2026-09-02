@@ -12,8 +12,8 @@
       }
     },
     "free": {
-      "delay": 45000,
-      "enabled": false,
+      "delay": 180000,
+      "enabled": true,
       "channels": {
         "default": "",
         "pokemon": "",
