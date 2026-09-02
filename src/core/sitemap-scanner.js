@@ -1,19 +1,16 @@
 /**
- * Early SKU Detection — Walmart CA sitemap scanner.
+ * Early SKU Detection — Multi-retailer sitemap scanner.
  *
- * Fetches Walmart's 1P product sitemaps every 12h, diffs against Redis,
- * and fires EARLY_SKU events for new TCG products found before search indexing.
+ * Scans retailer sitemaps every 12h, diffs against Redis baselines,
+ * and fires EARLY_SKU events for new TCG products found before they
+ * appear in search results or get stocked.
+ *
+ * Supported retailers:
+ *   - Walmart CA: index → 5 gzipped child sitemaps (~218K product URLs)
+ *   - Pokemon Center: single plain XML sitemap (~34K product URLs)
  *
  * Uses the same stealth HTTP (impit + residential proxy) that already
- * bypasses Walmart's PerimeterX in our Walmart adapter.
- *
- * Sitemap structure:
- *   https://www.walmart.ca/sitemap-product-1p-en.xml  (index → 5 child .xml.gz files)
- *   Child sitemaps are gzipped XML containing ~40K product URLs each.
- *
- * Redis keys:
- *   tcg:sitemap:known — Set of all previously-seen product URLs
- *   tcg:sitemap:lastrun — timestamp of last successful scan
+ * bypasses bot protection in our adapters.
  */
 
 const { promisify } = require('util');
@@ -32,63 +29,46 @@ async function getImpit() {
   return _impitModule.Impit;
 }
 
-const SITEMAP_INDEX_URL = 'https://www.walmart.ca/sitemap-product-1p-en.xml';
-const REDIS_KNOWN_KEY = 'tcg:sitemap:known';
-const REDIS_LASTRUN_KEY = 'tcg:sitemap:lastrun';
 const SCAN_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
-// Slug tokens matched against the product-name portion of URLs only.
-const SLUG_TOKENS = [
-  // Pokemon TCG (compound to avoid matching clothing/toys/food)
+// ─── Walmart config ──────────────────────────────────────────────
+const WALMART_INDEX_URL = 'https://www.walmart.ca/sitemap-product-1p-en.xml';
+const WALMART_REDIS_KEY = 'tcg:sitemap:walmart:known';
+
+const WALMART_SLUG_TOKENS = [
   'pokemon-tcg', 'pokemon-trading-card', 'pokemon-booster', 'pokemon-elite-trainer',
   'pokemon-collection-box', 'pokemon-tin', 'pokemon-blister', 'pokemon-premium',
   'pokemon-build-battle', 'pokemon-bundle', 'pokemon-ex-box', 'pokemon-ex-premium',
   'pokemon-ex-collection', 'pokemon-v-box', 'pokemon-vmax', 'pokemon-vstar',
   'pok-mon-tcg', 'pok-mon-booster', 'pok-mon-elite-trainer', 'pok-mon-collection',
   'pok-mon-premium', 'pokmon-tcg',
-  // Set-specific slugs (unique enough standalone)
   'prismatic-evolutions', 'surging-sparks', 'twilight-masquerade',
   'shrouded-fable', 'stellar-crown', 'paldea-evolved', 'obsidian-flames',
   'paradox-rift', 'temporal-forces', 'journey-together', 'destined-rivals',
-  // Other TCG brands
   'one-piece-card', 'one-piece-tcg', 'yu-gi-oh', 'magic-gathering', 'lorcana',
 ];
 
-/**
- * Extract the product slug from a Walmart URL (excluding the SKU ID).
- * URL: https://www.walmart.ca/en/ip/Product-Name-Here/6000XXXXXXXXX
- * Returns: "product-name-here"
- */
-function extractSlug(url) {
-  const parts = url.split('/ip/');
-  if (parts.length < 2) return '';
-  const segments = parts[1].replace(/\/$/, '').split('/');
-  return segments.length >= 2 ? segments[0].toLowerCase() : '';
-}
+// ─── Pokemon Center config ───────────────────────────────────────
+const PC_SITEMAP_URL = 'https://www.pokemoncenter.com/sitemaps/products.xml';
+const PC_REDIS_KEY = 'tcg:sitemap:pokemoncenter:known';
 
-/**
- * Extract SKU from a Walmart URL (last path segment).
- */
-function extractSku(url) {
-  const clean = url.split('?')[0].split('#')[0].replace(/\/$/, '');
-  const segments = clean.split('/');
-  const last = segments[segments.length - 1];
-  return /^[A-Za-z0-9]{10,15}$/.test(last) ? last : null;
-}
+const PC_TCG_KEYWORDS = [
+  'pokemon-tcg-', '-tcg-',
+  'booster-box', 'booster-bundle', 'elite-trainer-box',
+  'collection-box', 'special-collection', 'premium-collection',
+  'build-and-battle', 'league-battle-deck', 'ultra-premium',
+  'poster-collection', 'tech-sticker-collection',
+  'combined-powers', 'super-premium',
+  'scarlet-violet', 'prismatic-evolutions',
+  'surging-sparks', 'stellar-crown', 'twilight-masquerade',
+  'shrouded-fable', 'paldean-fates', 'paradox-rift',
+  'temporal-forces', 'obsidian-flames', 'paldea-evolved',
+  'astral-radiance', 'brilliant-stars', 'lost-origin',
+  'silver-tempest', 'crown-zenith', 'journey-together', 'destined-rivals',
+];
 
-/**
- * Check if a URL's slug matches any TCG token.
- */
-function isTCGUrl(url) {
-  const slug = extractSlug(url);
-  if (!slug) return false;
-  return SLUG_TOKENS.some(token => slug.includes(token));
-}
+// ─── Shared helpers ──────────────────────────────────────────────
 
-/**
- * Extract all <loc>...</loc> values from XML text using regex.
- * Works for both sitemap index and urlset documents.
- */
 function extractLocs(xml) {
   const matches = [];
   const re = /<loc>\s*(.*?)\s*<\/loc>/gi;
@@ -100,47 +80,75 @@ function extractLocs(xml) {
 }
 
 /**
- * Fetch the sitemap index (plain XML) using stealth HTTP + residential proxy.
- * Same bypass that already works for Walmart search/product pages.
+ * Diff a list of URLs against a Redis Set. Returns new URLs not in the set.
+ * Adds all URLs to the set (seeds on first run).
  */
-async function fetchSitemapIndex() {
-  const proxyUrl = getProxyUrl('residential');
+async function diffUrls(urls, redisKey) {
+  const redis = state.getRedis();
+  const knownCount = await redis.scard(redisKey);
+  const isFirstRun = knownCount === 0;
 
+  const newUrls = [];
+  for (let i = 0; i < urls.length; i += 1000) {
+    const batch = urls.slice(i, i + 1000);
+    if (!isFirstRun) {
+      const pipeline = redis.pipeline();
+      batch.forEach(url => pipeline.sismember(redisKey, url));
+      const results = await pipeline.exec();
+      for (let j = 0; j < batch.length; j++) {
+        const [err, isMember] = results[j];
+        if (!err && !isMember) newUrls.push(batch[j]);
+      }
+    }
+    await redis.sadd(redisKey, ...batch);
+  }
+
+  await redis.expire(redisKey, 86400 * 30); // 30-day TTL
+  return { newUrls, isFirstRun };
+}
+
+// ─── Walmart functions ───────────────────────────────────────────
+
+function walmartExtractSlug(url) {
+  const parts = url.split('/ip/');
+  if (parts.length < 2) return '';
+  const segments = parts[1].replace(/\/$/, '').split('/');
+  return segments.length >= 2 ? segments[0].toLowerCase() : '';
+}
+
+function walmartExtractSku(url) {
+  const clean = url.split('?')[0].split('#')[0].replace(/\/$/, '');
+  const segments = clean.split('/');
+  const last = segments[segments.length - 1];
+  return /^[A-Za-z0-9]{10,15}$/.test(last) ? last : null;
+}
+
+function isWalmartTCG(url) {
+  const slug = walmartExtractSlug(url);
+  if (!slug) return false;
+  return WALMART_SLUG_TOKENS.some(token => slug.includes(token));
+}
+
+async function fetchSitemapXml(url) {
+  const proxyUrl = getProxyUrl('residential');
   try {
-    const xml = await stealthGet(SITEMAP_INDEX_URL, {
+    const xml = await stealthGet(url, {
       proxyUrl,
       maxRetries: 3,
       timeoutMs: 30000,
-      headers: {
-        'Accept': 'application/xml, text/xml, */*',
-      },
+      headers: { 'Accept': 'application/xml, text/xml, */*' },
     });
-
-    if (!xml || xml.length < 100) {
-      logger.error('Early SKU: Sitemap index response too short or empty');
-      return [];
-    }
-
-    const locs = extractLocs(xml);
-    if (locs.length === 0) {
-      // Log first 500 chars for debugging
-      logger.error(`Early SKU: No <loc> tags found in sitemap index (${xml.length} chars). Preview: ${xml.substring(0, 500)}`);
-    }
-    return locs;
+    if (!xml || xml.length < 100) return null;
+    return xml;
   } catch (err) {
-    logger.error(`Early SKU: Sitemap index fetch error: ${err.message}`);
+    logger.error(`Early SKU: Fetch error (${url}): ${err.message}`);
     if (proxyUrl) _clearCache(proxyUrl);
-    return [];
+    return null;
   }
 }
 
-/**
- * Fetch a gzipped sitemap (.xml.gz) using impit + residential proxy.
- * Needs raw binary buffer access for gzip decompression.
- */
 async function fetchSitemapGz(url) {
   const proxyUrl = getProxyUrl('residential');
-
   try {
     const Impit = await getImpit();
     const impit = new Impit({
@@ -148,7 +156,6 @@ async function fetchSitemapGz(url) {
       proxyUrl: proxyUrl || undefined,
       ignoreTlsErrors: false,
     });
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
 
@@ -164,122 +171,78 @@ async function fetchSitemapGz(url) {
       },
       signal: controller.signal,
     });
-
     clearTimeout(timeout);
 
     if (response.status !== 200) {
-      logger.warn(`Early SKU: Sitemap fetch HTTP ${response.status} — ${url}`);
+      logger.warn(`Early SKU: HTTP ${response.status} — ${url}`);
       return [];
     }
 
     const arrayBuf = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuf);
 
-    // Decompress gzip
     let xmlText;
     try {
       const decompressed = await gunzip(buffer);
       xmlText = decompressed.toString('utf-8');
     } catch {
-      // Might already be decompressed (impit handles content-encoding)
       xmlText = buffer.toString('utf-8');
     }
-
     return extractLocs(xmlText);
   } catch (err) {
-    logger.warn(`Early SKU: Sitemap fetch error: ${err.message} — ${url}`);
+    logger.warn(`Early SKU: Fetch error: ${err.message} — ${url}`);
     return [];
   }
 }
 
-/**
- * Main scan: fetch all sitemaps, diff against Redis, return new TCG events.
- */
-async function scanSitemaps() {
-  const startTime = Date.now();
-  logger.info('=== Early SKU Detection: Walmart sitemap scan starting ===');
+async function scanWalmart() {
+  logger.info('Early SKU [Walmart]: scanning sitemaps...');
+  const start = Date.now();
 
-  // Step 1: Fetch sitemap index
-  const childUrls = await fetchSitemapIndex();
-  if (childUrls.length === 0) {
-    logger.error('Early SKU: No child sitemaps found in Walmart index');
+  // Fetch index → child URLs
+  const indexXml = await fetchSitemapXml(WALMART_INDEX_URL);
+  if (!indexXml) {
+    logger.error('Early SKU [Walmart]: failed to fetch sitemap index');
     return [];
   }
-  logger.info(`Early SKU: Sitemap index has ${childUrls.length} child sitemaps`);
+  const childUrls = extractLocs(indexXml);
+  if (childUrls.length === 0) {
+    logger.error('Early SKU [Walmart]: no child sitemaps in index');
+    return [];
+  }
+  logger.info(`Early SKU [Walmart]: ${childUrls.length} child sitemaps`);
 
-  // Step 2: Fetch all child sitemaps
-  const allProductUrls = [];
+  // Fetch all child sitemaps (gzipped)
+  const allUrls = [];
   for (const childUrl of childUrls) {
     const urls = await fetchSitemapGz(childUrl);
-    allProductUrls.push(...urls);
+    allUrls.push(...urls);
     logger.info(`  ${childUrl.split('/').pop()}: ${urls.length} URLs`);
   }
-  logger.info(`Early SKU: Total product URLs: ${allProductUrls.length}`);
 
-  // Step 3: Diff against Redis — find truly new URLs
-  const redis = state.getRedis();
-  const knownCount = await redis.scard(REDIS_KNOWN_KEY);
-  const isFirstRun = knownCount === 0;
-
-  const newUrls = [];
-  for (let i = 0; i < allProductUrls.length; i += 1000) {
-    const batch = allProductUrls.slice(i, i + 1000);
-    if (!isFirstRun) {
-      const pipeline = redis.pipeline();
-      batch.forEach(url => pipeline.sismember(REDIS_KNOWN_KEY, url));
-      const results = await pipeline.exec();
-      for (let j = 0; j < batch.length; j++) {
-        const [err, isMember] = results[j];
-        if (!err && !isMember) {
-          newUrls.push(batch[j]);
-        }
-      }
-    }
-    await redis.sadd(REDIS_KNOWN_KEY, ...batch);
-  }
-
-  // 30-day TTL on the known set
-  await redis.expire(REDIS_KNOWN_KEY, 86400 * 30);
-  await redis.set(REDIS_LASTRUN_KEY, Date.now().toString());
+  // Diff against Redis
+  const { newUrls, isFirstRun } = await diffUrls(allUrls, WALMART_REDIS_KEY);
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
   if (isFirstRun) {
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    logger.info(`Early SKU: First run — seeded ${allProductUrls.length} URLs in ${elapsed}s. No alerts on first run.`);
+    logger.info(`Early SKU [Walmart]: first run — seeded ${allUrls.length} URLs in ${elapsed}s`);
     return [];
   }
 
-  if (newUrls.length === 0) {
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    logger.info(`Early SKU: Scan complete in ${elapsed}s — 0 new URLs`);
-    return [];
-  }
+  const tcgUrls = newUrls.filter(isWalmartTCG);
+  logger.info(`Early SKU [Walmart]: ${elapsed}s — ${newUrls.length} new URLs, ${tcgUrls.length} TCG`);
 
-  // Step 4: Filter by TCG slug tokens
-  const tcgUrls = newUrls.filter(isTCGUrl);
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  logger.info(`Early SKU: Scan complete in ${elapsed}s — ${newUrls.length} new URLs, ${tcgUrls.length} TCG matches`);
-
-  // Step 5: Build events
   return tcgUrls.map(url => {
-    const sku = extractSku(url);
-    const slug = extractSlug(url);
-    const name = slug
-      .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase());
-
+    const sku = walmartExtractSku(url);
+    const slug = walmartExtractSlug(url);
+    const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     return {
       type: 'EARLY_SKU',
       product: {
-        sku: sku || slug,
-        name,
-        url,
-        price: null,
-        inStock: false,
-        retailer: 'Walmart Canada',
-        retailerId: 'walmart',
-        category: 'pokemon',
-        isTCG: true,
-        _earlyDetection: true,
+        sku: sku || slug, name, url,
+        price: null, inStock: false,
+        retailer: 'Walmart Canada', retailerId: 'walmart',
+        category: 'pokemon', isTCG: true, _earlyDetection: true,
       },
       detail: 'New product found in Walmart sitemap before search indexing',
       _detectedAt: Date.now(),
@@ -287,4 +250,105 @@ async function scanSitemaps() {
   });
 }
 
-module.exports = { scanSitemaps, isTCGUrl, extractSlug, extractSku, SCAN_INTERVAL_MS };
+// ─── Pokemon Center functions ────────────────────────────────────
+
+function pcExtractSku(url) {
+  // URL: https://www.pokemoncenter.com/en-ca/product/10-12345-001/pokemon-tcg-product-name
+  const parts = url.split('/product/');
+  if (parts.length < 2) return null;
+  const segments = parts[1].replace(/\/$/, '').split('/');
+  return segments[0] || null; // e.g. "10-12345-001"
+}
+
+function pcExtractSlug(url) {
+  const parts = url.split('/product/');
+  if (parts.length < 2) return '';
+  const segments = parts[1].replace(/\/$/, '').split('/');
+  return segments.length >= 2 ? segments[1].toLowerCase() : '';
+}
+
+function isPokemonCenterTCG(url) {
+  if (!url.includes('/product/')) return false;
+  const slug = pcExtractSlug(url);
+  if (!slug) return false;
+  return PC_TCG_KEYWORDS.some(kw => slug.includes(kw));
+}
+
+async function scanPokemonCenter() {
+  logger.info('Early SKU [Pokemon Center]: scanning sitemap...');
+  const start = Date.now();
+
+  // Single plain XML sitemap
+  const xml = await fetchSitemapXml(PC_SITEMAP_URL);
+  if (!xml) {
+    logger.error('Early SKU [Pokemon Center]: failed to fetch sitemap');
+    return [];
+  }
+
+  const allUrls = extractLocs(xml).filter(u => u.includes('/product/'));
+  logger.info(`Early SKU [Pokemon Center]: ${allUrls.length} product URLs`);
+
+  // Diff against Redis
+  const { newUrls, isFirstRun } = await diffUrls(allUrls, PC_REDIS_KEY);
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+
+  if (isFirstRun) {
+    logger.info(`Early SKU [Pokemon Center]: first run — seeded ${allUrls.length} URLs in ${elapsed}s`);
+    return [];
+  }
+
+  const tcgUrls = newUrls.filter(isPokemonCenterTCG);
+  logger.info(`Early SKU [Pokemon Center]: ${elapsed}s — ${newUrls.length} new URLs, ${tcgUrls.length} TCG`);
+
+  return tcgUrls.map(url => {
+    const sku = pcExtractSku(url);
+    const slug = pcExtractSlug(url);
+    const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const caUrl = url.replace(/\/en-[a-z]{2}\/product\//, '/en-ca/product/')
+      .replace(/^(https?:\/\/[^/]+)\/product\//, '$1/en-ca/product/');
+    return {
+      type: 'EARLY_SKU',
+      product: {
+        sku: sku || slug, name, url: caUrl,
+        price: null, inStock: false,
+        retailer: 'Pokemon Center', retailerId: 'pokemoncenter',
+        category: 'pokemon', isTCG: true, _earlyDetection: true,
+      },
+      detail: 'New product found in Pokemon Center sitemap',
+      _detectedAt: Date.now(),
+    };
+  });
+}
+
+// ─── Main scan (runs both retailers) ─────────────────────────────
+
+async function scanSitemaps() {
+  logger.info('=== Early SKU Detection: starting multi-retailer scan ===');
+  const allEvents = [];
+
+  // Scan Walmart
+  try {
+    const walmartEvents = await scanWalmart();
+    allEvents.push(...walmartEvents);
+  } catch (err) {
+    logger.error(`Early SKU [Walmart]: scan failed: ${err.message}`);
+  }
+
+  // Scan Pokemon Center
+  try {
+    const pcEvents = await scanPokemonCenter();
+    allEvents.push(...pcEvents);
+  } catch (err) {
+    logger.error(`Early SKU [Pokemon Center]: scan failed: ${err.message}`);
+  }
+
+  logger.info(`=== Early SKU Detection: complete — ${allEvents.length} total alerts ===`);
+
+  // Update last-run timestamp
+  const redis = state.getRedis();
+  await redis.set('tcg:sitemap:lastrun', Date.now().toString());
+
+  return allEvents;
+}
+
+module.exports = { scanSitemaps, SCAN_INTERVAL_MS };
