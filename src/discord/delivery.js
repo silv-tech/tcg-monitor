@@ -59,15 +59,15 @@ class DeliveryQueue {
         continue;
       }
       // Skip out-of-stock products — ONLY alert on items actually available to buy
-      // RESTOCK and PREORDER_LIVE events are exempt (they signal availability changes)
-      if (!event._scanTier && event.product && event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE') {
+      // RESTOCK, PREORDER_LIVE, and EARLY_SKU events are exempt
+      if (!event._scanTier && event.product && event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE' && event.type !== 'EARLY_SKU') {
         if (!event.product.inStock) {
           logger.debug(`OOS product filtered: ${event.type} — ${event.product?.name || 'unknown'}`);
           continue;
         }
       }
-      // Skip products with no price — placeholder/unavailable listings
-      if (!event._scanTier && event.product) {
+      // Skip products with no price — placeholder/unavailable listings (EARLY_SKU exempt)
+      if (!event._scanTier && event.type !== 'EARLY_SKU' && event.product) {
         const price = event.product.price;
         if (price == null || price <= 0) {
           logger.debug(`No-price product filtered: ${event.product?.name || 'unknown'}`);
@@ -223,6 +223,19 @@ class DeliveryQueue {
     const { product } = event;
     const category = product.category || 'default';
     const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);
+
+    // --- EARLY SKU DETECTION: route to #early-detection channel ---
+    if (event.type === 'EARLY_SKU') {
+      const earlyChannel = channelsConfig?.earlyDetectionChannel;
+      if (earlyChannel) {
+        const { embed, components } = buildAlertEmbed(event, 'paid');
+        await this.sendToChannel(earlyChannel, embed, components, null, 'paid');
+        logger.info(`Early SKU alert sent: ${product.name} (${product.sku})`);
+      } else {
+        logger.warn('Early SKU event generated but no earlyDetectionChannel configured');
+      }
+      return;
+    }
 
     // --- SCAN: admin utility, paid channel only, no pings ---
     if (event._scanTier === 'scan') {

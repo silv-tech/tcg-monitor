@@ -15,6 +15,7 @@ const WalmartAdapter = require('./adapters/walmart');
 const AmazonAdapter = require('./adapters/amazon');
 const ShopifyAdapter = require('./adapters/shopify');
 const BestBuyAdapter = require('./adapters/bestbuy');
+const { scanSitemaps, SCAN_INTERVAL_MS } = require('./core/sitemap-scanner');
 let closeBrowser;
 try { closeBrowser = require('./utils/browser').closeBrowser; } catch { closeBrowser = null; }
 
@@ -132,6 +133,27 @@ async function main() {
   // 5. Start scheduler
   await scheduler.start();
 
+  // 5b. Start Early SKU Detection (Walmart sitemap scanner)
+  let sitemapTimer = null;
+  async function runSitemapScan() {
+    try {
+      const events = await scanSitemaps();
+      if (events.length > 0) {
+        logger.info(`Early SKU: Sending ${events.length} events to #early-detection`);
+        await delivery.deliver(events, { skipDedup: true });
+      }
+    } catch (err) {
+      logger.error(`Early SKU scan failed: ${err.message}`);
+    }
+  }
+
+  // Run first scan after 30s (let adapters warm up first), then every 12h
+  setTimeout(async () => {
+    await runSitemapScan();
+    sitemapTimer = setInterval(runSitemapScan, SCAN_INTERVAL_MS);
+    logger.info(`Early SKU Detection: scheduled every ${SCAN_INTERVAL_MS / 3600000}h`);
+  }, 30000);
+
   // 6. Start admin server
   const adminServer = createAdminServer();
 
@@ -186,6 +208,7 @@ async function main() {
   async function shutdown(signal) {
     logger.info(`Received ${signal}, shutting down...`);
     clearInterval(healthInterval);
+    if (sitemapTimer) clearInterval(sitemapTimer);
     scheduler.stop();
     adminServer.close();
     await shutdownBot();

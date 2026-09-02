@@ -32,6 +32,10 @@ const EVENT_CONFIG = {
     label: 'Currently Listed',
     color: 0x9b59b6,
   },
+  'EARLY_SKU': {
+    label: 'Early Detection',
+    color: 0xff9900,
+  },
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────

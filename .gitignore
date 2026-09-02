@@ -3,9 +3,3 @@ node_modules/
 *.log
 src/config/proxies.json
 src/config/channels.json
-
-# Early SKU Detector (Python)
-__pycache__/
-*.pyc
-early-sku-detector/.env
-early-sku-detector/alembic/versions/*.py
