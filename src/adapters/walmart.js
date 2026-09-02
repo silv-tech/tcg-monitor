@@ -3,11 +3,7 @@ const logger = require('../monitoring/logger');
 const { normalizePrice, sleep } = require('../utils/helpers');
 const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
-const { stealthGet, _clearCache } = require('../utils/stealth-http');
-const { getSessionCookies, invalidateSession } = require('../utils/cookie-session');
-
-// Walmart PerimeterX _px3 cookie expires in ~60s — refresh at 45s
-const WALMART_COOKIE_TTL = 45 * 1000;
+const { stealthGet, stealthWarmup, clearWarmupCookies, _clearCache } = require('../utils/stealth-http');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -48,28 +44,19 @@ class WalmartAdapter extends BaseAdapter {
     const url = `https://www.walmart.ca/ip/${productId}`;
     const proxyUrl = getProxyUrl('residential');
 
-    // Step 1: Try free stealth fetch (with farmed cookies if available)
+    // Step 1: Try free stealth fetch (with warmup cookies from same TLS fingerprint)
     let stealthParsed = false; // true if page was parseable (even if third-party seller)
     try {
-      const fetchOpts = {
+      const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 12000,
-      };
-
-      // Inject farmed cookies for watchlist too
-      try {
-        const cookies = await getSessionCookies('www.walmart.ca', 'https://www.walmart.ca', {
-          proxyUrl,
-          challengeWaitMs: 8000,
-          ttlMs: WALMART_COOKIE_TTL,
-        });
-        if (cookies) fetchOpts.headers = { Cookie: cookies };
-      } catch {
-        // No cookies — proceed without
-      }
-
-      const html = await stealthGet(url, fetchOpts);
+        useCookieJar: true,
+        headers: {
+          'Referer': 'https://www.walmart.ca/',
+          'Sec-Fetch-Site': 'same-origin',
+        },
+      });
 
       if (html && html.length > 500 && !html.includes('Verify Your Identity')) {
         const product = this._parseProductPage(html, productId);
@@ -342,33 +329,23 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   /**
-   * Farm Walmart session cookies via Patchright (headless browser).
-   * Multi-step warmup: homepage → search page to trigger all bot detection scripts
-   * (Akamai _abck sensor + PerimeterX _px3 challenge).
-   * Returns cookie string or null on failure.
+   * Warm up impit session by visiting Walmart homepage.
+   * Collects Set-Cookie headers (non-JS cookies like _pxvid, _astc, session cookies)
+   * which help establish a returning visitor profile for subsequent search requests.
+   * Does NOT include _px3 (requires JS) — that's intentional, because _px3 from a
+   * different fingerprint causes PerimeterX to block harder.
    */
-  async _farmWalmartCookies(proxyUrl) {
-    const { browserFetchWithCookies } = require('../utils/cookie-session');
-
+  async _warmupSession(proxyUrl) {
     try {
-      // Visit search page with homepage as seed (triggers Akamai + PerimeterX on both)
-      // browserFetchWithCookies: seed(homepage, 5s wait) → target(search, 5s wait) → extract cookies
-      const html = await browserFetchWithCookies('https://www.walmart.ca/search?q=pokemon+tcg', {
-        proxyUrl,
-        timeoutMs: 30000,
-        seedUrl: 'https://www.walmart.ca',
-        ttlMs: WALMART_COOKIE_TTL,
-      });
+      // Clear any stale warmup cookies from a previous session
+      clearWarmupCookies(proxyUrl);
 
-      // browserFetchWithCookies caches cookies internally — grab from cache
-      // getSessionCookies will return cached version without re-solving
-      return await getSessionCookies('www.walmart.ca', 'https://www.walmart.ca', {
-        proxyUrl,
-        ttlMs: WALMART_COOKIE_TTL,
-      });
+      // Visit homepage to collect Set-Cookie headers
+      await stealthWarmup('https://www.walmart.ca', { proxyUrl, timeoutMs: 12000 });
+      return true;
     } catch (err) {
-      logger.warn(`Walmart: cookie farm error: ${err.message}`);
-      return null;
+      logger.warn(`Walmart: warmup failed: ${err.message}`);
+      return false;
     }
   }
 
@@ -376,23 +353,21 @@ class WalmartAdapter extends BaseAdapter {
    * Stealth-fetch a Walmart search page and parse __NEXT_DATA__ for results.
    * Returns array of product items (same shape as ScraperAPI) or null on failure.
    */
-  async _stealthSearch(query, cookieString = null) {
+  async _stealthSearch(query) {
     const url = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
     const proxyUrl = getProxyUrl('residential');
 
     try {
-      const fetchOpts = {
+      const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 15000,
-      };
-
-      // Inject farmed cookies (PerimeterX _px3 + Akamai _abck) if available
-      if (cookieString) {
-        fetchOpts.headers = { Cookie: cookieString };
-      }
-
-      const html = await stealthGet(url, fetchOpts);
+        useCookieJar: true, // inject warmup cookies from same TLS fingerprint
+        headers: {
+          'Referer': 'https://www.walmart.ca/',
+          'Sec-Fetch-Site': 'same-origin', // looks like internal navigation
+        },
+      });
 
       if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
         if (proxyUrl) _clearCache(proxyUrl);
@@ -473,17 +448,10 @@ class WalmartAdapter extends BaseAdapter {
     const failedQueries = []; // queries that need ScraperAPI fallback
     let stealthHits = 0;
 
-    // Step 0: Farm Walmart session cookies (PerimeterX _px3 + Akamai _abck)
-    // One Patchright session solves the JS challenge, then all 16 stealth HTTP queries reuse cookies
-    let cookieString = null;
-    try {
-      cookieString = await this._farmWalmartCookies(proxyUrl);
-      if (cookieString) {
-        logger.info(`Walmart: farmed session cookies (${cookieString.length} chars) — injecting into stealth searches`);
-      }
-    } catch (err) {
-      logger.warn(`Walmart: cookie farming failed (${err.message}) — stealth searches will run without cookies`);
-    }
+    // Step 0: Warmup — visit Walmart homepage via impit to collect session cookies
+    // This gets non-JS cookies (_pxvid, _astc, etc.) from the SAME TLS fingerprint
+    // that will make subsequent search requests, avoiding fingerprint mismatch
+    await this._warmupSession(proxyUrl);
 
     // Step 1: Try queries via stealth (free) — batches of 4 with 1s delay to avoid rate limiting
     const BATCH_SIZE = 4;
@@ -491,7 +459,7 @@ class WalmartAdapter extends BaseAdapter {
       const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.allSettled(
         batch.map(query =>
-          this._stealthSearch(query, cookieString).then(items => ({ query, items }))
+          this._stealthSearch(query).then(items => ({ query, items }))
         )
       );
 
@@ -519,10 +487,10 @@ class WalmartAdapter extends BaseAdapter {
       }
     }
 
-    // If most queries failed despite having cookies, invalidate for next cycle
-    if (cookieString && failedQueries.length > this.searchQueries.length * 0.5) {
-      invalidateSession('www.walmart.ca');
-      logger.warn(`Walmart: ${failedQueries.length}/${this.searchQueries.length} stealth failed — invalidated cookies for next cycle`);
+    // If most queries failed, clear warmup cookies for next cycle
+    if (failedQueries.length > this.searchQueries.length * 0.5) {
+      clearWarmupCookies(proxyUrl);
+      logger.warn(`Walmart: ${failedQueries.length}/${this.searchQueries.length} stealth failed — cleared warmup cookies for next cycle`);
     }
 
     // Step 2: ScraperAPI fallback for failed queries only
