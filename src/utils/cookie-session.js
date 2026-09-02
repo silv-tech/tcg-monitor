@@ -133,6 +133,10 @@ async function getSessionCookies(domain, seedUrl, opts = {}) {
       throw new Error(`No cookies received from ${domain} (title: ${title}, captcha: ${hasCaptcha})`);
     }
 
+    // Log cookie names for diagnostics (helps debug bot detection cookie farming)
+    const cookieNames = cookies.map(c => `${c.name}(${c.value.length}ch)`).join(', ');
+    logger.info(`Cookie session: ${domain} cookies: ${cookieNames}`);
+
     const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     cookieCache.set(domain, {
       cookieString,
@@ -153,7 +157,8 @@ async function getSessionCookies(domain, seedUrl, opts = {}) {
  * Used as fallback when cookie-only approach fails.
  */
 async function browserFetchWithCookies(url, opts = {}) {
-  const { proxyUrl, timeoutMs = 30000, waitForSelector, seedUrl } = opts;
+  const { proxyUrl, timeoutMs = 30000, waitForSelector, seedUrl, ttlMs } = opts;
+  const effectiveTTL = ttlMs || COOKIE_TTL;
 
   const b = await ensureBrowser(proxyUrl);
   const context = await createStealthContext(b);
@@ -207,11 +212,15 @@ async function browserFetchWithCookies(url, opts = {}) {
     logger.info(`Cookie session: browserFetch ${domain} — HTML: ${html.length} bytes, cookies: ${cookies.length}`);
 
     if (cookies.length > 0) {
+      // Log cookie names for diagnostics
+      const cookieNames = cookies.map(c => `${c.name}(${c.value.length}ch)`).join(', ');
+      logger.info(`Cookie session: browserFetch ${domain} cookies: ${cookieNames}`);
+
       const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       cookieCache.set(domain, {
         cookieString,
         cookies,
-        expiresAt: Date.now() + COOKIE_TTL,
+        expiresAt: Date.now() + effectiveTTL,
       });
     }
 

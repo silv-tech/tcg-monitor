@@ -342,6 +342,37 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   /**
+   * Farm Walmart session cookies via Patchright (headless browser).
+   * Multi-step warmup: homepage → search page to trigger all bot detection scripts
+   * (Akamai _abck sensor + PerimeterX _px3 challenge).
+   * Returns cookie string or null on failure.
+   */
+  async _farmWalmartCookies(proxyUrl) {
+    const { browserFetchWithCookies } = require('../utils/cookie-session');
+
+    try {
+      // Visit search page with homepage as seed (triggers Akamai + PerimeterX on both)
+      // browserFetchWithCookies: seed(homepage, 5s wait) → target(search, 5s wait) → extract cookies
+      const html = await browserFetchWithCookies('https://www.walmart.ca/search?q=pokemon+tcg', {
+        proxyUrl,
+        timeoutMs: 30000,
+        seedUrl: 'https://www.walmart.ca',
+        ttlMs: WALMART_COOKIE_TTL,
+      });
+
+      // browserFetchWithCookies caches cookies internally — grab from cache
+      // getSessionCookies will return cached version without re-solving
+      return await getSessionCookies('www.walmart.ca', 'https://www.walmart.ca', {
+        proxyUrl,
+        ttlMs: WALMART_COOKIE_TTL,
+      });
+    } catch (err) {
+      logger.warn(`Walmart: cookie farm error: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Stealth-fetch a Walmart search page and parse __NEXT_DATA__ for results.
    * Returns array of product items (same shape as ScraperAPI) or null on failure.
    */
@@ -446,12 +477,10 @@ class WalmartAdapter extends BaseAdapter {
     // One Patchright session solves the JS challenge, then all 16 stealth HTTP queries reuse cookies
     let cookieString = null;
     try {
-      cookieString = await getSessionCookies('www.walmart.ca', 'https://www.walmart.ca/search?q=pokemon', {
-        proxyUrl,
-        challengeWaitMs: 8000,
-        ttlMs: WALMART_COOKIE_TTL,
-      });
-      logger.info(`Walmart: farmed session cookies (${cookieString.length} chars) — injecting into stealth searches`);
+      cookieString = await this._farmWalmartCookies(proxyUrl);
+      if (cookieString) {
+        logger.info(`Walmart: farmed session cookies (${cookieString.length} chars) — injecting into stealth searches`);
+      }
     } catch (err) {
       logger.warn(`Walmart: cookie farming failed (${err.message}) — stealth searches will run without cookies`);
     }
