@@ -28,12 +28,9 @@ class DiscoveredProduct:
 class RetailerModule(ABC):
     """Interface that every retailer scanner must implement."""
 
-    @property
-    @abstractmethod
-    def retailer_name(self) -> str:
-        ...
+    retailer_name: str = ""
 
     @abstractmethod
-    async def run(self) -> list[DiscoveredProduct]:
+    async def run(self, session) -> list[DiscoveredProduct]:
         """Execute the scan and return discovered products."""
         ...

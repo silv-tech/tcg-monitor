@@ -3,11 +3,10 @@ Async HTTP fetch client with proxy rotation, per-domain rate limiting,
 exponential backoff with jitter, realistic headers, and circuit breaker.
 """
 import asyncio
-import hashlib
 import logging
 import random
 import time
-from typing import Optional
+from typing import Optional, Union
 
 import httpx
 
@@ -141,6 +140,68 @@ class FetchClient:
                     logger.warning(f"Fetch error on {url}: {type(e).__name__}: {e} (attempt {attempt + 1})")
 
                 # Exponential backoff with jitter
+                if attempt < max_retries - 1:
+                    base_delay = 2 ** attempt
+                    jitter = random.uniform(0, base_delay)
+                    await asyncio.sleep(base_delay + jitter)
+
+        logger.error(f"All {max_retries} attempts failed for {url}")
+        return None
+
+    async def get_bytes(
+        self,
+        url: str,
+        *,
+        max_retries: int = 3,
+        timeout: Optional[int] = None,
+    ) -> Optional[bytes]:
+        """
+        Fetch a URL and return raw bytes (for binary content like .xml.gz).
+        """
+        domain = _get_domain(url)
+        cb = self._get_circuit_breaker(domain)
+
+        if cb.is_open:
+            return None
+
+        req_headers = self._build_headers(url)
+        req_headers["Accept"] = "*/*"
+        # Don't ask for compressed encoding — we want the raw .gz file bytes
+        del req_headers["Accept-Encoding"]
+
+        timeout_val = timeout or settings.request_timeout
+
+        for attempt in range(max_retries):
+            await self._rate_limiter.acquire(domain)
+            async with self._semaphore:
+                proxy = self._get_proxy()
+                try:
+                    async with httpx.AsyncClient(
+                        proxy=proxy,
+                        timeout=httpx.Timeout(timeout_val),
+                        follow_redirects=True,
+                        http2=True,
+                    ) as client:
+                        self._request_count += 1
+                        resp = await client.get(url, headers=req_headers)
+
+                        if resp.status_code == 200:
+                            cb.record_success()
+                            logger.debug(f"OK {url} ({len(resp.content)} bytes, attempt {attempt + 1})")
+                            return resp.content
+
+                        if resp.status_code == 429:
+                            retry_after = float(resp.headers.get("Retry-After", "5"))
+                            await asyncio.sleep(retry_after)
+                            continue
+
+                        if resp.status_code in (403, 503):
+                            cb.record_failure()
+
+                except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                    cb.record_failure()
+                    logger.warning(f"Fetch error on {url}: {type(e).__name__}: {e} (attempt {attempt + 1})")
+
                 if attempt < max_retries - 1:
                     base_delay = 2 ** attempt
                     jitter = random.uniform(0, base_delay)

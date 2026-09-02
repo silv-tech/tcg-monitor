@@ -39,20 +39,57 @@ PRODUCT_TYPES = {
 
 # Negative signals — these are NOT TCG products
 NON_TCG_SIGNALS = [
-    "plush", "figure", "figurine", "toy", "costume", "backpack", "lunchbox",
-    "bedding", "clothing", "shirt", "hat", "shoes", "socks", "pajama",
-    "video game", "nintendo switch", "playstation", "xbox",
-    "board game", "puzzle", "lego",
+    # Apparel & accessories
+    "plush", "figure", "figurine", "costume", "backpack", "lunchbox", "lunch box",
+    "bedding", "clothing", "shirt", "t-shirt", "hoodie", "hat", "cap", "shoes",
+    "socks", "pajama", "pyjama", "underwear", "shorts", "pants", "jacket", "watch",
+    "sunglasses", "bag", "wallet", "towel", "blanket", "pillow",
+    # Electronics & games (non-card)
+    "video game", "nintendo switch", "playstation", "xbox", "controller",
+    "board game", "puzzle", "lego", "building set",
+    # Food & drink
+    "snack", "cookie", "candy", "gummy", "cereal", "cocoa", "chocolate",
+    "fruit snack", "cracker", "vitamin", "gum",
+    # Home & decor
+    "poster", "wall art", "decal", "sticker", "lamp", "night light",
+    "curtain", "rug", "comforter", "sheet set",
+    # Toys (non-card)
+    "action figure", "playset", "play set", "ball", "bike", "scooter",
+    "water bottle", "thermos", "lunch kit",
+    # Media
+    "dvd", "blu-ray", "movie", "book",
+]
+
+
+# TCG-specific tokens that indicate card game product (used for URL-only classification)
+TCG_URL_TOKENS = [
+    "tcg", "booster", "elite-trainer", "trainer-box", "collection-box",
+    "blister", "sleeved", "card-game", "deck", "premium-collection",
 ]
 
 
 def classify(title: str, url: str = "") -> Classification:
     """Classify a product by title and URL."""
     if not title:
-        # URL-only — check for TCG slug tokens
-        text = url.lower()
-    else:
-        text = title.lower()
+        # URL-only — need BOTH brand token AND tcg token in the slug
+        url_lower = url.lower()
+        has_brand = any(
+            kw in url_lower
+            for keywords in TCG_BRANDS.values()
+            for kw in keywords
+        )
+        has_tcg = any(token in url_lower for token in TCG_URL_TOKENS)
+        if has_brand and has_tcg:
+            # Determine brand
+            brand = None
+            for brand_name, keywords in TCG_BRANDS.items():
+                if any(kw in url_lower for kw in keywords):
+                    brand = brand_name
+                    break
+            return Classification(is_tcg=True, brand=brand)
+        return Classification(is_tcg=False)
+
+    text = title.lower()
 
     # Check for non-TCG signals first
     for signal in NON_TCG_SIGNALS:

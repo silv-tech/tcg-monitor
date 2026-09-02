@@ -18,20 +18,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 from src.fetch.client import fetch_client
 from src.modules.base import DiscoveredProduct, RetailerModule
-from src.modules.sitemap.differ import fetch_sitemap_index, fetch_sitemap, diff_sitemap
+from src.modules.sitemap.differ import fetch_sitemap_index, fetch_sitemap_gz, diff_sitemap
 
 logger = logging.getLogger(__name__)
 
 SITEMAP_INDEX = "https://www.walmart.ca/sitemap-product-1p-en.xml"
 
 # Walmart.ca product URL patterns:
-#   /en/ip/product-name/6000XXXXXXX  (newer)
-#   /ip/product-name/6000XXXXXXX     (also valid)
-SKU_PATTERN = re.compile(r"/ip/[^/]+/(\d{10,13})(?:\?|$|#)")
+#   /en/ip/Product-Name/6000XXXXXXXXX   (numeric — traditional)
+#   /en/ip/Product-Name/5VO3JSEOMCPS    (alphanumeric — newer format)
+SKU_PATTERN = re.compile(r"/ip/[^/]+/([A-Za-z0-9]{10,15})$")
 
 
 def extract_sku(url: str) -> Optional[str]:
-    m = SKU_PATTERN.search(url)
+    # Strip query string / fragment before matching
+    clean = url.split("?")[0].split("#")[0]
+    m = SKU_PATTERN.search(clean)
     return m.group(1) if m else None
 
 
@@ -47,10 +49,27 @@ def load_slug_tokens() -> list[str]:
                 "elite-trainer", "paldea", "scarlet", "violet", "obsidian"]
 
 
+def _extract_slug(url: str) -> str:
+    """Extract just the product-name slug from a Walmart URL, excluding the SKU ID."""
+    # URL: https://www.walmart.ca/en/ip/Product-Name-Here/6000XXXXXXXXX
+    # We want just "Product-Name-Here" (lowercased)
+    parts = url.split("/ip/")
+    if len(parts) < 2:
+        return ""
+    slug_and_sku = parts[1]
+    # Remove the SKU ID (last path segment)
+    segments = slug_and_sku.strip("/").split("/")
+    if len(segments) >= 2:
+        return segments[0].lower()
+    return slug_and_sku.lower()
+
+
 def url_matches_tokens(url: str, tokens: list[str]) -> bool:
-    """Check if the URL slug contains any of the configured tokens."""
-    url_lower = url.lower()
-    return any(token in url_lower for token in tokens)
+    """Check if the URL product slug contains any of the configured tokens."""
+    slug = _extract_slug(url)
+    if not slug:
+        return False
+    return any(token in slug for token in tokens)
 
 
 class WalmartSitemapModule(RetailerModule):
@@ -75,12 +94,12 @@ class WalmartSitemapModule(RetailerModule):
 
         logger.info(f"Found {len(child_urls)} child sitemaps in index")
 
-        # Step 2: Fetch all child sitemaps to collect product URLs
+        # Step 2: Fetch all child sitemaps (.xml.gz) to collect product URLs
         all_product_urls = []
         for child_url in child_urls:
-            product_urls = await fetch_sitemap(child_url)
+            product_urls = await fetch_sitemap_gz(child_url)
             all_product_urls.extend(product_urls)
-            logger.debug(f"  {child_url}: {len(product_urls)} URLs")
+            logger.info(f"  {child_url}: {len(product_urls)} URLs")
 
         logger.info(f"Total product URLs across all sitemaps: {len(all_product_urls)}")
 

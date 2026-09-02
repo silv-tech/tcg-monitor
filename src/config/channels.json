@@ -79,6 +79,7 @@
     "paidMember": "",
     "allAlerts": ""
   },
+  "earlyDetectionChannel": "",
   "watchlistChannel": "1543822084013166653",
   "adminChannel": "1543432883476242442",
   "enabledEvents": {
