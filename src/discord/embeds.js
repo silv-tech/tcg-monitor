@@ -142,9 +142,11 @@ function buildAlertEmbed(event, tier) {
     embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
   }
 
-  // ── Offer Listing ID (Amazon only) ──
+  // ── Offer Id (all big stores — monospace for easy copy) ──
   if (isAmazon && event._offerListingId) {
     embed.addFields({ name: 'Offer Id', value: `\`${event._offerListingId}\``, inline: false });
+  } else if (product.sku && ['walmart', 'costco', 'pokemoncenter', 'bestbuy'].includes(product.retailerId)) {
+    embed.addFields({ name: 'Offer Id', value: `\`${product.sku}\``, inline: false });
   }
 
   // ── One Click Checkout (markdown links in embed fields — matches client's preferred format) ──
@@ -168,7 +170,7 @@ function buildAlertEmbed(event, tier) {
     }
   }
 
-  // ── Links ──
+  // ── Links (store-specific + universal) ──
   const encodedName = encodeURIComponent(product.name || '');
   const links = [];
   if (isAmazon && product.sku) {
@@ -179,6 +181,28 @@ function buildAlertEmbed(event, tier) {
       `[Amazon Business](https://www.amazon.ca/business)`,
       `[Keepa](https://keepa.com/#!product/6-${asin})`,
     );
+  } else if (product.retailerId === 'walmart') {
+    links.push(
+      `[Login](https://www.walmart.ca/sign-in)`,
+      `[Cart](https://www.walmart.ca/cart)`,
+    );
+    if (product.sku) links.push(`[Product](https://www.walmart.ca/en/ip/${product.sku})`);
+  } else if (product.retailerId === 'costco') {
+    links.push(
+      `[Login](https://www.costco.ca/LogonForm)`,
+      `[Cart](https://www.costco.ca/AjaxOrderItemDisplayView)`,
+    );
+  } else if (product.retailerId === 'pokemoncenter') {
+    links.push(
+      `[Login](https://www.pokemoncenter.com/login)`,
+      `[Cart](https://www.pokemoncenter.com/cart)`,
+    );
+  } else if (product.retailerId === 'bestbuy') {
+    links.push(
+      `[Login](https://www.bestbuy.ca/identity/global/signin)`,
+      `[Cart](https://www.bestbuy.ca/en-ca/basket)`,
+    );
+    if (product.sku) links.push(`[Product](https://www.bestbuy.ca/en-ca/product/${product.sku})`);
   }
   links.push(
     `[Ebay](https://www.ebay.ca/sch/i.html?_nkw=${encodedName})`,
