@@ -27,6 +27,8 @@ class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.domain = 'www.amazon.ca';
+    this._stealthFailStreak = 0; // consecutive polls with 0 stealth success
+    this._stealthDisabledUntil = 0; // skip stealth until this timestamp
     // Search queries — autoparse with emi= filter ensures "sold by Amazon" only
     this.searchQueries = [
       // Pokemon (highest demand — multiple queries for coverage)
@@ -154,60 +156,24 @@ class AmazonAdapter extends BaseAdapter {
     const proxyUrl = getProxyUrl('residential');
     const failedQueries = [];
     let stealthHits = 0;
+    const stealthEnabled = Date.now() >= this._stealthDisabledUntil;
 
-    // Step 1: Stealth search (free) — batches of 4 with jitter
-    const BATCH_SIZE = 4;
-    for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
-      const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.allSettled(
-        batch.map(query =>
-          this._stealthSearch(query).then(items => ({ query, items }))
-        )
-      );
-
-      for (const result of batchResults) {
-        if (result.status === 'rejected') {
-          failedQueries.push(result.reason?.query || 'unknown');
-          continue;
-        }
-        const { query, items } = result.value;
-        if (!items || items.length === 0) {
-          failedQueries.push(query);
-          continue;
-        }
-
-        stealthHits++;
-        this._processSearchItems(items, products);
-        logger.info(`Amazon: "${query}" — ${items.length} results (stealth, free)`);
-      }
-
-      // Rotate IP + delay between batches
-      if (i + BATCH_SIZE < this.searchQueries.length) {
-        const px = getProxyUrl('residential');
-        if (px) _clearCache(px);
-        await sleep(1500 + Math.floor(Math.random() * 1500));
-      }
-    }
-
-    // Step 1.5: Retry failed queries with fresh IPs before burning ScraperAPI credits
-    if (failedQueries.length > 0) {
-      const retryQueries = [...failedQueries];
-      failedQueries.length = 0;
-
-      const retryProxy = getProxyUrl('residential');
-      if (retryProxy) _clearCache(retryProxy);
-      await sleep(2000 + Math.floor(Math.random() * 2000));
-
-      const RETRY_BATCH = 2;
-      for (let i = 0; i < retryQueries.length; i += RETRY_BATCH) {
-        const batch = retryQueries.slice(i, i + RETRY_BATCH);
-        const retryResults = await Promise.allSettled(
+    if (!stealthEnabled) {
+      // Skip stealth entirely — go straight to ScraperAPI
+      failedQueries.push(...this.searchQueries);
+      logger.info(`Amazon: stealth disabled (${Math.round((this._stealthDisabledUntil - Date.now()) / 60000)}min remaining) — using ScraperAPI`);
+    } else {
+      // Step 1: Stealth search (free) — batches of 4 with jitter
+      const BATCH_SIZE = 4;
+      for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
+        const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.allSettled(
           batch.map(query =>
             this._stealthSearch(query).then(items => ({ query, items }))
           )
         );
 
-        for (const result of retryResults) {
+        for (const result of batchResults) {
           if (result.status === 'rejected') {
             failedQueries.push(result.reason?.query || 'unknown');
             continue;
@@ -220,14 +186,69 @@ class AmazonAdapter extends BaseAdapter {
 
           stealthHits++;
           this._processSearchItems(items, products);
-          logger.info(`Amazon: "${query}" — ${items.length} results (stealth retry, free)`);
+          logger.info(`Amazon: "${query}" — ${items.length} results (stealth, free)`);
         }
 
-        if (i + RETRY_BATCH < retryQueries.length) {
+        // Rotate IP + delay between batches
+        if (i + BATCH_SIZE < this.searchQueries.length) {
           const px = getProxyUrl('residential');
           if (px) _clearCache(px);
           await sleep(1500 + Math.floor(Math.random() * 1500));
         }
+      }
+
+      // Step 1.5: Retry failed queries with fresh IPs before burning ScraperAPI credits
+      if (failedQueries.length > 0) {
+        const retryQueries = [...failedQueries];
+        failedQueries.length = 0;
+
+        const retryProxy = getProxyUrl('residential');
+        if (retryProxy) _clearCache(retryProxy);
+        await sleep(2000 + Math.floor(Math.random() * 2000));
+
+        const RETRY_BATCH = 2;
+        for (let i = 0; i < retryQueries.length; i += RETRY_BATCH) {
+          const batch = retryQueries.slice(i, i + RETRY_BATCH);
+          const retryResults = await Promise.allSettled(
+            batch.map(query =>
+              this._stealthSearch(query).then(items => ({ query, items }))
+            )
+          );
+
+          for (const result of retryResults) {
+            if (result.status === 'rejected') {
+              failedQueries.push(result.reason?.query || 'unknown');
+              continue;
+            }
+            const { query, items } = result.value;
+            if (!items || items.length === 0) {
+              failedQueries.push(query);
+              continue;
+            }
+
+            stealthHits++;
+            this._processSearchItems(items, products);
+            logger.info(`Amazon: "${query}" — ${items.length} results (stealth retry, free)`);
+          }
+
+          if (i + RETRY_BATCH < retryQueries.length) {
+            const px = getProxyUrl('residential');
+            if (px) _clearCache(px);
+            await sleep(1500 + Math.floor(Math.random() * 1500));
+          }
+        }
+      }
+
+      // Adaptive stealth disable — if stealth consistently fails, skip it to save time
+      if (stealthHits === 0) {
+        this._stealthFailStreak++;
+        if (this._stealthFailStreak >= 3) {
+          // Disable stealth for 10 minutes after 3 consecutive 0% polls
+          this._stealthDisabledUntil = Date.now() + 10 * 60 * 1000;
+          logger.warn(`Amazon: stealth disabled for 10min after ${this._stealthFailStreak} consecutive 0% polls`);
+        }
+      } else {
+        this._stealthFailStreak = 0;
       }
     }
 
