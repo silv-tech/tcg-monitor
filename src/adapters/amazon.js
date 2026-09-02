@@ -40,17 +40,6 @@ class AmazonAdapter extends BaseAdapter {
       'pokemon tcg booster box',
       'pokemon tcg sealed',
       'one piece card game booster box',
-      'dragon ball super card game booster box',
-      'yu-gi-oh booster box',
-      'lorcana booster box',
-      'magic the gathering booster box',
-      'digimon card game booster box',
-      'flesh and blood tcg booster box',
-      'weiss schwarz booster box',
-      'cardfight vanguard booster box',
-      'union arena booster box',
-      'star wars unlimited booster box',
-      'naruto boruto card game',
     ];
   }
 

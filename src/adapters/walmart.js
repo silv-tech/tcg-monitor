@@ -12,24 +12,10 @@ class WalmartAdapter extends BaseAdapter {
     this.watchlist = new Set(config.watchlist || []);
     // Search queries for ScraperAPI structured endpoint
     this.searchQueries = [
-      // Pokemon (highest demand — multiple queries for coverage)
       'pokemon tcg',
       'pokemon booster box',
       'pokemon elite trainer box',
       'pokemon tcg collection',
-      // Other TCGs
-      'one piece card game',
-      'dragon ball super card game',
-      'yu-gi-oh booster box',
-      'lorcana booster box',
-      'magic the gathering booster box',
-      'digimon card game',
-      'flesh and blood tcg',
-      'weiss schwarz booster',
-      'cardfight vanguard',
-      'union arena card game',
-      'star wars unlimited',
-      'naruto boruto card game',
     ];
   }
 
