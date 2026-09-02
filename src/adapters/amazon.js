@@ -23,23 +23,22 @@ const ACCESSORY_KEYWORDS = [
   'divider', 'accessories',
 ];
 
+// How often to run full ScraperAPI search for NEW product discovery
+const DISCOVERY_INTERVAL = 10 * 60 * 1000; // 10 minutes
+
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.domain = 'www.amazon.ca';
-    this._stealthFailStreak = 0; // consecutive polls with 0 stealth success
-    this._stealthDisabledUntil = 0; // skip stealth until this timestamp
-    // Search queries — autoparse with emi= filter ensures "sold by Amazon" only
+    this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
+    this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
+    this._monitorSuccessRate = 0;    // track product page stealth success %
+
+    // Consolidated queries — removed 5 redundant Pokemon queries
+    // "pokemon tcg sealed" covers ETBs, UPCs, bundles, preorders, collections
     this.searchQueries = [
-      // Pokemon (highest demand — multiple queries for coverage)
       'pokemon tcg booster box',
-      'pokemon elite trainer box',
-      'pokemon tcg collection box',
       'pokemon tcg sealed',
-      'pokemon tcg preorder',
-      'pokemon tcg booster bundle',
-      'pokemon tcg ultra premium collection',
-      // Other TCGs
       'one piece card game booster box',
       'dragon ball super card game booster box',
       'yu-gi-oh booster box',
@@ -56,31 +55,30 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
-   * Stealth-fetch an Amazon.ca search page and parse HTML for product results.
-   * emi=A3DWYIK6Y9EEQB restricts to Amazon-sold items at the URL level.
+   * Stealth-fetch a single Amazon product page and parse for price/stock.
+   * Product pages have lighter bot detection than search pages.
    */
-  async _stealthSearch(query) {
-    // emi= is Amazon.ca's seller ID — restricts results to "sold by Amazon"
-    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&emi=A3DWYIK6Y9EEQB`;
+  async _stealthCheckAsin(asin) {
+    const url = `https://www.amazon.ca/dp/${asin}`;
     const proxyUrl = getProxyUrl('residential');
 
     try {
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
-        timeoutMs: 15000,
+        timeoutMs: 12000,
       });
 
-      if (!html || html.length < 1000) return null;
+      if (!html || html.length < 2000) return null;
 
-      // Amazon CAPTCHA / bot check pages
+      // Bot detection / CAPTCHA pages
       if (html.includes('Robot Check') || html.includes('captcha') ||
           html.includes('Type the characters') || html.includes('Sorry, we just need to make sure')) {
         if (proxyUrl) _clearCache(proxyUrl);
         return null;
       }
 
-      return this._parseSearchHtml(html);
+      return this._parseProductPage(html, asin);
     } catch {
       if (proxyUrl) _clearCache(proxyUrl);
       return null;
@@ -88,204 +86,224 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
-   * Parse Amazon search page HTML for product data.
-   * Extracts from data-asin divs: ASIN, title, price, image, URL.
+   * Parse Amazon product page HTML for title, price, stock status, image.
    */
-  _parseSearchHtml(html) {
-    const items = [];
+  _parseProductPage(html, asin) {
+    // Title: <span id="productTitle">...</span>
+    let name = null;
+    const titleMatch = html.match(/id="productTitle"[^>]*>\s*([^<]+)/);
+    if (titleMatch) name = titleMatch[1].trim();
+    if (!name || name.length < 10) return null;
 
-    // Match each search result div with data-asin attribute
-    // Amazon uses: <div data-asin="B0XXXXXX" ... data-component-type="s-search-result">
-    const asinRegex = /data-asin="(B[A-Z0-9]{9})"/g;
-    const asins = new Set();
-    let match;
-    while ((match = asinRegex.exec(html)) !== null) {
-      asins.add(match[1]);
+    // Price — try multiple locations (Amazon uses different layouts)
+    let price = null;
+    // 1. a-offscreen (most reliable — screen reader price, always present)
+    const offscreenMatch = html.match(/class="a-offscreen">\s*\$?([\d,]+\.\d{2})\s*</);
+    if (offscreenMatch) price = normalizePrice(offscreenMatch[1]);
+    // 2. a-price-whole + a-price-fraction
+    if (!price) {
+      const wholeMatch = html.match(/class="a-price-whole">\s*(\d[\d,]*)/);
+      const fracMatch = html.match(/class="a-price-fraction">(\d+)/);
+      if (wholeMatch) {
+        const whole = wholeMatch[1].replace(/,/g, '');
+        price = parseFloat(`${whole}.${fracMatch ? fracMatch[1] : '00'}`);
+      }
+    }
+    // 3. priceblock_ourprice (older layout)
+    if (!price) {
+      const blockMatch = html.match(/id="priceblock_ourprice"[^>]*>\s*\$?([\d,]+\.\d{2})/);
+      if (blockMatch) price = normalizePrice(blockMatch[1]);
     }
 
-    if (asins.size === 0) return null;
+    // Stock status — check for add-to-cart button and OOS indicators
+    const hasAddToCart = html.includes('id="add-to-cart-button"') ||
+                         html.includes('id="submit.add-to-cart"') ||
+                         html.includes('name="submit.add-to-cart"');
+    const isOOS = html.includes('Currently unavailable') ||
+                  html.includes('id="outOfStockBuyBox"') ||
+                  html.includes('not available for purchase');
+    const inStock = hasAddToCart && !isOOS;
 
-    for (const asin of asins) {
-      // Find the block for this ASIN — search for the next ~5000 chars after the data-asin
-      const asinIdx = html.indexOf(`data-asin="${asin}"`);
-      if (asinIdx === -1) continue;
-      const block = html.substring(asinIdx, asinIdx + 5000);
-
-      // Extract title from <span class="a-text-normal"> or <h2> <a> <span>
-      let name = null;
-      const titleMatch = block.match(/class="a-size-(?:base-plus|medium)[^"]*a-text-normal[^"]*"[^>]*>([^<]+)</);
-      if (titleMatch) {
-        name = titleMatch[1].trim();
-      } else {
-        // Fallback: look for any <span class="a-text-normal">
-        const fallback = block.match(/class="a-text-normal"[^>]*>([^<]+)</);
-        if (fallback) name = fallback[1].trim();
-      }
-      if (!name || name.length < 10) continue;
-
-      // Extract price from <span class="a-offscreen">$XX.XX</span>
-      let price = null;
-      const priceMatch = block.match(/class="a-offscreen">\s*\$?([\d,]+\.?\d*)\s*<\/span>/);
-      if (priceMatch) {
-        price = normalizePrice(priceMatch[1]);
-      }
-
-      // Extract image from <img class="s-image" src="..."
-      let image = '';
-      const imgMatch = block.match(/class="s-image"[^>]*src="([^"]+)"/);
-      if (imgMatch) image = imgMatch[1];
-
-      // URL is always /dp/ASIN
-      const url = `https://www.amazon.ca/dp/${asin}`;
-
-      items.push({
-        asin,
-        name,
-        price,
-        url,
-        image,
-        sold_by: '', // emi= filter ensures Amazon-sold at URL level
-      });
+    // Image: <img id="landingImage" src="...">
+    let image = '';
+    const imgMatch = html.match(/id="landingImage"[^>]*src="([^"]+)"/);
+    if (imgMatch) image = imgMatch[1];
+    if (!image) {
+      const hiresMatch = html.match(/data-old-hires="([^"]+)"/);
+      if (hiresMatch) image = hiresMatch[1];
     }
 
-    return items.length > 0 ? items : null;
+    return { asin, name, price, inStock, image };
   }
 
   async fetchProducts() {
     const products = {};
-    const proxyUrl = getProxyUrl('residential');
-    const failedQueries = [];
-    let stealthHits = 0;
-    const stealthEnabled = Date.now() >= this._stealthDisabledUntil;
+    const now = Date.now();
+    const timeSinceDiscovery = now - this._lastDiscoveryAt;
+    const needsDiscovery = timeSinceDiscovery >= DISCOVERY_INTERVAL || this._knownProducts.size === 0;
 
-    if (!stealthEnabled) {
-      // Skip stealth entirely — go straight to ScraperAPI
-      failedQueries.push(...this.searchQueries);
-      logger.info(`Amazon: stealth disabled (${Math.round((this._stealthDisabledUntil - Date.now()) / 60000)}min remaining) — using ScraperAPI`);
+    if (needsDiscovery) {
+      // ── DISCOVERY ── ScraperAPI search for new products (paid, every 10 min)
+      await this._runDiscovery(products);
+      this._lastDiscoveryAt = now;
+
+      // Update known products cache
+      for (const [sku, product] of Object.entries(products)) {
+        this._knownProducts.set(sku, product);
+      }
+
+      // Prune products not seen in 24h
+      for (const [asin, data] of this._knownProducts) {
+        if (!(asin in products) && (now - (data.lastSeen || 0)) > 24 * 60 * 60 * 1000) {
+          this._knownProducts.delete(asin);
+        }
+      }
+
+      logger.info(`Amazon: DISCOVERY — ${Object.keys(products).length} products, ${this._knownProducts.size} known ASINs. Next in ${DISCOVERY_INTERVAL / 60000}min.`);
     } else {
-      // Step 1: Stealth search (free) — batches of 4 with jitter
-      const BATCH_SIZE = 4;
-      for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
-        const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
-        const batchResults = await Promise.allSettled(
-          batch.map(query =>
-            this._stealthSearch(query).then(items => ({ query, items }))
-          )
-        );
-
-        for (const result of batchResults) {
-          if (result.status === 'rejected') {
-            failedQueries.push(result.reason?.query || 'unknown');
-            continue;
-          }
-          const { query, items } = result.value;
-          if (!items || items.length === 0) {
-            failedQueries.push(query);
-            continue;
-          }
-
-          stealthHits++;
-          this._processSearchItems(items, products);
-          logger.info(`Amazon: "${query}" — ${items.length} results (stealth, free)`);
-        }
-
-        // Rotate IP + delay between batches
-        if (i + BATCH_SIZE < this.searchQueries.length) {
-          const px = getProxyUrl('residential');
-          if (px) _clearCache(px);
-          await sleep(1500 + Math.floor(Math.random() * 1500));
-        }
-      }
-
-      // Step 1.5: Retry failed queries with fresh IPs before burning ScraperAPI credits
-      if (failedQueries.length > 0) {
-        const retryQueries = [...failedQueries];
-        failedQueries.length = 0;
-
-        const retryProxy = getProxyUrl('residential');
-        if (retryProxy) _clearCache(retryProxy);
-        await sleep(2000 + Math.floor(Math.random() * 2000));
-
-        const RETRY_BATCH = 2;
-        for (let i = 0; i < retryQueries.length; i += RETRY_BATCH) {
-          const batch = retryQueries.slice(i, i + RETRY_BATCH);
-          const retryResults = await Promise.allSettled(
-            batch.map(query =>
-              this._stealthSearch(query).then(items => ({ query, items }))
-            )
-          );
-
-          for (const result of retryResults) {
-            if (result.status === 'rejected') {
-              failedQueries.push(result.reason?.query || 'unknown');
-              continue;
-            }
-            const { query, items } = result.value;
-            if (!items || items.length === 0) {
-              failedQueries.push(query);
-              continue;
-            }
-
-            stealthHits++;
-            this._processSearchItems(items, products);
-            logger.info(`Amazon: "${query}" — ${items.length} results (stealth retry, free)`);
-          }
-
-          if (i + RETRY_BATCH < retryQueries.length) {
-            const px = getProxyUrl('residential');
-            if (px) _clearCache(px);
-            await sleep(1500 + Math.floor(Math.random() * 1500));
-          }
-        }
-      }
-
-      // Adaptive stealth disable — if stealth consistently fails, skip it to save time
-      if (stealthHits === 0) {
-        this._stealthFailStreak++;
-        if (this._stealthFailStreak >= 3) {
-          // Disable stealth for 10 minutes after 3 consecutive 0% polls
-          this._stealthDisabledUntil = Date.now() + 10 * 60 * 1000;
-          logger.warn(`Amazon: stealth disabled for 10min after ${this._stealthFailStreak} consecutive 0% polls`);
-        }
-      } else {
-        this._stealthFailStreak = 0;
-      }
+      // ── MONITOR ── Stealth-check known ASINs via /dp/ pages (FREE, every poll)
+      await this._monitorKnownAsins(products);
     }
-
-    // Step 2: ScraperAPI fallback for queries that failed both stealth passes
-    if (failedQueries.length > 0 && isConfigured()) {
-      const scraperResults = await Promise.allSettled(
-        failedQueries.map(query =>
-          amazonSearch(query, { retailerId: this.id })
-            .then(data => ({ query, data }))
-        )
-      );
-
-      for (const result of scraperResults) {
-        if (result.status === 'rejected') {
-          logger.warn(`Amazon: search failed: ${result.reason.message}`);
-          continue;
-        }
-        const { query, data } = result.value;
-        if (!data) continue;
-
-        const results = data.results || data.organic_results || data.search_results ||
-          data.items || data.ads || [];
-        if (results.length === 0) continue;
-
-        this._processSearchItems(results, products);
-        logger.info(`Amazon: "${query}" — ${results.length} results (scraper fallback, 5 credits)`);
-      }
-    }
-
-    logger.info(`Amazon: ${stealthHits}/${this.searchQueries.length} queries free (stealth), ${failedQueries.length} used ScraperAPI. ${Object.keys(products).length} total products.`);
 
     return products;
   }
 
   /**
+   * Discovery: ScraperAPI search queries to find NEW products.
+   * 14 queries × 5 credits = 70 credits per discovery (every 10 min).
+   */
+  async _runDiscovery(products) {
+    if (!isConfigured()) {
+      logger.warn('Amazon: ScraperAPI not configured, returning cached products');
+      for (const [asin, data] of this._knownProducts) {
+        products[asin] = data;
+      }
+      return;
+    }
+
+    const scraperResults = await Promise.allSettled(
+      this.searchQueries.map(query =>
+        amazonSearch(query, { retailerId: this.id })
+          .then(data => ({ query, data }))
+      )
+    );
+
+    let queryCount = 0;
+    for (const result of scraperResults) {
+      if (result.status === 'rejected') {
+        logger.warn(`Amazon: discovery failed: ${result.reason.message}`);
+        continue;
+      }
+      const { query, data } = result.value;
+      if (!data) continue; // rate-limited
+
+      const results = data.results || data.organic_results || data.search_results ||
+        data.items || data.ads || [];
+      if (results.length === 0) continue;
+
+      queryCount++;
+      this._processSearchItems(results, products);
+      logger.info(`Amazon: "${query}" — ${results.length} results (discovery, 5 credits)`);
+    }
+
+    // Also include previously known ASINs not in this discovery (may still be live)
+    for (const [asin, cached] of this._knownProducts) {
+      if (!(asin in products)) {
+        products[asin] = cached;
+      }
+    }
+
+    logger.info(`Amazon: discovery — ${queryCount} queries returned data (${queryCount * 5} credits).`);
+  }
+
+  /**
+   * Monitor: stealth-check known ASINs via product pages (FREE).
+   * Returns cached data for ASINs where stealth fails (prevents false OOS).
+   */
+  async _monitorKnownAsins(products) {
+    const asins = [...this._knownProducts.keys()];
+    if (asins.length === 0) {
+      logger.debug('Amazon: no known ASINs — waiting for discovery');
+      return;
+    }
+
+    let checked = 0;
+    let updated = 0;
+    const BATCH = 4;
+
+    for (let i = 0; i < asins.length; i += BATCH) {
+      const batch = asins.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        batch.map(asin => this._stealthCheckAsin(asin).then(data => ({ asin, data })))
+      );
+
+      for (const result of results) {
+        if (result.status === 'rejected') continue;
+        const { asin, data } = result.value;
+        checked++;
+
+        if (data) {
+          updated++;
+          const cached = this._knownProducts.get(asin);
+          // Keep cached identity (name, category, retailer) — update price + stock only
+          const product = {
+            ...cached,
+            price: data.price || cached.price,
+            inStock: data.inStock,
+            canAddToCart: data.inStock,
+            image: data.image || cached.image,
+            lastSeen: Date.now(),
+          };
+          this._knownProducts.set(asin, product);
+          products[asin] = product;
+        } else {
+          // Stealth failed — return cached data unchanged (no false OOS events)
+          const cached = this._knownProducts.get(asin);
+          if (cached) products[asin] = cached;
+        }
+      }
+
+      // IP rotation between batches
+      if (i + BATCH < asins.length) {
+        const px = getProxyUrl('residential');
+        if (px) _clearCache(px);
+        await sleep(1000 + Math.floor(Math.random() * 1500));
+      }
+    }
+
+    this._monitorSuccessRate = asins.length > 0 ? Math.round((updated / asins.length) * 100) : 0;
+    logger.info(`Amazon: MONITOR — ${updated}/${checked} ASINs updated (free stealth). ${this._monitorSuccessRate}% success.`);
+  }
+
+  /**
+   * Fetch a single product page — used by watchlist fast-polling.
+   */
+  async fetchProductPage(asin) {
+    const data = await this._stealthCheckAsin(asin);
+    if (!data) return null;
+
+    // Apply game name + TCG filters
+    const lowerName = data.name.toLowerCase();
+    const hasGameName = GAME_NAMES.some(g => lowerName.includes(g));
+    if (!hasGameName) return null;
+    if (!isTCGProduct(data.name)) return null;
+
+    return this.classify({
+      sku: asin,
+      name: data.name,
+      price: data.price,
+      currency: 'CAD',
+      url: `https://www.amazon.ca/dp/${asin}`,
+      image: data.image || '',
+      inStock: data.inStock,
+      canAddToCart: data.inStock,
+      shipsToHome: true,
+    });
+  }
+
+  /**
    * Process search result items into classified products.
-   * Shared by both stealth and ScraperAPI search paths.
+   * Used by discovery (ScraperAPI JSON results).
    * Applies all 5 filter layers: game name, TCG product, accessory, seller, price.
    */
   _processSearchItems(items, products) {

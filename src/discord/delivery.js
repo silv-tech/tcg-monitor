@@ -58,6 +58,14 @@ class DeliveryQueue {
         logger.debug(`Non-TCG product filtered: ${event.product?.name || 'unknown'}`);
         continue;
       }
+      // Skip out-of-stock products — only alert on items actually available to buy
+      // RESTOCK and PREORDER_LIVE events are exempt (they explicitly signal availability changes)
+      if (!event._scanTier && event.product && event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE') {
+        if (event.product.inStock === false) {
+          logger.debug(`OOS product filtered: ${event.type} — ${event.product?.name || 'unknown'}`);
+          continue;
+        }
+      }
       // Skip products with no price — placeholder/unavailable listings
       if (!event._scanTier && event.product) {
         const price = event.product.price;
