@@ -17,11 +17,11 @@
     "name": "EB Games",
     "url": "https://www.ebgames.ca",
     "adapter": "ebgames",
-    "intervalMs": 60000,
+    "intervalMs": 30000,
     "proxyTier": "none",
-    "enabled": false,
-    "color": "#e31937",
-    "_note": "Site rebuilt on Odoo — adapter selectors broken, needs rewrite"
+    "enabled": true,
+    "maxProducts": 1200,
+    "color": "#e31937"
   },
   {
     "_phase": 1,

@@ -102,11 +102,11 @@ describe('detectEvents', () => {
     const old = makeProduct({ inStock: false, canAddToCart: false, price: 200 });
     const newProd = makeProduct({ inStock: true, canAddToCart: true, price: 150 });
     const events = detectEvents(old, newProd);
-    assert.ok(events.length >= 3, `Expected 3+ events, got ${events.length}`);
     const types = events.map(e => e.type);
     assert.ok(types.includes(EVENT_TYPES.RESTOCK));
     assert.ok(types.includes(EVENT_TYPES.PRICE_CHANGE));
-    assert.ok(types.includes(EVENT_TYPES.CART_AVAILABLE));
+    // CART_AVAILABLE is suppressed when RESTOCK fires in the same cycle (no duplicate alerts)
+    assert.ok(!types.includes(EVENT_TYPES.CART_AVAILABLE));
   });
 
   it('no events when nothing changes', () => {

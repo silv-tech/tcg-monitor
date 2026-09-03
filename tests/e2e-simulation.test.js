@@ -44,7 +44,7 @@ describe('E2E Simulation: 50 SKUs go live', () => {
     const restocks = events.filter(e => e.type === EVENT_TYPES.RESTOCK);
     const cartEvents = events.filter(e => e.type === EVENT_TYPES.CART_AVAILABLE);
     assert.strictEqual(restocks.length, 50);
-    assert.strictEqual(cartEvents.length, 50);
+    assert.strictEqual(cartEvents.length, 0); // folded into RESTOCK — no duplicate alerts
   });
 
   it('handles mixed events across 50 SKUs', () => {
@@ -52,7 +52,7 @@ describe('E2E Simulation: 50 SKUs go live', () => {
     const newProducts = {};
     for (let i = 1; i <= 50; i++) {
       if (i <= 20) {
-        // Restocks — both inStock and canAddToCart flip, so RESTOCK + CART_AVAILABLE
+        // Restocks — both inStock and canAddToCart flip; CART_AVAILABLE is suppressed by RESTOCK
         // Use fixed price so no PRICE_CHANGE fires for these
         oldProducts[`SKU-${i}`] = makeProduct(`SKU-${i}`, { inStock: false, canAddToCart: false, price: 99.99 });
         newProducts[`SKU-${i}`] = makeProduct(`SKU-${i}`, { inStock: true, canAddToCart: true, price: 99.99 });
@@ -76,7 +76,7 @@ describe('E2E Simulation: 50 SKUs go live', () => {
     const priceChanges = events.filter(e => e.type === EVENT_TYPES.PRICE_CHANGE);
     const newSkus = events.filter(e => e.type === EVENT_TYPES.NEW_SKU);
     assert.strictEqual(restocks.length, 20);
-    assert.strictEqual(cartEvents.length, 20); // canAddToCart also flips
+    assert.strictEqual(cartEvents.length, 0); // suppressed when RESTOCK fires
     assert.strictEqual(priceChanges.length, 10);
     assert.strictEqual(newSkus.length, 10);
   });

@@ -1,14 +1,334 @@
 const BaseAdapter = require('./base');
+const logger = require('../monitoring/logger');
+const { sleep } = require('../utils/helpers');
+
+const DEEP_CRAWL_INTERVAL = 10 * 60 * 1000;
+const CONCURRENCY = 4;
+
+// Odoo eCommerce category routes. "Other TCG" mixes accessories/D&D, so it's narrowed with search=.
+// fastPages: pages fetched every poll (newest-first + recently-modified). Others rely on the deep crawl.
+const SOURCES = [
+  { key: 'pokemon',    path: '/shop/category/trading-cards-pokemon-204', fastPages: 2 },
+  { key: 'onepiece',   path: '/shop/category/trading-cards-one-piece-208', fastPages: 1 },
+  { key: 'dragonball', path: '/shop/category/trading-cards-other-tcg-210', search: 'dragon ball', fastPages: 1 },
+  { key: 'lorcana',    path: '/shop/category/trading-cards-other-tcg-210', search: 'lorcana' },
+  { key: 'starwars',   path: '/shop/category/trading-cards-other-tcg-210', search: 'star wars' },
+  { key: 'digimon',    path: '/shop/category/trading-cards-other-tcg-210', search: 'digimon' },
+  { key: 'unionarena', path: '/shop/category/trading-cards-other-tcg-210', search: 'union arena' },
+  { key: 'gundam',     path: '/shop/category/trading-cards-other-tcg-210', search: 'gundam' },
+  { key: 'riftbound',  path: '/shop/category/trading-cards-riftbound-207' },
+  { key: 'mtg',        path: '/shop/category/trading-cards-magic-the-gathering-205' },
+  { key: 'yugioh',     path: '/shop/category/trading-cards-yu-gi-oh-206' },
+];
+
+const SORT_NEWEST = 'create_date desc';
+const SORT_MODIFIED = 'write_date desc';
+
+// Cloudflare challenges impit here unless cert verification is off (it changes the TLS ClientHello)
+const STEALTH_OPTS = { ignoreTlsErrors: true, timeoutMs: 12000 };
+
+// Cloudflare rate-limits bursts (~90 requests in 7s got 429s, 2 req/s still tripped it occasionally)
+const MIN_SPACING_MS = 750;
+const RATE_LIMIT_COOLDOWN_MS = 15000;
+
+const CARD_RE = /<form role="article"[^>]*\boe_product_cart\b[^>]*>[\s\S]*?<\/form>/g;
+
+function decodeEntities(str) {
+  return str
+    .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+}
+
+function isChallenge(html) {
+  return !html || html.length < 2000
+    || /<title>Just a moment/i.test(html) || html.includes('_cf_chl_opt') || html.includes('cf-browser-verification');
+}
+
+function maxPage(html) {
+  let max = 1;
+  for (const m of html.matchAll(/\/page\/(\d+)/g)) max = Math.max(max, parseInt(m[1], 10));
+  return max;
+}
+
+function parseCard(card, baseUrl, game) {
+  const link = card.match(/href="\/shop\/(?:[^"/]+\/)?(\d+)-([^"]*?)-(\d+)"/);
+  if (!link) return null;
+  const [, sku, slug, templateId] = link;
+
+  const label = card.match(/aria-label="([^"]*)"/);
+  const name = label ? decodeEntities(label[1]).replace(/\s+/g, ' ').trim() : '';
+  if (!name) return null;
+
+  const priceMatch = card.match(/condition_prices\[&#39;new&#39;\][^>]*>[^<]*<span class="oe_currency_value">([\d.,]+)/)
+    || card.match(/oe_currency_value">([\d.,]+)/);
+  const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+
+  const badges = [...card.matchAll(/class="s_badge[^"]*"[^>]*>(?:\s*<i[^>]*><\/i>)?\s*([^<]+)</g)].map(m => m[1].trim());
+  const badgeInStock = badges.some(b => /in stock/i.test(b));
+  const canAddToCart = /name="product_id"/.test(card);
+  const productId = card.match(/name="product_id"[^>]*value="(\d+)"/);
+  const img = card.match(/<img src="([^"]+)"/);
+
+  return {
+    sku,
+    name,
+    price,
+    currency: 'CAD',
+    url: `${baseUrl}/shop/${sku}-${slug}-${templateId}`,
+    image: img ? `${baseUrl}${decodeEntities(img[1])}` : '',
+    inStock: badgeInStock || canAddToCart,
+    canAddToCart,
+    isPreorderable: /pre-?order/i.test(name),
+    seller: 'EB Games',
+    shipsToHome: true,
+    templateId,
+    productId: productId ? productId[1] : null,
+    game,
+  };
+}
+
+async function runPool(tasks, limit) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      try {
+        results[i] = { ok: true, value: await tasks[i]() };
+      } catch (err) {
+        results[i] = { ok: false, error: err };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
 
 class EBGamesAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
+    this.watchlist = new Set(config.watchlist || []);
+    this._knownProducts = new Map(); // sku → classified product (full catalog from deep crawl)
+    this._pageCounts = new Map();    // source key → page count from last deep crawl
+    this._lastDeepCrawlAt = 0;
+    this._deepCrawlRunning = false;
+    this._nextSlot = 0;
+    this._cooldownUntil = 0;
+  }
+
+  // Global spacer shared by every EB Games request (crawl, fast poll, watchlist)
+  async _throttle() {
+    const now = Date.now();
+    const slot = Math.max(now, this._nextSlot, this._cooldownUntil);
+    this._nextSlot = slot + MIN_SPACING_MS;
+    if (slot > now) await sleep(slot - now);
   }
 
   async fetchProducts() {
-    // EB Games site rebuilt on Odoo with Cloudflare WAF — old selectors broken.
-    // Adapter disabled in retailers.json. This stub prevents crashes if accidentally enabled.
-    throw new Error('EB Games adapter disabled — site rebuilt on Odoo, needs full rewrite');
+    if (this._knownProducts.size === 0) {
+      // First run seeds the whole catalog synchronously — otherwise the deep crawl's
+      // products would land later and diff as hundreds of NEW_SKU events.
+      await this._deepCrawl();
+    } else {
+      if (!this._deepCrawlRunning && Date.now() - this._lastDeepCrawlAt >= DEEP_CRAWL_INTERVAL) {
+        this._deepCrawl().catch(err => logger.warn(`EB Games: deep crawl error: ${err.message}`));
+      }
+      await this._fastPoll();
+    }
+    return Object.fromEntries(this._knownProducts);
+  }
+
+  _listingUrl(source, page, sort) {
+    const params = new URLSearchParams({ order: sort });
+    if (source.search) params.set('search', source.search);
+    return `${this.url}${source.path}${page > 1 ? `/page/${page}` : ''}?${params}`;
+  }
+
+  async _fetchListing(url) {
+    await this._throttle();
+    try {
+      const html = await this.stealthFetch(url, { ...STEALTH_OPTS, maxRetries: 1 });
+      if (isChallenge(html)) throw new Error('Cloudflare challenge');
+      return html;
+    } catch (err) {
+      if (err.message.includes('429')) this._cooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+      throw err;
+    }
+  }
+
+  _ingest(html, source, into) {
+    for (const m of html.matchAll(CARD_RE)) {
+      const parsed = parseCard(m[0], this.url, source.key);
+      if (parsed && !into.has(parsed.sku)) into.set(parsed.sku, this.classify(parsed));
+    }
+  }
+
+  // Newer observation wins — a background crawl must not overwrite a fresher fast-poll result
+  _merge(fresh, replace) {
+    const target = replace ? new Map(fresh) : this._knownProducts;
+    const previous = this._knownProducts;
+    for (const [sku, old] of previous) {
+      const next = fresh.get(sku);
+      if (!next) { if (!replace) target.set(sku, old); continue; }
+      if (old.lastSeen > next.lastSeen) target.set(sku, old);
+      else target.set(sku, next);
+    }
+    for (const [sku, next] of fresh) if (!previous.has(sku)) target.set(sku, next);
+    this._knownProducts = target;
+  }
+
+  // Every poll: newest-first + recently-modified pages of the hot categories.
+  // Categories small enough to fit in fastPages are covered completely each poll.
+  async _fastPoll() {
+    const start = Date.now();
+    const jobs = [];
+    for (const src of SOURCES) {
+      if (!src.fastPages) continue;
+      const total = this._pageCounts.get(src.key) || src.fastPages;
+      if (total <= src.fastPages) {
+        for (let p = 1; p <= total; p++) jobs.push({ src, url: this._listingUrl(src, p, SORT_NEWEST) });
+      } else {
+        for (let p = 1; p <= src.fastPages; p++) {
+          jobs.push({ src, url: this._listingUrl(src, p, SORT_NEWEST) });
+          jobs.push({ src, url: this._listingUrl(src, p, SORT_MODIFIED) });
+        }
+      }
+    }
+
+    const results = await runPool(jobs.map(j => () => this._fetchListing(j.url)), CONCURRENCY);
+    const seen = new Map();
+    let ok = 0;
+    results.forEach((r, i) => {
+      if (!r.ok) { logger.warn(`EB Games: fast fetch failed ${jobs[i].url}: ${r.error.message}`); return; }
+      ok++;
+      this._ingest(r.value, jobs[i].src, seen);
+    });
+    if (ok === 0) throw new Error('all fast-poll pages failed (Cloudflare block?)');
+
+    const added = [...seen.keys()].filter(sku => !this._knownProducts.has(sku)).length;
+    this._merge(seen, false);
+    const inStock = [...seen.values()].filter(p => p.inStock).length;
+    logger.info(`EB Games: FAST — ${ok}/${jobs.length} pages, ${seen.size} products (${inStock} in stock${added ? `, ${added} new` : ''}), ${Date.now() - start}ms`);
+  }
+
+  // Every 10 min: every page of every category (page size is locked to 10 server-side).
+  async _deepCrawl() {
+    this._deepCrawlRunning = true;
+    const start = Date.now();
+    try {
+      const fresh = new Map();
+      let fetched = 0;
+      let failed = 0;
+
+      const firstPages = await runPool(
+        SOURCES.map(src => () => this._fetchListing(this._listingUrl(src, 1, SORT_NEWEST))),
+        CONCURRENCY,
+      );
+      const remaining = [];
+      SOURCES.forEach((src, i) => {
+        const r = firstPages[i];
+        if (!r.ok) { failed++; logger.warn(`EB Games: ${src.key} page 1 failed: ${r.error.message}`); return; }
+        fetched++;
+        const pages = maxPage(r.value);
+        this._pageCounts.set(src.key, pages);
+        this._ingest(r.value, src, fresh);
+        for (let p = 2; p <= pages; p++) remaining.push({ src, p });
+      });
+
+      const rest = await runPool(
+        remaining.map(({ src, p }) => () => this._fetchListing(this._listingUrl(src, p, SORT_NEWEST))),
+        CONCURRENCY,
+      );
+      rest.forEach((r, i) => {
+        if (!r.ok) { failed++; return; }
+        fetched++;
+        this._ingest(r.value, remaining[i].src, fresh);
+      });
+
+      if (fetched === 0) throw new Error('all listing pages failed (Cloudflare block?)');
+
+      // Only a complete crawl may drop delisted products
+      this._merge(fresh, failed === 0);
+      this._lastDeepCrawlAt = Date.now();
+
+      const inStock = [...this._knownProducts.values()].filter(p => p.inStock).length;
+      logger.info(`EB Games: DEEP — ${fetched} pages${failed ? ` (${failed} failed)` : ''}, ${this._knownProducts.size} products (${inStock} in stock), ${Date.now() - start}ms. Next in ${DEEP_CRAWL_INTERVAL / 60000}min.`);
+    } finally {
+      this._deepCrawlRunning = false;
+    }
+  }
+
+  /**
+   * Watchlist fast-poll for a single SKU. Odoo only resolves /shop/{templateId}, so the SKU is
+   * mapped through the crawled catalog, or looked up via search (which matches default_code).
+   */
+  async fetchProductPage(sku) {
+    const id = String(sku);
+    let templateId = this._knownProducts.get(id)?.templateId;
+    if (!templateId) templateId = await this._lookupTemplateId(id);
+    if (!templateId) {
+      logger.warn(`EB Games: WATCHLIST ${id} — SKU not found on site`);
+      return null;
+    }
+
+    const start = Date.now();
+    await this._throttle();
+    const html = await this.stealthFetch(`${this.url}/shop/${templateId}`, { ...STEALTH_OPTS, maxRetries: 1 });
+    if (isChallenge(html)) throw new Error('Cloudflare challenge');
+
+    const ld = this._productJsonLd(html);
+    if (!ld) {
+      logger.warn(`EB Games: WATCHLIST ${id} — no product JSON-LD on page`);
+      return null;
+    }
+
+    const availability = ld.offers?.availability || '';
+    const inStock = /InStock|PreOrder|LimitedAvailability/i.test(availability);
+    const known = this._knownProducts.get(id) || {};
+    const product = this.classify({
+      ...known,
+      sku: id,
+      name: ld.name || known.name || '',
+      price: Number(ld.offers?.price) || known.price || 0,
+      currency: 'CAD',
+      url: ld.url || known.url || `${this.url}/shop/${templateId}`,
+      image: ld.image || known.image || '',
+      inStock,
+      canAddToCart: inStock && html.includes('id="add_to_cart"'),
+      isPreorderable: /PreOrder/i.test(availability) || /pre-?order/i.test(ld.name || ''),
+      seller: 'EB Games',
+      shipsToHome: true,
+      templateId: String(templateId),
+      gtin: ld.gtin || known.gtin || null,
+    });
+    product._watchlist = true;
+    this._knownProducts.set(id, product);
+    logger.info(`EB Games: WATCHLIST ${id} — "${product.name}" | inStock=${inStock} | $${product.price} | ${Date.now() - start}ms`);
+    return product;
+  }
+
+  async _lookupTemplateId(sku) {
+    try {
+      const html = await this._fetchListing(`${this.url}/shop?search=${encodeURIComponent(sku)}`);
+      for (const m of html.matchAll(CARD_RE)) {
+        const parsed = parseCard(m[0], this.url, 'other');
+        if (parsed?.sku === sku) return parsed.templateId;
+      }
+    } catch (err) {
+      logger.warn(`EB Games: SKU lookup failed for ${sku}: ${err.message}`);
+    }
+    return null;
+  }
+
+  _productJsonLd(html) {
+    for (const m of html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)) {
+      try {
+        const data = JSON.parse(m[1]);
+        const product = (Array.isArray(data) ? data : [data]).find(i => i['@type'] === 'Product');
+        if (product) return product;
+      } catch { /* not a product block */ }
+    }
+    return null;
   }
 }
 

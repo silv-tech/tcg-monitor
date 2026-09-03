@@ -14,15 +14,20 @@ async function getImpit() {
 // Cache Impit instances per proxy URL to reuse connections
 const impitCache = new Map();
 
-async function getImpitInstance(proxyUrl) {
-  const cacheKey = proxyUrl || '__direct__';
+function instanceKey(proxyUrl, ignoreTlsErrors) {
+  return `${proxyUrl || '__direct__'}${ignoreTlsErrors ? '|itls' : ''}`;
+}
+
+async function getImpitInstance(proxyUrl, ignoreTlsErrors = false) {
+  const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
   if (impitCache.has(cacheKey)) return impitCache.get(cacheKey);
 
   const Impit = await getImpit();
   const instance = new Impit({
     browser: 'chrome',
     proxyUrl: proxyUrl || undefined,
-    ignoreTlsErrors: false,
+    // Cert verification alters impit's ClientHello; some Cloudflare sites (EB Games) only pass with it off
+    ignoreTlsErrors,
   });
 
   impitCache.set(cacheKey, instance);
@@ -114,11 +119,13 @@ async function stealthGet(url, opts = {}) {
     json = false,
     headers = {},
     useCookieJar = false,
+    ignoreTlsErrors = false,
   } = opts;
+  const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const impit = await getImpitInstance(proxyUrl);
+      const impit = await getImpitInstance(proxyUrl, ignoreTlsErrors);
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -150,6 +157,7 @@ async function stealthGet(url, opts = {}) {
       clearTimeout(timeout);
 
       if (response.status === 429) {
+        if (attempt >= maxRetries) throw new Error(`Rate limited (429): ${url}`);
         const retryAfter = parseInt(response.headers.get('retry-after') || '5') * 1000;
         logger.warn(`Stealth: rate limited on ${url}, waiting ${retryAfter}ms`);
         await sleep(retryAfter);
@@ -159,7 +167,6 @@ async function stealthGet(url, opts = {}) {
       if (response.status === 403 || response.status === 503) {
         logger.warn(`Stealth: blocked (${response.status}) on ${url}, attempt ${attempt}/${maxRetries}`);
         // Clear cached instance on block — next attempt gets a fresh connection
-        const cacheKey = proxyUrl || '__direct__';
         impitCache.delete(cacheKey);
         if (attempt < maxRetries) {
           await sleep(retryDelayMs * attempt);
@@ -176,7 +183,6 @@ async function stealthGet(url, opts = {}) {
       if (err.message?.includes('Blocked after')) throw err;
 
       // Clear cached instance on error
-      const cacheKey = proxyUrl || '__direct__';
       impitCache.delete(cacheKey);
 
       logger.warn(`Stealth: error on ${url}: ${err.message}, attempt ${attempt}/${maxRetries}`);
@@ -190,9 +196,8 @@ async function stealthGet(url, opts = {}) {
 /**
  * Clear a cached impit instance — forces a new connection (and new IP with rotating proxies).
  */
-function _clearCache(proxyUrl) {
-  const cacheKey = proxyUrl || '__direct__';
-  impitCache.delete(cacheKey);
+function _clearCache(proxyUrl, ignoreTlsErrors = false) {
+  impitCache.delete(instanceKey(proxyUrl, ignoreTlsErrors));
 }
 
 module.exports = { stealthGet, stealthWarmup, getWarmupCookies, clearWarmupCookies, _clearCache };
