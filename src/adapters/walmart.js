@@ -4,6 +4,8 @@ const { normalizePrice } = require('../utils/helpers');
 const { walmartProductLookup } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
+const state = require('../core/state');
+const { hashSku } = require('../utils/helpers');
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -480,7 +482,7 @@ class WalmartAdapter extends BaseAdapter {
       const groupLabel = this._groupIndex % this._queryGroups.length === 0 ? 'A' : 'B';
       this._groupIndex++;
 
-      // Pass 1: all queries in parallel
+      // Pass 1: all queries in parallel — results returned IMMEDIATELY for alerting
       const start = Date.now();
       const results = await Promise.allSettled(
         group.map(query =>
@@ -498,30 +500,62 @@ class WalmartAdapter extends BaseAdapter {
         this._processSearchItems(items, products);
       }
 
-      // Pass 2: retry failed queries on a fresh IP
+      const elapsed = Date.now() - start;
+      logger.info(`Walmart: group ${groupLabel} — ${hits}/${group.length} stealth, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
+
+      // Pass 2 (background): retry failed queries on a fresh IP.
+      // Runs AFTER pass-1 products are returned for immediate alerting.
+      // Recovered products are saved directly to Redis so they appear in the next diff.
       if (failedQueries.length > 0) {
+        this._retryInBackground(failedQueries, groupLabel);
+      }
+
+      return products;
+    } finally {
+      this._polling = false;
+    }
+  }
+
+  /**
+   * Background retry: recover failed queries on a fresh IP and save to Redis.
+   * Fire-and-forget — never blocks pass-1 alerting.
+   */
+  _retryInBackground(failedQueries, groupLabel) {
+    setImmediate(async () => {
+      try {
         _clearCache(getProxyUrl('residential'));
         const retryResults = await Promise.allSettled(
           failedQueries.map(query =>
             this._stealthSearch(query).then(items => ({ query, items }))
           )
         );
+
+        const recovered = {};
+        let retryHits = 0;
         for (const result of retryResults) {
           if (result.status === 'rejected') continue;
           const { items } = result.value;
           if (!items || items.length === 0) continue;
-          hits++;
-          this._processSearchItems(items, products);
+          retryHits++;
+          this._processSearchItems(items, recovered);
         }
+
+        // Save recovered products directly to Redis state for next diff cycle
+        const entries = Object.entries(recovered);
+        if (entries.length > 0) {
+          const pipeline = state.getRedis().pipeline();
+          for (const [sku, product] of entries) {
+            const key = `tcg:product:${hashSku(this.id, sku)}`;
+            pipeline.set(key, JSON.stringify(product), 'EX', 86400 * 7);
+          }
+          await pipeline.exec();
+        }
+
+        logger.info(`Walmart: group ${groupLabel} retry — ${retryHits}/${failedQueries.length} recovered, ${entries.length} products saved to Redis`);
+      } catch (err) {
+        logger.warn(`Walmart: background retry error: ${err.message}`);
       }
-
-      const elapsed = Date.now() - start;
-      logger.info(`Walmart: group ${groupLabel} — ${hits}/${group.length} stealth${failedQueries.length > 0 ? ` (${failedQueries.length} retried)` : ''}, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
-
-      return products;
-    } finally {
-      this._polling = false;
-    }
+    });
   }
 
   /**
