@@ -20,45 +20,45 @@ class BestBuyAdapter extends BaseAdapter {
     const products = {};
     const allSkus = [];
 
-    // Phase 1: Search for products
-    for (const query of this.searchQueries) {
-      try {
-        const searchUrl = `${this.url}/api/v2/json/search?query=${encodeURIComponent(query)}&lang=en-CA&pageSize=${this.pageSize}`;
-        const data = await this.fetch(searchUrl, { json: true, timeoutMs: 15000 });
+    // Phase 1: search — Best Buy's search API takes ~8-10s per call, so every query runs at once
+    const searches = await Promise.allSettled(this.searchQueries.map(query => {
+      const searchUrl = `${this.url}/api/v2/json/search?query=${encodeURIComponent(query)}&lang=en-CA&pageSize=${this.pageSize}`;
+      return this.fetch(searchUrl, { json: true, timeoutMs: 20000, maxRetries: 2 });
+    }));
 
-        if (!data.products || data.products.length === 0) continue;
-
-        for (const item of data.products) {
-          if (!item.sku || !item.name) continue;
-          // Skip non-visible or in-store-only items
-          if (!item.isVisible) continue;
-          // Skip third-party marketplace sellers — only show sold by Best Buy
-          if (item.isMarketplace) continue;
-
-          const price = item.salePrice || item.regularPrice;
-          products[item.sku] = this.classify({
-            sku: item.sku,
-            name: item.name,
-            price: typeof price === 'number' ? price : parseFloat(price) || 0,
-            currency: 'CAD',
-            url: `${this.url}${item.productUrl}`,
-            image: item.highResImage || item.thumbnailImage || '',
-            inStock: false, // Will be updated by availability check
-            canAddToCart: false,
-            isPreorderable: item.isPreorderable || false,
-            isMarketplace: item.isMarketplace || false,
-            seller: item.seller?.name || 'Best Buy',
-            isOnSale: item.salePrice < item.regularPrice,
-            regularPrice: item.regularPrice,
-            shipsToHome: !item.isInStoreOnly,
-          });
-
-          allSkus.push(item.sku);
-        }
-      } catch (err) {
-        logger.warn(`Best Buy: search failed for "${query}": ${err.message}`);
+    searches.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        logger.warn(`Best Buy: search failed for "${this.searchQueries[i]}": ${result.reason.message}`);
+        return;
       }
-    }
+      for (const item of result.value.products || []) {
+        if (!item.sku || !item.name) continue;
+        // Skip non-visible or in-store-only items
+        if (!item.isVisible) continue;
+        // Skip third-party marketplace sellers — only show sold by Best Buy
+        if (item.isMarketplace) continue;
+
+        const price = item.salePrice || item.regularPrice;
+        products[item.sku] = this.classify({
+          sku: item.sku,
+          name: item.name,
+          price: typeof price === 'number' ? price : parseFloat(price) || 0,
+          currency: 'CAD',
+          url: `${this.url}${item.productUrl}`,
+          image: item.highResImage || item.thumbnailImage || '',
+          inStock: false, // Will be updated by availability check
+          canAddToCart: false,
+          isPreorderable: item.isPreorderable || false,
+          isMarketplace: item.isMarketplace || false,
+          seller: item.seller?.name || 'Best Buy',
+          isOnSale: item.salePrice < item.regularPrice,
+          regularPrice: item.regularPrice,
+          shipsToHome: !item.isInStoreOnly,
+        });
+
+        allSkus.push(item.sku);
+      }
+    });
 
     // Phase 2: Batch check availability for all discovered SKUs
     if (allSkus.length > 0) {

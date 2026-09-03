@@ -64,9 +64,9 @@
     "name": "Best Buy Canada",
     "url": "https://www.bestbuy.ca",
     "adapter": "bestbuy",
-    "intervalMs": 60000,
+    "intervalMs": 30000,
     "proxyTier": "none",
-    "enabled": false,
+    "enabled": true,
     "color": "#0046be",
     "searchQueries": ["pokemon booster box", "pokemon elite trainer box", "pokemon tcg", "one piece tcg", "dragon ball tcg", "lorcana tcg", "yugioh booster box"]
   },
