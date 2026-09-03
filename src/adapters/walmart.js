@@ -39,9 +39,52 @@ class WalmartAdapter extends BaseAdapter {
   async fetchProductPage(productId) {
     const url = `https://www.walmart.ca/ip/${productId}`;
     const proxyUrl = getProxyUrl('residential');
+    const start = Date.now();
 
-    // Step 1: Try free stealth fetch
-    let stealthParsed = false; // true if page was parseable (even if third-party seller)
+    // Race stealth + ScraperAPI — fastest definitive answer wins.
+    // Stealth is free and usually faster (~2-4s). ScraperAPI is reliable (~3-8s, 5 credits).
+    // If stealth gets a definitive answer (product found OR third-party confirmed), use it
+    // and don't wait for ScraperAPI. ScraperAPI result is only used if stealth fails.
+    const stealthPromise = this._stealthFetchProduct(url, productId, proxyUrl);
+    const scraperPromise = this._scraperFetchProduct(productId, url);
+
+    // Try stealth first (free, fast)
+    const stealth = await stealthPromise;
+
+    if (stealth.product) {
+      // Stealth got a Walmart product — use it, ignore scraper (saves time)
+      const product = stealth.product;
+      product._watchlist = true;
+      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (stealth)`);
+      return product;
+    }
+
+    if (stealth.thirdParty) {
+      // Stealth confirmed third-party seller — no Walmart offer, skip scraper
+      return null;
+    }
+
+    // Stealth failed (challenge/timeout) — wait for ScraperAPI
+    const scraper = await scraperPromise;
+
+    if (scraper.product) {
+      const product = scraper.product;
+      product._watchlist = true;
+      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (scraper fallback)`);
+      return product;
+    }
+
+    if (scraper.thirdParty) return null;
+
+    logger.warn(`Walmart: WATCHLIST ${productId} — both methods failed (${Date.now() - start}ms)`);
+    return null;
+  }
+
+  /**
+   * Stealth fetch a product page (free, ~2-4s).
+   * Returns { product, thirdParty } or throws.
+   */
+  async _stealthFetchProduct(url, productId, proxyUrl) {
     try {
       const html = await stealthGet(url, {
         proxyUrl,
@@ -51,60 +94,50 @@ class WalmartAdapter extends BaseAdapter {
 
       if (html && html.length > 500 && !html.includes('Verify Your Identity')) {
         const product = this._parseProductPage(html, productId);
-        if (product) {
-          product._watchlist = true;
-          logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} (stealth)`);
-          return product;
-        }
-        // If _parseProductPage returned null, it could be:
-        // a) third-party seller (logged inside _buildProduct) — don't waste credits on ScraperAPI
-        // b) unparseable page — fall through to ScraperAPI
-        // Check if JSON-LD was found (third-party) vs truly unparseable
+        if (product) return { product, thirdParty: false };
+        // Page parsed but no Walmart offer = third-party seller
         if (html.includes('application/ld+json') || html.includes('__NEXT_DATA__')) {
-          stealthParsed = true; // page had data, just not a Walmart offer
+          return { product: null, thirdParty: true };
         }
       }
-
-      // Challenge page or unparseable — rotate IP for next attempt
       if (proxyUrl) _clearCache(proxyUrl);
+      return { product: null, thirdParty: false };
     } catch {
-      // Stealth failed — rotate IP
       if (proxyUrl) _clearCache(proxyUrl);
+      return { product: null, thirdParty: false };
     }
+  }
 
-    // Skip ScraperAPI if stealth confirmed it's a third-party seller — saves 5 credits
-    if (stealthParsed) return null;
-
-    // Step 2: Fall back to ScraperAPI (5 credits, reliable)
+  /**
+   * ScraperAPI fetch a product page (5 credits, ~3-8s).
+   * Returns { product, thirdParty } or throws.
+   */
+  async _scraperFetchProduct(productId, url) {
     try {
       const data = await walmartProductLookup(productId, { retailerId: this.id });
-      if (!data) return null; // rate-limited or 404
+      if (!data) return { product: null, thirdParty: false };
 
       const name = data.product_name || data.name || data.title;
-      if (!name) return null;
+      if (!name) return { product: null, thirdParty: false };
 
       // Check seller — only accept Walmart's own offers
       const dataSeller = (data.seller || data.sold_by || '').toLowerCase();
       if (dataSeller && !dataSeller.includes('walmart')) {
-        logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party seller: "${data.seller || data.sold_by}" (scraper)`);
-        return null;
+        logger.info(`Walmart: WATCHLIST ${productId} — third-party: "${data.seller || data.sold_by}" (scraper)`);
+        return { product: null, thirdParty: true };
       }
 
-      // Check offers array for seller info too
       if (data.offers && Array.isArray(data.offers)) {
         const hasWalmartOffer = data.offers.some(o => {
           const s = (o.seller?.name || o.seller || o.sold_by || '').toString().toLowerCase();
           return !s || s.includes('walmart');
         });
         if (!hasWalmartOffer) {
-          const sellers = data.offers.map(o => o.seller?.name || o.seller || o.sold_by || 'unknown').join(', ');
-          logger.info(`Walmart: WATCHLIST ${productId} — skipping third-party sellers: ${sellers} (scraper)`);
-          return null;
+          return { product: null, thirdParty: true };
         }
       }
 
       let price = null;
-      // Try to get price from Walmart's offer specifically
       if (data.offers && Array.isArray(data.offers)) {
         for (const offer of data.offers) {
           const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
@@ -120,14 +153,11 @@ class WalmartAdapter extends BaseAdapter {
           normalizePrice(data.price_string || data.price || data.product_price);
       }
 
-      // ScraperAPI autoparse doesn't reliably report Walmart CA stock status.
-      // Only trust explicit InStock — don't let missing availability override
-      // a stealth-confirmed inStock=true (prevents false RESTOCK flip-flops).
-      let inStock = null; // null = unknown
+      let inStock = null;
       if (data.offers && Array.isArray(data.offers)) {
         for (const offer of data.offers) {
           const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
-          if (s && !s.includes('walmart')) continue; // skip third-party offers
+          if (s && !s.includes('walmart')) continue;
           const avail = (offer.availability || '').toLowerCase();
           if (avail.includes('instock') || avail.includes('in stock') || avail.includes('in_stock')) {
             inStock = true;
@@ -143,13 +173,11 @@ class WalmartAdapter extends BaseAdapter {
         else if (avail.includes('outofstock') || avail.includes('out of stock')) inStock = false;
       }
 
-      // If ScraperAPI can't determine stock, keep last known value from Redis
       if (inStock === null) {
         const state = require('../core/state');
         const oldProducts = await state.getAllProducts(this.id);
         const old = oldProducts[String(productId)];
         inStock = old ? old.inStock : false;
-        logger.info(`Walmart: WATCHLIST ${productId} — ScraperAPI stock unknown, keeping last known: inStock=${inStock}`);
       }
 
       const image = data.image || data.product_image || data.thumbnail || '';
@@ -166,9 +194,7 @@ class WalmartAdapter extends BaseAdapter {
         canAddToCart: inStock,
         shipsToHome: true,
       });
-      product._watchlist = true;
 
-      // Extract offerId from ScraperAPI offers if available
       if (data.offers && Array.isArray(data.offers)) {
         for (const offer of data.offers) {
           const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
@@ -178,16 +204,13 @@ class WalmartAdapter extends BaseAdapter {
           }
         }
       }
-      // Also check root-level offerId
       if (!product._offerId && data.offerId) {
         product._offerId = data.offerId;
       }
 
-      logger.info(`Walmart: WATCHLIST ${productId} — "${name}" | inStock=${inStock} | $${price || '?'} | offerId=${product._offerId || 'none'} (scraper fallback)`);
-      return product;
-    } catch (err) {
-      logger.warn(`Walmart: watchlist ${productId} — both methods failed: ${err.message}`);
-      return null;
+      return { product, thirdParty: false };
+    } catch {
+      return { product: null, thirdParty: false };
     }
   }
 
