@@ -504,19 +504,8 @@ async function handleWatchlistAdd(interaction) {
   adapter.watchlist.add(sku);
   scheduler.ensureWatchlistTimer(retailerId);
 
-  // Also persist to retailers.json
-  const fs = require('fs');
-  const path = require('path');
-  const retailersPath = path.join(__dirname, '../config/retailers.json');
-  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
-  const retailer = retailers.find(r => r.id === retailerId);
-  if (retailer) {
-    if (!retailer.watchlist) retailer.watchlist = [];
-    if (!retailer.watchlist.includes(sku)) retailer.watchlist.push(sku);
-    const tmp = retailersPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(retailers, null, 2));
-    fs.renameSync(tmp, retailersPath);
-  }
+  // Persist to Redis so it survives deploys
+  await state.setWatchlistOverride(retailerId, [...adapter.watchlist]);
 
   logger.info(`/watchlist-add: added ${sku} to ${retailerId}`);
   await interaction.editReply({ content: `✅ Added \`${sku}\` to **${adapter.name}** watchlist. Polling every 5s.` });
@@ -544,18 +533,8 @@ async function handleWatchlistRemove(interaction) {
 
   adapter.watchlist.delete(sku);
 
-  // Persist to retailers.json
-  const fs = require('fs');
-  const path = require('path');
-  const retailersPath = path.join(__dirname, '../config/retailers.json');
-  const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
-  const retailer = retailers.find(r => r.id === retailerId);
-  if (retailer && retailer.watchlist) {
-    retailer.watchlist = retailer.watchlist.filter(s => s !== sku);
-    const tmp = retailersPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(retailers, null, 2));
-    fs.renameSync(tmp, retailersPath);
-  }
+  // Persist to Redis so it survives deploys
+  await state.setWatchlistOverride(retailerId, [...adapter.watchlist]);
 
   logger.info(`/watchlist-remove: removed ${sku} from ${retailerId}`);
   await interaction.editReply({ content: `✅ Removed \`${sku}\` from **${adapter.name}** watchlist.` });

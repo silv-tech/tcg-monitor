@@ -210,6 +210,26 @@ class Scheduler {
     }
     this.timers.clear();
 
+    // Merge watchlist overrides from Redis (SKUs added via /watchlist-add survive deploys)
+    try {
+      const wlOverrides = await state.getWatchlistOverrides();
+      for (const [retailerId, skus] of Object.entries(wlOverrides)) {
+        const adapter = this.adapters.get(retailerId);
+        if (!adapter || !Array.isArray(skus)) continue;
+        if (!adapter.watchlist) adapter.watchlist = new Set();
+        let added = 0;
+        for (const sku of skus) {
+          if (!adapter.watchlist.has(sku)) {
+            adapter.watchlist.add(sku);
+            added++;
+          }
+        }
+        if (added > 0) logger.info(`Restored ${added} watchlist SKUs from Redis for ${adapter.name}`);
+      }
+    } catch (err) {
+      logger.warn(`Failed to restore watchlist overrides from Redis: ${err.message}`);
+    }
+
     logger.info(`Scheduler starting with ${this.adapters.size} adapters`);
 
     let stagger = 0;

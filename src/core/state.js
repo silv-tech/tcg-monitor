@@ -302,6 +302,20 @@ async function cacheSellerInfo(asin, seller) {
   await getRedis().set(key, seller, 'EX', SELLER_TTL);
 }
 
+// ─── Watchlist persistence (survive deploys) ─────────────────────
+const WATCHLIST_KEY = `${PREFIX}watchlist_overrides`;
+
+async function getWatchlistOverrides() {
+  const data = await getRedis().get(WATCHLIST_KEY);
+  return data ? safeParse(data, {}) : {};
+}
+
+async function setWatchlistOverride(retailerId, skus) {
+  const overrides = await getWatchlistOverrides();
+  overrides[retailerId] = skus;
+  await getRedis().set(WATCHLIST_KEY, JSON.stringify(overrides));
+}
+
 async function shutdown() {
   if (redis) {
     await redis.quit();
@@ -337,5 +351,7 @@ module.exports = {
   cacheOfferListingId,
   getSellerCache,
   cacheSellerInfo,
+  getWatchlistOverrides,
+  setWatchlistOverride,
   shutdown,
 };
