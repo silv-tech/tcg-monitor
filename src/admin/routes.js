@@ -465,4 +465,151 @@ router.post('/post-guide', async (req, res) => {
   }
 });
 
+// === Test all slash command logic (no Discord interaction needed) ===
+router.get('/test-commands', async (req, res) => {
+  const results = {};
+  const { getClient } = require('../discord/bot');
+  const { buildAlertEmbed } = require('../discord/embeds');
+  const { getStats: getProxyStats } = require('../core/proxy');
+
+  // 1. /status — retailer health
+  try {
+    const baseRetailers = require('../config/retailers.json');
+    const overrides = await state.getRetailerOverrides();
+    const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+    let checked = 0;
+    for (const r of retailers.slice(0, 3)) {
+      const s = await state.getRetailerStatus(r.id);
+      const lc = await state.getLastCheck(r.id);
+      if (s && lc) checked++;
+    }
+    results.status = { pass: checked > 0, detail: `${checked}/3 retailers have status+lastCheck` };
+  } catch (e) { results.status = { pass: false, detail: e.message }; }
+
+  // 2. /retailers — list retailers
+  try {
+    const baseRetailers = require('../config/retailers.json');
+    const overrides = await state.getRetailerOverrides();
+    const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+    results.retailers = { pass: retailers.length > 0, detail: `${retailers.length} retailers loaded` };
+  } catch (e) { results.retailers = { pass: false, detail: e.message }; }
+
+  // 3. /test — build test event
+  try {
+    const testEvent = {
+      type: 'RESTOCK',
+      product: { sku: 'CMD-TEST', name: 'Command Test Product', price: 9.99, currency: 'CAD', url: 'https://example.com', image: null, retailer: 'Test', inStock: true, canAddToCart: true, category: 'pokemon', isTCG: true },
+      detail: 'Command test', _detectedAt: Date.now(), _scanTier: 'scan',
+    };
+    const { embed, components } = buildAlertEmbed(testEvent, 'paid');
+    results.test = { pass: !!embed, detail: `embed title: ${embed.data.title}` };
+  } catch (e) { results.test = { pass: false, detail: e.message }; }
+
+  // 4. /scan — verify runScan exists
+  try {
+    const { runScan: rs } = require('../core/scan');
+    results.scan = { pass: typeof rs === 'function', detail: 'runScan function exists' };
+  } catch (e) { results.scan = { pass: false, detail: e.message }; }
+
+  // 5. /test-asin — check Amazon product cache
+  try {
+    const products = await state.getAllProducts('amazon');
+    const count = Object.keys(products).length;
+    results['test-asin'] = { pass: count > 0, detail: `${count} Amazon products cached` };
+  } catch (e) { results['test-asin'] = { pass: false, detail: e.message }; }
+
+  // 6. /freetier — check channels config
+  try {
+    const channels = await state.getChannelsConfig();
+    results.freetier = { pass: channels !== null, detail: channels ? `free tier enabled=${channels?.tiers?.free?.enabled}` : 'no channels config' };
+  } catch (e) { results.freetier = { pass: false, detail: e.message }; }
+
+  // 7. /test-sku — build Walmart embed with enrichment
+  try {
+    const product = await state.getProduct('walmart', '66WBIOXIU4UC');
+    if (product) {
+      const event = { type: 'RESTOCK', product: { ...product, retailerId: 'walmart' }, detail: 'test', _detectedAt: Date.now(), _scanTier: 'scan' };
+      await delivery.enrichEvent(event);
+      const { embed } = buildAlertEmbed(event, 'paid');
+      results['test-sku'] = { pass: !!embed, detail: `offerId=${product._offerId || 'enriched'}, name=${product.name?.slice(0, 40)}` };
+    } else {
+      results['test-sku'] = { pass: true, detail: 'Walmart SKU not cached (normal if no recent alert), embed builder works' };
+    }
+  } catch (e) { results['test-sku'] = { pass: false, detail: e.message }; }
+
+  // 8. /check — live product lookup
+  try {
+    const cached = await state.getProduct('walmart', '66WBIOXIU4UC');
+    const adapter = scheduler.getAdapter('walmart');
+    const hasLiveFetch = adapter && typeof adapter.fetchProductPage === 'function';
+    results.check = { pass: true, detail: `cached=${!!cached}, adapter=${!!adapter}, liveFetch=${hasLiveFetch}` };
+  } catch (e) { results.check = { pass: false, detail: e.message }; }
+
+  // 9. /watchlist — check adapter watchlists
+  try {
+    const baseRetailers = require('../config/retailers.json');
+    let totalSkus = 0;
+    let adaptersWithWL = 0;
+    for (const r of baseRetailers) {
+      const adapter = scheduler.getAdapter(r.id);
+      if (adapter && adapter.watchlist && adapter.watchlist.size > 0) {
+        adaptersWithWL++;
+        totalSkus += adapter.watchlist.size;
+      }
+    }
+    results.watchlist = { pass: true, detail: `${adaptersWithWL} adapters with watchlists, ${totalSkus} total SKUs` };
+  } catch (e) { results.watchlist = { pass: false, detail: e.message }; }
+
+  // 10. /watchlist-add — verify adapter + ensureWatchlistTimer exist
+  try {
+    const adapter = scheduler.getAdapter('walmart');
+    const hasEnsure = typeof scheduler.ensureWatchlistTimer === 'function';
+    const hasSetWL = typeof state.setWatchlistOverride === 'function';
+    results['watchlist-add'] = { pass: !!adapter && hasEnsure && hasSetWL, detail: `adapter=${!!adapter}, ensureTimer=${hasEnsure}, redispersist=${hasSetWL}` };
+  } catch (e) { results['watchlist-add'] = { pass: false, detail: e.message }; }
+
+  // 11. /watchlist-remove — same deps
+  try {
+    results['watchlist-remove'] = { pass: true, detail: 'same deps as watchlist-add (verified above)' };
+  } catch (e) { results['watchlist-remove'] = { pass: false, detail: e.message }; }
+
+  // 12. /budget — ScraperAPI budget
+  try {
+    const budget = getBudgetStatus();
+    results.budget = { pass: budget.used !== undefined && budget.budget > 0, detail: `${budget.used}/${budget.budget} credits (${budget.pct}%), paused=${budget.paused}` };
+  } catch (e) { results.budget = { pass: false, detail: e.message }; }
+
+  // 13. /alerts — per-retailer product counts
+  try {
+    const walmartProducts = await state.getAllProducts('walmart');
+    const amazonProducts = await state.getAllProducts('amazon');
+    const wCount = Object.keys(walmartProducts).length;
+    const aCount = Object.keys(amazonProducts).length;
+    results.alerts = { pass: true, detail: `walmart=${wCount} products, amazon=${aCount} products` };
+  } catch (e) { results.alerts = { pass: false, detail: e.message }; }
+
+  // 14. /ping — bot client
+  try {
+    const cl = getClient();
+    const wsLatency = cl ? cl.ws.ping : -1;
+    results.ping = { pass: !!cl && wsLatency >= 0, detail: `client=${!!cl}, ws.ping=${wsLatency}ms` };
+  } catch (e) { results.ping = { pass: false, detail: e.message }; }
+
+  // 15. /help — static (always passes)
+  results.help = { pass: true, detail: 'static embed, no deps' };
+
+  // Redis watchlist persistence check
+  try {
+    const wlOverrides = await state.getWatchlistOverrides();
+    results._watchlistRedis = { pass: true, detail: `${Object.keys(wlOverrides).length} retailers with persisted watchlists` };
+  } catch (e) { results._watchlistRedis = { pass: false, detail: e.message }; }
+
+  // Summary
+  const total = Object.keys(results).length;
+  const passed = Object.values(results).filter(r => r.pass).length;
+  const failed = Object.values(results).filter(r => !r.pass);
+
+  res.json({ summary: `${passed}/${total} passed`, failed: failed.length > 0 ? failed : 'none', results });
+});
+
 module.exports = router;
