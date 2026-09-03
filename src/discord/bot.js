@@ -45,6 +45,9 @@ async function createBot() {
       case 'freetier':
         await handleFreeTier(interaction);
         break;
+      case 'test-sku':
+        await handleTestSku(interaction);
+        break;
     }
   });
 
@@ -54,7 +57,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '4';
+const COMMANDS_VERSION = '5';
 
 async function registerCommands() {
   const commands = [
@@ -88,6 +91,17 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName('freetier')
       .setDescription('Toggle the free tier alerts on or off'),
+    new SlashCommandBuilder()
+      .setName('test-sku')
+      .setDescription('Send a test alert for any retailer SKU (with full enrichment)')
+      .addStringOption(opt =>
+        opt.setName('retailer')
+          .setDescription('Retailer ID (walmart, amazon, bestbuy, costco, pokemoncenter, shopify store)')
+          .setRequired(true))
+      .addStringOption(opt =>
+        opt.setName('sku')
+          .setDescription('Product SKU or ID')
+          .setRequired(true)),
   ].map(cmd => cmd.toJSON());
 
   // Skip re-registration if commands haven't changed (saves Discord API calls)
@@ -262,6 +276,60 @@ async function handleFreeTier(interaction) {
     const newState = !currentlyEnabled ? 'ON' : 'OFF';
     logger.info(`Free tier toggled ${newState} via /freetier command`);
     await interaction.editReply({ content: `Free tier alerts are now **${newState}**` });
+  } catch (err) {
+    await interaction.editReply({ content: `Failed: ${err.message}` });
+  }
+}
+
+async function handleTestSku(interaction) {
+  const retailerId = interaction.options.getString('retailer').trim().toLowerCase();
+  const sku = interaction.options.getString('sku').trim();
+  await interaction.deferReply();
+
+  try {
+    // Try to find product in Redis cache
+    const products = await state.getAllProducts(retailerId);
+    const cached = products[sku];
+
+    const retailerNames = {
+      walmart: 'Walmart Canada', amazon: 'Amazon Canada', bestbuy: 'Best Buy Canada',
+      costco: 'Costco Canada', pokemoncenter: 'Pokemon Center', ebgames: 'EB Games',
+    };
+
+    const product = cached
+      ? { ...cached, retailerId }
+      : {
+          sku,
+          name: `Product ${sku}`,
+          price: 0,
+          url: retailerId === 'walmart' ? `https://www.walmart.ca/ip/${sku}` :
+               retailerId === 'amazon' ? `https://www.amazon.ca/dp/${sku}` : '',
+          retailer: retailerNames[retailerId] || retailerId,
+          retailerId,
+          inStock: true,
+          canAddToCart: true,
+          category: 'pokemon',
+          isTCG: true,
+          lastSeen: Date.now(),
+        };
+
+    const event = {
+      type: 'RESTOCK',
+      product,
+      detail: `Test alert for ${retailerId}:${sku}`,
+      _detectedAt: Date.now(),
+      _scanTier: 'scan',
+    };
+
+    // Enrich (offerId, restock history, cross-retailer, etc.)
+    await delivery.enrichEvent(event);
+
+    // Send directly to THIS channel
+    const { buildAlertEmbed } = require('./embeds');
+    const { embed, components } = buildAlertEmbed(event, 'paid');
+    await interaction.editReply({ embeds: [embed], components });
+
+    logger.info(`/test-sku: sent ${retailerId}:${sku} to #${interaction.channel.name} (offerId=${product._offerId || 'none'})`);
   } catch (err) {
     await interaction.editReply({ content: `Failed: ${err.message}` });
   }
