@@ -71,8 +71,8 @@ function detectEvents(oldProduct, newProduct) {
     });
   }
 
-  // Shipping change
-  if (oldProduct.shipsToHome !== newProduct.shipsToHome && newProduct.shipsToHome) {
+  // Shipping change — only if RESTOCK didn't already fire (avoids triple alerts)
+  if (!alreadyRestocked && oldProduct.shipsToHome !== newProduct.shipsToHome && newProduct.shipsToHome) {
     events.push({
       type: EVENT_TYPES.SHIPPING_CHANGE,
       product: newProduct,
