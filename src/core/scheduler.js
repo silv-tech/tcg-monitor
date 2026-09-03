@@ -2,7 +2,7 @@ const logger = require('../monitoring/logger');
 const state = require('./state');
 const { diffProducts, EVENT_TYPES } = require('./events');
 const { recordPollLatency } = require('./proxy');
-const { sleep } = require('../utils/helpers');
+
 const { recordProductCount } = require('../monitoring/health');
 const { pollAdapterOnce } = require('./poll-adapter');
 const { recordRestock, recordPrice } = require('./state');
@@ -136,10 +136,6 @@ class Scheduler {
     this.polling.add(watchlistKey);
     try {
       for (const productId of adapter.watchlist) {
-        // Random jitter (0-2s) so requests don't look like a fixed-interval bot
-        const jitter = Math.floor(Math.random() * 2000);
-        if (jitter > 500) await sleep(jitter);
-
         const product = await adapter.fetchProductPage(productId);
         if (!product) continue; // 404, blocked, or parse failure
 
