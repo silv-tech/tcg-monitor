@@ -252,6 +252,18 @@ class DeliveryQueue {
     const category = product.category || 'default';
     const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);
 
+    // --- CATEGORY FILTER: only send alerts for active categories ---
+    // Scan/test/watchlist/early events bypass this filter
+    if (!event._scanTier && !product._watchlist && event.type !== 'EARLY_SKU' && !event._earlyKeywordMatch) {
+      if (category !== 'default') {
+        const activeCategories = await state.getActiveCategories();
+        if (!activeCategories.includes(category)) {
+          logger.debug(`Category filter: blocked ${category} alert — ${product.name}`);
+          return;
+        }
+      }
+    }
+
     // --- EARLY SKU DETECTION: route to #early-detection channel ---
     if (event.type === 'EARLY_SKU') {
       const earlyChannel = channelsConfig?.earlyDetectionChannel;

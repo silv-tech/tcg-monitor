@@ -56,6 +56,9 @@ async function createBot() {
         case 'early-add': await handleEarlyAdd(interaction); break;
         case 'early-remove': await handleEarlyRemove(interaction); break;
         case 'early-list': await handleEarlyList(interaction); break;
+        case 'categories': await handleCategories(interaction); break;
+        case 'category-on': await handleCategoryOn(interaction); break;
+        case 'category-off': await handleCategoryOff(interaction); break;
       }
     } catch (err) {
       logger.error(`Command /${interaction.commandName} failed: ${err.message}`);
@@ -74,7 +77,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '8';
+const COMMANDS_VERSION = '9';
 
 async function registerCommands() {
   const commands = [
@@ -188,6 +191,41 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName('early-list')
       .setDescription('Show all early detection keywords'),
+    new SlashCommandBuilder()
+      .setName('categories')
+      .setDescription('Show which TCG categories are active (Pokemon, One Piece, etc.)'),
+    new SlashCommandBuilder()
+      .setName('category-on')
+      .setDescription('Enable alerts for a TCG category')
+      .addStringOption(opt =>
+        opt.setName('category')
+          .setDescription('Category to enable')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Pokemon', value: 'pokemon' },
+            { name: 'One Piece', value: 'onepiece' },
+            { name: 'Dragon Ball', value: 'dragonball' },
+            { name: 'Naruto/Boruto', value: 'naruto' },
+            { name: 'Lorcana', value: 'lorcana' },
+            { name: 'Yu-Gi-Oh', value: 'yugioh' },
+            { name: 'Magic: The Gathering', value: 'mtg' },
+          )),
+    new SlashCommandBuilder()
+      .setName('category-off')
+      .setDescription('Disable alerts for a TCG category')
+      .addStringOption(opt =>
+        opt.setName('category')
+          .setDescription('Category to disable')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Pokemon', value: 'pokemon' },
+            { name: 'One Piece', value: 'onepiece' },
+            { name: 'Dragon Ball', value: 'dragonball' },
+            { name: 'Naruto/Boruto', value: 'naruto' },
+            { name: 'Lorcana', value: 'lorcana' },
+            { name: 'Yu-Gi-Oh', value: 'yugioh' },
+            { name: 'Magic: The Gathering', value: 'mtg' },
+          )),
   ].map(cmd => cmd.toJSON());
 
   // Skip re-registration if commands haven't changed (saves Discord API calls)
@@ -653,7 +691,7 @@ async function handleHelp(interaction) {
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setTitle('Nocturne Monitors')
-    .setDescription('Quick command reference — **18 commands** available.')
+    .setDescription('Quick command reference — **21 commands** available.')
     .addFields(
       {
         name: '📡  Monitoring',
@@ -696,13 +734,23 @@ async function handleHelp(interaction) {
       },
       { name: '\u200B', value: '\u200B', inline: false },
       {
+        name: '🏷️  Categories',
+        value: [
+          '`/categories` — View active categories',
+          '`/category-on` `category` — Enable',
+          '`/category-off` `category` — Disable',
+        ].join('\n'),
+        inline: true,
+      },
+      {
         name: '⚙️  System',
         value: [
-          '`/budget` — ScraperAPI credits & budget',
-          '`/freetier` — Toggle free tier on/off',
-          '`/ping` — Bot latency',
+          '`/budget` — ScraperAPI credits',
+          '`/freetier` — Toggle free tier',
+          '`/ping` — Latency',
           '`/help` — This message',
         ].join('\n'),
+        inline: true,
       },
     )
     .setFooter({ text: 'Nocturne Monitors  ·  Admin Only' })
@@ -788,6 +836,82 @@ async function handleEarlyList(interaction) {
     .setTimestamp();
 
   await interaction.editReply({ embeds: [embed] });
+}
+
+// ─── Category display names ─────────────────────────────────────
+const CATEGORY_DISPLAY = {
+  pokemon: 'Pokemon',
+  onepiece: 'One Piece',
+  dragonball: 'Dragon Ball',
+  naruto: 'Naruto / Boruto',
+  lorcana: 'Lorcana',
+  yugioh: 'Yu-Gi-Oh',
+  mtg: 'Magic: The Gathering',
+};
+
+// ─── NEW: /categories — Show active categories ──────────────────
+
+async function handleCategories(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const active = await state.getActiveCategories();
+  const all = state.getAllCategories();
+
+  const lines = all.map(cat => {
+    const on = active.includes(cat);
+    return `${on ? '🟢' : '🔴'}  **${CATEGORY_DISPLAY[cat] || cat}**`;
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setTitle('TCG Categories')
+    .setDescription(lines.join('\n'))
+    .addFields({
+      name: 'Manage',
+      value: '`/category-on` to enable · `/category-off` to disable',
+    })
+    .setFooter({ text: `${active.length}/${all.length} active` })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+// ─── NEW: /category-on — Enable a category ──────────────────────
+
+async function handleCategoryOn(interaction) {
+  const category = interaction.options.getString('category');
+  await interaction.deferReply({ ephemeral: true });
+
+  const active = await state.getActiveCategories();
+  if (active.includes(category)) {
+    await interaction.editReply({ content: `**${CATEGORY_DISPLAY[category]}** is already enabled.` });
+    return;
+  }
+
+  active.push(category);
+  await state.setActiveCategories(active);
+
+  logger.info(`/category-on: enabled ${category} (${active.length} active)`);
+  await interaction.editReply({ content: `🟢 **${CATEGORY_DISPLAY[category]}** alerts enabled.\n\n**${active.length}/${state.getAllCategories().length}** categories active.` });
+}
+
+// ─── NEW: /category-off — Disable a category ────────────────────
+
+async function handleCategoryOff(interaction) {
+  const category = interaction.options.getString('category');
+  await interaction.deferReply({ ephemeral: true });
+
+  const active = await state.getActiveCategories();
+  if (!active.includes(category)) {
+    await interaction.editReply({ content: `**${CATEGORY_DISPLAY[category]}** is already disabled.` });
+    return;
+  }
+
+  const updated = active.filter(c => c !== category);
+  await state.setActiveCategories(updated);
+
+  logger.info(`/category-off: disabled ${category} (${updated.length} active)`);
+  await interaction.editReply({ content: `🔴 **${CATEGORY_DISPLAY[category]}** alerts disabled.\n\n**${updated.length}/${state.getAllCategories().length}** categories active.` });
 }
 
 // ─── Post command guide to a channel ────────────────────────────
@@ -886,6 +1010,21 @@ async function postCommandGuide(channelId) {
         ].join('\n'),
       },
       {
+        name: '🏷️  CATEGORIES',
+        value: [
+          '**`/categories`**',
+          'View which TCG game categories are active. Toggle them on or off to control which alerts fire.',
+          '',
+          '**`/category-on`** `<category>`',
+          'Enable alerts for a category (Pokemon, One Piece, Yu-Gi-Oh, etc.).',
+          '-# Example:  `/category-on pokemon`',
+          '',
+          '**`/category-off`** `<category>`',
+          'Disable alerts for a category. Watchlist and early detection bypass this filter.',
+          '-# Example:  `/category-off mtg`',
+        ].join('\n'),
+      },
+      {
         name: '⚙️  SYSTEM',
         value: [
           '**`/budget`** — ScraperAPI credit usage, monthly budget, and pause status.',
@@ -895,7 +1034,7 @@ async function postCommandGuide(channelId) {
         ].join('\n'),
       },
     )
-    .setFooter({ text: 'Nocturne Monitors  ·  18 Commands  ·  Admin Only  ·  v2' })
+    .setFooter({ text: 'Nocturne Monitors  ·  21 Commands  ·  Admin Only  ·  v2' })
     .setTimestamp();
 
   await channel.send({ embeds: [header, commands] });

@@ -329,6 +329,24 @@ async function removeEarlyKeyword(keyword) {
   return true;
 }
 
+// ─── Active categories (toggle which TCG games trigger alerts) ───
+const ACTIVE_CATEGORIES_KEY = `${PREFIX}active_categories`;
+const ALL_CATEGORIES = ['pokemon', 'onepiece', 'dragonball', 'naruto', 'lorcana', 'yugioh', 'mtg'];
+
+async function getActiveCategories() {
+  const data = await getRedis().get(ACTIVE_CATEGORIES_KEY);
+  if (!data) return [...ALL_CATEGORIES]; // all enabled by default
+  return safeParse(data, [...ALL_CATEGORIES]);
+}
+
+async function setActiveCategories(categories) {
+  await getRedis().set(ACTIVE_CATEGORIES_KEY, JSON.stringify(categories));
+}
+
+function getAllCategories() {
+  return [...ALL_CATEGORIES];
+}
+
 // ─── Watchlist persistence (survive deploys) ─────────────────────
 const WATCHLIST_KEY = `${PREFIX}watchlist_overrides`;
 
@@ -378,6 +396,9 @@ module.exports = {
   cacheOfferListingId,
   getSellerCache,
   cacheSellerInfo,
+  getActiveCategories,
+  setActiveCategories,
+  getAllCategories,
   getWatchlistOverrides,
   setWatchlistOverride,
   getEarlyKeywords,
