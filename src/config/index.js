@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 
 const INSECURE_VALUES = ['changeme', 'test', 'admin', 'password', ''];
 
@@ -32,7 +33,7 @@ module.exports = {
   },
   admin: {
     port: parseInt(process.env.ADMIN_PORT) || 3500,
-    apiKey: apiKey || 'changeme',
+    apiKey: apiKey || crypto.randomBytes(16).toString('hex'),
     username: adminUsername,
     password: adminPassword,
   },

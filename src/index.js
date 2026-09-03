@@ -148,7 +148,8 @@ async function main() {
   }
 
   // Run first scan after 30s (let adapters warm up first), then every 12h
-  setTimeout(async () => {
+  let sitemapStartup = setTimeout(async () => {
+    sitemapStartup = null;
     await runSitemapScan();
     sitemapTimer = setInterval(runSitemapScan, SCAN_INTERVAL_MS);
     logger.info(`Early SKU Detection: scheduled every ${SCAN_INTERVAL_MS / 3600000}h`);
@@ -208,6 +209,7 @@ async function main() {
   async function shutdown(signal) {
     logger.info(`Received ${signal}, shutting down...`);
     clearInterval(healthInterval);
+    if (sitemapStartup) clearTimeout(sitemapStartup);
     if (sitemapTimer) clearInterval(sitemapTimer);
     scheduler.stop();
     adminServer.close();

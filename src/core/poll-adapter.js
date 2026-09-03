@@ -18,10 +18,13 @@ const { hashSku } = require('../utils/helpers');
 async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
   const pollStart = Date.now();
 
-  // Timeout wrapper
+  // Timeout wrapper (clear timer on completion to prevent leak)
+  let timeoutHandle;
   const newProducts = await Promise.race([
-    adapter.run(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`Adapter timeout after ${adapterTimeout}ms`)), adapterTimeout)),
+    adapter.run().finally(() => clearTimeout(timeoutHandle)),
+    new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error(`Adapter timeout after ${adapterTimeout}ms`)), adapterTimeout);
+    }),
   ]);
   const pollMs = Date.now() - pollStart;
   recordPollLatency(adapter.id, pollMs);

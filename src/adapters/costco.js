@@ -147,7 +147,7 @@ class CostcoAdapter extends BaseAdapter {
       $('url > loc').each((_, el) => {
         const url = $(el).text().trim().toLowerCase();
         if (this.tcgGameKeywords.some((kw) => url.includes(kw))) {
-          const newMatch = url.match(/\/(\d{5,})\s*$/);
+          const newMatch = url.match(/\/(\d{5,})\/?(?:\?.*)?$/);
           const oldMatch = url.match(/\.product\.(\d{5,})\.html/);
           const id = newMatch?.[1] || oldMatch?.[1];
           if (id) this.knownProductIds.add(id);

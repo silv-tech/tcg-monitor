@@ -283,11 +283,16 @@ class Scheduler {
     if (changes.intervalMs !== undefined) adapter.intervalMs = changes.intervalMs;
     if (changes.enabled !== undefined) adapter.enabled = changes.enabled;
 
-    // Clear existing timer
+    // Clear existing timers (main poll + watchlist)
     const existingTimer = this.timers.get(adapterId);
     if (existingTimer) {
       clearInterval(existingTimer);
       this.timers.delete(adapterId);
+    }
+    const wlTimer = this.timers.get(`${adapterId}:watchlist`);
+    if (wlTimer) {
+      clearInterval(wlTimer);
+      this.timers.delete(`${adapterId}:watchlist`);
     }
 
     if (!this.running) return;
@@ -298,6 +303,11 @@ class Scheduler {
         if (this.running) this.pollAdapter(adapter);
       }, adapter.intervalMs);
       this.timers.set(adapterId, timer);
+
+      // Restart watchlist timer if adapter has a watchlist
+      if (adapter.watchlist && adapter.watchlist.size > 0) {
+        this.ensureWatchlistTimer(adapterId);
+      }
       logger.info(`${adapter.name}: live-updated — polling every ${adapter.intervalMs}ms`);
     } else {
       logger.info(`${adapter.name}: live-disabled — polling stopped`);

@@ -11,8 +11,9 @@ const CREDIT_COSTS = {
   ultra_premium: 25,
 };
 
-// Track credit usage per session
+// Track credit usage — persisted to Redis so budget survives restarts
 const creditUsage = { total: 0, byRetailer: {}, sessionStart: Date.now() };
+const REDIS_BUDGET_KEY = 'tcg:scraper_budget';
 
 // Budget monitoring — Hobby plan = 100K credits/month
 const MONTHLY_BUDGET = parseInt(process.env.SCRAPER_BUDGET) || 100000;
@@ -20,6 +21,51 @@ const WARN_THRESHOLD = 0.80;  // warn admin at 80%
 const PAUSE_THRESHOLD = 0.90; // pause scraping at 90%
 let budgetPaused = false;
 let budgetWarned = false;
+
+// Restore budget from Redis on startup (lazy — first call triggers restore)
+let _budgetRestored = false;
+async function restoreBudget() {
+  if (_budgetRestored) return;
+  _budgetRestored = true;
+  try {
+    const state = require('../core/state');
+    const raw = await state.getRedis().get(REDIS_BUDGET_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      // Only restore if same month (reset on new month)
+      const savedMonth = new Date(saved.sessionStart).getMonth();
+      const currentMonth = new Date().getMonth();
+      if (savedMonth === currentMonth) {
+        creditUsage.total = saved.total || 0;
+        creditUsage.byRetailer = saved.byRetailer || {};
+        creditUsage.sessionStart = saved.sessionStart;
+        budgetPaused = saved.paused || false;
+        budgetWarned = saved.warned || false;
+        logger.info(`ScraperAPI: restored budget from Redis — ${creditUsage.total}/${MONTHLY_BUDGET} credits used`);
+      } else {
+        logger.info('ScraperAPI: new month — budget counter reset');
+      }
+    }
+  } catch (err) {
+    logger.warn(`ScraperAPI: failed to restore budget from Redis: ${err.message}`);
+  }
+}
+
+// Persist budget to Redis (called after each credit spend)
+async function persistBudget() {
+  try {
+    const state = require('../core/state');
+    await state.getRedis().set(REDIS_BUDGET_KEY, JSON.stringify({
+      total: creditUsage.total,
+      byRetailer: creditUsage.byRetailer,
+      sessionStart: creditUsage.sessionStart,
+      paused: budgetPaused,
+      warned: budgetWarned,
+    }), 'EX', 86400 * 35); // 35-day TTL (covers a full month + buffer)
+  } catch {
+    // Non-critical — budget tracking degrades gracefully
+  }
+}
 
 // Rate limiter: prevent excessive ScraperAPI calls (costs money)
 // Budget: 100K credits/month on Hobby plan ($49/mo)
@@ -56,6 +102,8 @@ async function scraperFetch(targetUrl, opts = {}) {
     timeoutMs = 60000,
     retailerId = 'unknown',
   } = opts;
+
+  await restoreBudget();
 
   // Budget check — pause scraping if over threshold
   if (budgetPaused) {
@@ -122,6 +170,7 @@ async function scraperFetch(targetUrl, opts = {}) {
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
     checkBudget();
+    persistBudget();
 
     logger.info(`ScraperAPI: OK for ${retailerId} (${tier}, ${cost} credits, session total: ${creditUsage.total})`);
 
@@ -167,6 +216,7 @@ function resetBudget() {
   creditUsage.sessionStart = Date.now();
   budgetPaused = false;
   budgetWarned = false;
+  persistBudget();
   logger.info('ScraperAPI budget counters reset');
 }
 
@@ -186,6 +236,7 @@ function resetBudget() {
  */
 async function amazonSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+  await restoreBudget();
   if (budgetPaused) return null;
 
   const { retailerId = 'amazon' } = opts;
@@ -228,6 +279,7 @@ async function amazonSearch(query, opts = {}) {
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
     checkBudget();
+    persistBudget();
     logger.info(`ScraperAPI: Amazon search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
 
     return data;
@@ -248,6 +300,7 @@ async function amazonSearch(query, opts = {}) {
  */
 async function walmartSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+  await restoreBudget();
   if (budgetPaused) return null;
 
   const { retailerId = 'walmart' } = opts;
@@ -289,6 +342,7 @@ async function walmartSearch(query, opts = {}) {
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
     checkBudget();
+    persistBudget();
     logger.info(`ScraperAPI: Walmart search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
 
     return data;
@@ -310,6 +364,7 @@ async function walmartSearch(query, opts = {}) {
  */
 async function fetchAmazonOlidAndSeller(asin) {
   if (!SCRAPER_API_KEY) return { olid: null, seller: null };
+  await restoreBudget();
   if (budgetPaused) return { olid: null, seller: null };
 
   // Rate limit per ASIN — don't re-fetch same ASIN within 5 minutes
@@ -348,6 +403,7 @@ async function fetchAmazonOlidAndSeller(asin) {
     creditUsage.total += cost;
     creditUsage.byRetailer['amazon-olid'] = (creditUsage.byRetailer['amazon-olid'] || 0) + cost;
     checkBudget();
+    persistBudget();
 
     let olid = null;
     let seller = null;
@@ -417,6 +473,7 @@ async function fetchAmazonOlidAndSeller(asin) {
 const WATCHLIST_INTERVAL_MS = 10 * 1000; // 10s between lookups per SKU (fallback only — stealth handles most)
 async function walmartProductLookup(productId, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
+  await restoreBudget();
   if (budgetPaused) return null;
 
   const { retailerId = 'walmart' } = opts;
@@ -453,6 +510,7 @@ async function walmartProductLookup(productId, opts = {}) {
       creditUsage.total += cost;
       creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
       checkBudget();
+      persistBudget();
       logger.debug(`ScraperAPI: Walmart product ${productId} not found (404) — not live yet`);
       return null;
     }
@@ -466,6 +524,7 @@ async function walmartProductLookup(productId, opts = {}) {
     creditUsage.total += cost;
     creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
     checkBudget();
+    persistBudget();
     logger.info(`ScraperAPI: Walmart product ${productId} OK (${cost} credits, session total: ${creditUsage.total})`);
 
     return data;
