@@ -305,7 +305,14 @@ async function handleTestAsin(interaction) {
 async function handleFreeTier(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
-  const channels = await state.getChannelsConfig() || {};
+  // Load from Redis, fallback to channels.json file
+  const fs = require('fs');
+  const path = require('path');
+  const channelsPath = path.join(__dirname, '../config/channels.json');
+  let channels = await state.getChannelsConfig();
+  if (!channels) {
+    try { channels = JSON.parse(fs.readFileSync(channelsPath, 'utf-8')); } catch { channels = {}; }
+  }
   if (!channels.tiers) channels.tiers = {};
   if (!channels.tiers.free) channels.tiers.free = {};
 
@@ -314,9 +321,6 @@ async function handleFreeTier(interaction) {
 
   await state.setChannelsConfig(channels);
 
-  const fs = require('fs');
-  const path = require('path');
-  const channelsPath = path.join(__dirname, '../config/channels.json');
   const tmp = channelsPath + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(channels, null, 2));
   fs.renameSync(tmp, channelsPath);

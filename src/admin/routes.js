@@ -518,10 +518,15 @@ router.get('/test-commands', async (req, res) => {
     results['test-asin'] = { pass: count > 0, detail: `${count} Amazon products cached` };
   } catch (e) { results['test-asin'] = { pass: false, detail: e.message }; }
 
-  // 6. /freetier — check channels config
+  // 6. /freetier — check channels config (Redis or file fallback)
   try {
-    const channels = await state.getChannelsConfig();
-    results.freetier = { pass: channels !== null, detail: channels ? `free tier enabled=${channels?.tiers?.free?.enabled}` : 'no channels config' };
+    let channels = await state.getChannelsConfig();
+    if (!channels) {
+      const fs = require('fs');
+      const fpath = require('path').join(__dirname, '../config/channels.json');
+      try { channels = JSON.parse(fs.readFileSync(fpath, 'utf-8')); } catch { channels = null; }
+    }
+    results.freetier = { pass: channels !== null, detail: channels ? `free tier enabled=${channels?.tiers?.free?.enabled}` : 'no channels config anywhere' };
   } catch (e) { results.freetier = { pass: false, detail: e.message }; }
 
   // 7. /test-sku — build Walmart embed with enrichment
