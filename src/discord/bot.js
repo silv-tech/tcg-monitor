@@ -728,7 +728,7 @@ async function handleHelp(interaction) {
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setTitle('Nocturne Monitors')
-    .setDescription('Quick command reference — **23 commands** available.')
+    .setDescription('Quick command reference — **23 Commands** available.')
     .addFields(
       {
         name: '📡  Monitoring',
@@ -1144,7 +1144,7 @@ async function postCommandGuide(channelId) {
         ].join('\n'),
       },
     )
-    .setFooter({ text: 'Nocturne Monitors  ·  21 Commands  ·  Admin Only  ·  v2' })
+    .setFooter({ text: 'Nocturne Monitors  ·  23 Commands  ·  Admin Only  ·  v2' })
     .setTimestamp();
 
   await channel.send({ embeds: [header, commands] });
