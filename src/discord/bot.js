@@ -17,7 +17,7 @@ const RETAILER_NAMES = {
 
 async function createBot() {
   client = new Client({
-    intents: [GatewayIntentBits.Guilds],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   });
 
   client.once('ready', () => {
@@ -28,8 +28,11 @@ async function createBot() {
   client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
-    // Only admin can use commands
-    if (interaction.user.id !== config.discord.adminUserId) {
+    // Role-based access control
+    const ADMIN_ROLE_ID = '1545085084359467069';
+    const hasRole = interaction.member?.roles?.cache?.has(ADMIN_ROLE_ID);
+    const isOwner = interaction.user.id === config.discord.adminUserId;
+    if (!hasRole && !isOwner) {
       return interaction.reply({ content: 'Not authorized.', ephemeral: true });
     }
 
