@@ -1,7 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { normalizePrice, sleep } = require('../utils/helpers');
-const { walmartSearch, walmartProductLookup, isConfigured } = require('../utils/scraper-api');
+const { normalizePrice } = require('../utils/helpers');
+const { walmartProductLookup } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 
@@ -16,11 +16,17 @@ class WalmartAdapter extends BaseAdapter {
       'pokemon booster box',
       'pokemon elite trainer box',
       'pokemon tcg collection',
-      'one piece card game',
       'pokemon tin sealed',
       'tcg booster box',
       'pokemon scarlet violet',
     ];
+    // Staggered groups — alternate each cycle for continuous coverage
+    this._queryGroups = [
+      this.searchQueries.slice(0, 4),  // Group A
+      this.searchQueries.slice(4),     // Group B
+    ];
+    this._groupIndex = 0;
+    this._polling = false; // overlap guard
   }
 
   /**
@@ -354,7 +360,7 @@ class WalmartAdapter extends BaseAdapter {
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
-        timeoutMs: 15000,
+        timeoutMs: 8000,
       });
 
       if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
@@ -433,119 +439,48 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   async fetchProducts() {
-    const products = {};
+    // Overlap guard — if previous cycle is still running, skip
+    if (this._polling) {
+      logger.debug('Walmart: skipping fetchProducts — previous cycle still running');
+      return {};
+    }
+    this._polling = true;
 
-    // Hybrid search: stealth first (free), ScraperAPI fallback (5 credits each)
-    const proxyUrl = getProxyUrl('residential');
-    const failedQueries = []; // queries that need ScraperAPI fallback
-    let stealthHits = 0;
+    try {
+      const products = {};
 
-    // Step 1: Try queries via stealth (free) — batches of 4 with jitter to avoid rate limiting
-    const BATCH_SIZE = 4;
-    for (let i = 0; i < this.searchQueries.length; i += BATCH_SIZE) {
-      const batch = this.searchQueries.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.allSettled(
-        batch.map(query =>
+      // Staggered groups: alternate A/B each cycle for continuous coverage
+      // Group A fires on even cycles, Group B on odd — every 5s one group runs
+      const group = this._queryGroups[this._groupIndex % this._queryGroups.length];
+      const groupLabel = this._groupIndex % this._queryGroups.length === 0 ? 'A' : 'B';
+      this._groupIndex++;
+
+      // All queries in parallel, no jitter, no retry, no ScraperAPI — pure stealth, $0
+      const start = Date.now();
+      const results = await Promise.allSettled(
+        group.map(query =>
           this._stealthSearch(query).then(items => ({ query, items }))
         )
       );
 
-      for (const result of batchResults) {
-        if (result.status === 'rejected') {
-          failedQueries.push(result.reason?.query || 'unknown');
-          continue;
-        }
+      let hits = 0;
+      let misses = 0;
+      for (const result of results) {
+        if (result.status === 'rejected') { misses++; continue; }
         const { query, items } = result.value;
-        if (!items || items.length === 0) {
-          failedQueries.push(query);
-          continue;
-        }
+        if (!items || items.length === 0) { misses++; continue; }
 
-        stealthHits++;
+        hits++;
         this._processSearchItems(items, products);
-        logger.info(`Walmart: "${query}" — ${items.length} results (stealth, free)`);
       }
 
-      // Rotate IP + delay between batches to avoid Walmart flagging the same IP
-      if (i + BATCH_SIZE < this.searchQueries.length) {
-        const proxyUrl = getProxyUrl('residential');
-        if (proxyUrl) _clearCache(proxyUrl);
-        await sleep(1500 + Math.floor(Math.random() * 1500)); // 1.5-3s jitter
-      }
+      const elapsed = Date.now() - start;
+      logger.info(`Walmart: group ${groupLabel} — ${hits}/${group.length} stealth, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
+
+      return products;
+    } finally {
+      this._polling = false;
     }
-
-    // Step 1.5: Retry failed queries with fresh IPs (free) before burning ScraperAPI credits
-    if (failedQueries.length > 0) {
-      const retryQueries = [...failedQueries];
-      failedQueries.length = 0; // clear for second pass
-
-      // Rotate to fresh IP for retries
-      const retryProxy = getProxyUrl('residential');
-      if (retryProxy) _clearCache(retryProxy);
-      await sleep(2000 + Math.floor(Math.random() * 2000)); // 2-4s cool-off
-
-      // Retry in smaller batches of 2 with more jitter
-      const RETRY_BATCH = 2;
-      for (let i = 0; i < retryQueries.length; i += RETRY_BATCH) {
-        const batch = retryQueries.slice(i, i + RETRY_BATCH);
-        const retryResults = await Promise.allSettled(
-          batch.map(query =>
-            this._stealthSearch(query).then(items => ({ query, items }))
-          )
-        );
-
-        for (const result of retryResults) {
-          if (result.status === 'rejected') {
-            failedQueries.push(result.reason?.query || 'unknown');
-            continue;
-          }
-          const { query, items } = result.value;
-          if (!items || items.length === 0) {
-            failedQueries.push(query);
-            continue;
-          }
-
-          stealthHits++;
-          this._processSearchItems(items, products);
-          logger.info(`Walmart: "${query}" — ${items.length} results (stealth retry, free)`);
-        }
-
-        if (i + RETRY_BATCH < retryQueries.length) {
-          const px = getProxyUrl('residential');
-          if (px) _clearCache(px);
-          await sleep(1500 + Math.floor(Math.random() * 1500));
-        }
-      }
-    }
-
-    // Step 2: ScraperAPI fallback for queries that failed both stealth passes
-    if (failedQueries.length > 0 && isConfigured()) {
-      const scraperResults = await Promise.allSettled(
-        failedQueries.map(query =>
-          walmartSearch(query, { tld: 'ca', retailerId: this.id })
-            .then(data => ({ query, data }))
-        )
-      );
-
-      for (const result of scraperResults) {
-        if (result.status === 'rejected') {
-          logger.warn(`Walmart: search failed: ${result.reason.message}`);
-          continue;
-        }
-        const { query, data } = result.value;
-        if (!data) continue;
-
-        const results = data.items || data.results || data.search_results || [];
-        if (results.length === 0) continue;
-
-        this._processSearchItems(results, products);
-        logger.info(`Walmart: "${query}" — ${results.length} results (scraper fallback, 5 credits)`);
-      }
-    }
-
-    logger.info(`Walmart: ${stealthHits}/${this.searchQueries.length} queries free (stealth), ${failedQueries.length} used ScraperAPI. ${Object.keys(products).length} total products.`);
-
-    return products;
   }
 
   /**
