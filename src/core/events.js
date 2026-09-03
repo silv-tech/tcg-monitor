@@ -52,8 +52,9 @@ function detectEvents(oldProduct, newProduct) {
     });
   }
 
-  // Cart availability
-  if (!oldProduct.canAddToCart && newProduct.canAddToCart) {
+  // Cart availability — only if RESTOCK didn't already fire (avoids duplicate alerts)
+  const alreadyRestocked = events.some(e => e.type === EVENT_TYPES.RESTOCK);
+  if (!alreadyRestocked && !oldProduct.canAddToCart && newProduct.canAddToCart) {
     events.push({
       type: EVENT_TYPES.CART_AVAILABLE,
       product: newProduct,
