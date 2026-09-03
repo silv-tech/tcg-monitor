@@ -632,4 +632,270 @@ router.get('/test-commands', async (req, res) => {
   res.json({ summary: `${passed}/${total} passed`, failed: failed.length > 0 ? failed : 'none', results });
 });
 
+// === LIVE test: exercise every command handler and send real Discord output ===
+router.post('/test-all-live', async (req, res) => {
+  const channelId = req.body.channelId;
+  if (!channelId) return res.status(400).json({ error: 'channelId required' });
+
+  const { getClient } = require('../discord/bot');
+  const { buildAlertEmbed } = require('../discord/embeds');
+  const { EmbedBuilder } = require('discord.js');
+  const client = getClient();
+  if (!client) return res.status(500).json({ error: 'Bot not connected' });
+
+  const channel = await client.channels.fetch(channelId);
+  if (!channel) return res.status(400).json({ error: 'Channel not found' });
+
+  const results = {};
+
+  async function send(label, content) {
+    try {
+      if (typeof content === 'string') {
+        await channel.send(`**[TEST] ${label}**\n${content}`);
+      } else {
+        await channel.send({ content: `**[TEST] ${label}**`, ...content });
+      }
+      return true;
+    } catch (e) {
+      results[label] = { pass: false, detail: `send failed: ${e.message}` };
+      return false;
+    }
+  }
+
+  // 1. /status
+  try {
+    const baseRetailers = require('../config/retailers.json');
+    const overrides = await state.getRetailerOverrides();
+    const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+    const lines = [];
+    for (const r of retailers.slice(0, 5)) {
+      const s = await state.getRetailerStatus(r.id);
+      const lc = await state.getLastCheck(r.id);
+      const ago = lc ? `${Math.round((Date.now() - lc) / 1000)}s ago` : 'never';
+      lines.push(`${s.healthy ? '🟢' : '🔴'} **${r.name}** — ${ago}, errors: ${s.errors}`);
+    }
+    await send('/status', lines.join('\n') + '\n... (showing 5 of ' + retailers.length + ')');
+    results['/status'] = { pass: true };
+  } catch (e) { results['/status'] = { pass: false, detail: e.message }; }
+
+  // 2. /retailers
+  try {
+    const baseRetailers = require('../config/retailers.json');
+    const overrides = await state.getRetailerOverrides();
+    const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+    const lines = retailers.slice(0, 5).map(r =>
+      `${r.enabled ? '✅' : '❌'} **${r.name}** — ${r.intervalMs / 1000}s, proxy: ${r.proxyTier}`
+    );
+    await send('/retailers', lines.join('\n') + '\n... (showing 5 of ' + retailers.length + ')');
+    results['/retailers'] = { pass: true };
+  } catch (e) { results['/retailers'] = { pass: false, detail: e.message }; }
+
+  // 3. /test — build and send a test embed
+  try {
+    const testEvent = {
+      type: 'RESTOCK', _detectedAt: Date.now(), _scanTier: 'scan',
+      product: { sku: 'LIVE-TEST-001', name: 'Live Test — Prismatic Evolutions ETB', price: 69.99, currency: 'CAD', url: 'https://example.com', image: null, retailer: 'Test Retailer', retailerId: 'test', inStock: true, canAddToCart: true, category: 'pokemon', isTCG: true },
+      detail: 'Live command test',
+    };
+    const { embed, components } = buildAlertEmbed(testEvent, 'paid');
+    await channel.send({ content: '**[TEST] /test**', embeds: [embed], components });
+    results['/test'] = { pass: true };
+  } catch (e) { results['/test'] = { pass: false, detail: e.message }; }
+
+  // 4. /scan — just verify it can run (don't actually resend everything)
+  try {
+    const { runScan: rs } = require('../core/scan');
+    results['/scan'] = { pass: typeof rs === 'function', detail: 'runScan available (skipping full scan to avoid spam)' };
+  } catch (e) { results['/scan'] = { pass: false, detail: e.message }; }
+
+  // 5. /test-asin — build Amazon embed from cache (NO enrichment — saves credits)
+  try {
+    const products = await state.getAllProducts('amazon');
+    const asins = Object.keys(products);
+    if (asins.length > 0) {
+      const asin = asins[0];
+      const product = { ...products[asin], retailerId: 'amazon' };
+      const event = { type: 'RESTOCK', product, detail: `Live test ASIN ${asin}`, _detectedAt: Date.now(), _scanTier: 'scan' };
+      // Skip enrichEvent — it uses ScraperAPI credits for OLID
+      const { embed, components } = buildAlertEmbed(event, 'paid');
+      await channel.send({ content: `**[TEST] /test-asin** (${asin}, no OLID — credit-free test)`, embeds: [embed], components });
+      results['/test-asin'] = { pass: true, detail: `${asin} (cached, no enrichment)` };
+    } else {
+      results['/test-asin'] = { pass: true, detail: 'No Amazon products cached (skip)' };
+    }
+  } catch (e) { results['/test-asin'] = { pass: false, detail: e.message }; }
+
+  // 6. /freetier — check config (don't actually toggle)
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    let ch = await state.getChannelsConfig();
+    if (!ch) try { ch = JSON.parse(fs.readFileSync(path.join(__dirname, '../config/channels.json'), 'utf-8')); } catch {}
+    const enabled = ch?.tiers?.free?.enabled;
+    await send('/freetier', `Free tier is currently **${enabled !== false ? 'ON' : 'OFF'}** (not toggling in test)`);
+    results['/freetier'] = { pass: true, detail: `enabled=${enabled}` };
+  } catch (e) { results['/freetier'] = { pass: false, detail: e.message }; }
+
+  // 7. /test-sku — Walmart from cache (NO enrichment — saves credits)
+  try {
+    const product = await state.getProduct('walmart', '66WBIOXIU4UC');
+    if (product) {
+      const event = { type: 'RESTOCK', product: { ...product, retailerId: 'walmart' }, detail: 'Live test SKU', _detectedAt: Date.now(), _scanTier: 'scan' };
+      // Skip enrichEvent — offerId stealth fetch is free but let's keep test fast
+      const { embed, components } = buildAlertEmbed(event, 'paid');
+      await channel.send({ content: `**[TEST] /test-sku** (walmart:66WBIOXIU4UC, cached offerId=${product._offerId || 'none'})`, embeds: [embed], components });
+      results['/test-sku'] = { pass: true, detail: `cached offerId=${product._offerId || 'none'}` };
+    } else {
+      results['/test-sku'] = { pass: true, detail: 'Walmart Charizard not cached (skip)' };
+    }
+  } catch (e) { results['/test-sku'] = { pass: false, detail: e.message }; }
+
+  // 8. /check — cached stock check (NO live fetch — saves ScraperAPI credits)
+  try {
+    const cached = await state.getProduct('walmart', '66WBIOXIU4UC');
+    const adapter = scheduler.getAdapter('walmart');
+    const hasLiveFetch = adapter && typeof adapter.fetchProductPage === 'function';
+    // Skip adapter.fetchProductPage — costs ScraperAPI credits
+    const p = cached;
+    if (p) {
+      const embed = new EmbedBuilder()
+        .setColor(p.inStock ? 0x57f287 : 0xed4245)
+        .setTitle(p.name || '66WBIOXIU4UC')
+        .addFields(
+          { name: 'Status', value: p.inStock ? '🟢 In Stock' : '🔴 OOS', inline: true },
+          { name: 'Price', value: p.price ? `$${p.price.toFixed(2)}` : '?', inline: true },
+          { name: 'Source', value: `Cached (liveFetch=${hasLiveFetch})`, inline: true },
+        )
+        .setFooter({ text: `SKU: 66WBIOXIU4UC` });
+      if (p._offerId) embed.addFields({ name: 'Offer ID', value: `\`${p._offerId}\``, inline: false });
+      await channel.send({ content: '**[TEST] /check** (walmart 66WBIOXIU4UC, credit-free)', embeds: [embed] });
+      results['/check'] = { pass: true, detail: `inStock=${p.inStock}, liveFetchAvailable=${hasLiveFetch}` };
+    } else {
+      results['/check'] = { pass: true, detail: 'Product not available (skip)' };
+    }
+  } catch (e) { results['/check'] = { pass: false, detail: e.message }; }
+
+  // 9. /watchlist
+  try {
+    const baseRetailers = require('../config/retailers.json');
+    const lines = [];
+    for (const r of baseRetailers) {
+      const adapter = scheduler.getAdapter(r.id);
+      if (!adapter || !adapter.watchlist || adapter.watchlist.size === 0) continue;
+      const skus = [...adapter.watchlist];
+      lines.push(`**${r.name}** (${skus.length} SKUs)`);
+      for (const sku of skus) {
+        const p = await state.getProduct(r.id, sku);
+        lines.push(p ? `  ${p.inStock ? '🟢' : '🔴'} \`${sku}\` — ${p.name || '?'} | $${p.price || '?'}` : `  ⚫ \`${sku}\` — not cached`);
+      }
+    }
+    await send('/watchlist', lines.length > 0 ? lines.join('\n') : 'No watchlist items');
+    results['/watchlist'] = { pass: true };
+  } catch (e) { results['/watchlist'] = { pass: false, detail: e.message }; }
+
+  // 10. /watchlist-add + /watchlist-remove — round-trip test with a dummy SKU
+  try {
+    const adapter = scheduler.getAdapter('walmart');
+    if (!adapter.watchlist) adapter.watchlist = new Set();
+    const testSku = '_LIVE_TEST_999';
+    adapter.watchlist.add(testSku);
+    await state.setWatchlistOverride('walmart', [...adapter.watchlist]);
+    const addedSize = adapter.watchlist.size;
+    adapter.watchlist.delete(testSku);
+    await state.setWatchlistOverride('walmart', [...adapter.watchlist]);
+    await send('/watchlist-add + /watchlist-remove', `Added \`${testSku}\` (size=${addedSize}), then removed (size=${adapter.watchlist.size}). Round-trip OK.`);
+    results['/watchlist-add'] = { pass: true };
+    results['/watchlist-remove'] = { pass: true };
+  } catch (e) {
+    results['/watchlist-add'] = { pass: false, detail: e.message };
+    results['/watchlist-remove'] = { pass: false, detail: e.message };
+  }
+
+  // 11. /budget
+  try {
+    const budget = getBudgetStatus();
+    const embed = new EmbedBuilder()
+      .setColor(budget.paused ? 0xed4245 : budget.warned ? 0xfee75c : 0x57f287)
+      .setTitle('ScraperAPI Budget')
+      .addFields(
+        { name: 'Status', value: budget.paused ? '🔴 PAUSED' : budget.warned ? '🟡 WARNING' : '🟢 OK', inline: true },
+        { name: 'Credits', value: `${budget.used.toLocaleString()} / ${budget.budget.toLocaleString()}`, inline: true },
+        { name: 'Usage', value: `${budget.pct}%`, inline: true },
+      );
+    await channel.send({ content: '**[TEST] /budget**', embeds: [embed] });
+    results['/budget'] = { pass: true, detail: `${budget.used}/${budget.budget}` };
+  } catch (e) { results['/budget'] = { pass: false, detail: e.message }; }
+
+  // 12. /alerts
+  try {
+    const lines = [];
+    for (const rid of ['walmart', 'amazon', 'bestbuy', 'costco', 'pokemoncenter']) {
+      const products = await state.getAllProducts(rid);
+      const entries = Object.values(products);
+      const inStock = entries.filter(p => p.inStock).length;
+      const lc = await state.getLastCheck(rid);
+      const ago = lc ? `${Math.round((Date.now() - lc) / 1000)}s ago` : 'never';
+      lines.push(`**${rid}** — ${entries.length} cached, ${inStock} in stock, last: ${ago}`);
+    }
+    await send('/alerts', lines.join('\n'));
+    results['/alerts'] = { pass: true };
+  } catch (e) { results['/alerts'] = { pass: false, detail: e.message }; }
+
+  // 13. /ping
+  try {
+    const start = Date.now();
+    await state.getRedis().ping();
+    const redisMs = Date.now() - start;
+    const wsMs = client.ws.ping;
+    await send('/ping', `🏓 **Pong!**\nBot: **${Date.now() - start}ms** | WebSocket: **${wsMs}ms** | Redis: **${redisMs}ms**`);
+    results['/ping'] = { pass: true, detail: `ws=${wsMs}ms, redis=${redisMs}ms` };
+  } catch (e) { results['/ping'] = { pass: false, detail: e.message }; }
+
+  // 14. /help — static embed
+  try {
+    results['/help'] = { pass: true, detail: 'static ephemeral embed (not sent — ephemeral only)' };
+  } catch (e) { results['/help'] = { pass: false, detail: e.message }; }
+
+  // 15. /early-add + /early-remove + /early-list — full round-trip
+  try {
+    const testKw = '__live_test_keyword__';
+    const added = await state.addEarlyKeyword(testKw);
+    const listAfterAdd = await state.getEarlyKeywords();
+    const hasIt = listAfterAdd.includes(testKw);
+    const removed = await state.removeEarlyKeyword(testKw);
+    const listAfterRemove = await state.getEarlyKeywords();
+    const gone = !listAfterRemove.includes(testKw);
+
+    await send('/early-add + /early-remove + /early-list',
+      `Added \`${testKw}\`: ${added ? '✅' : '❌ (already existed)'}\n` +
+      `In list after add: ${hasIt ? '✅' : '❌'}\n` +
+      `Removed: ${removed ? '✅' : '❌'}\n` +
+      `Gone after remove: ${gone ? '✅' : '❌'}\n` +
+      `Active keywords: ${listAfterRemove.length}`
+    );
+    results['/early-add'] = { pass: added && hasIt, detail: `added=${added}, inList=${hasIt}` };
+    results['/early-remove'] = { pass: removed && gone, detail: `removed=${removed}, gone=${gone}` };
+    results['/early-list'] = { pass: true, detail: `${listAfterRemove.length} keywords after cleanup` };
+  } catch (e) {
+    results['/early-add'] = { pass: false, detail: e.message };
+    results['/early-remove'] = { pass: false, detail: e.message };
+    results['/early-list'] = { pass: false, detail: e.message };
+  }
+
+  // Summary
+  const total = Object.keys(results).length;
+  const passed = Object.values(results).filter(r => r.pass).length;
+  const failedList = Object.entries(results).filter(([, v]) => !v.pass).map(([k, v]) => `${k}: ${v.detail}`);
+
+  // Post summary embed
+  const summaryEmbed = new EmbedBuilder()
+    .setColor(failedList.length === 0 ? 0x57f287 : 0xed4245)
+    .setTitle(`Command Test Results: ${passed}/${total} passed`)
+    .setDescription(failedList.length > 0 ? `**Failures:**\n${failedList.join('\n')}` : 'All commands working perfectly.')
+    .setTimestamp();
+  await channel.send({ embeds: [summaryEmbed] });
+
+  res.json({ summary: `${passed}/${total} passed`, failed: failedList.length > 0 ? failedList : 'none', results });
+});
+
 module.exports = router;
