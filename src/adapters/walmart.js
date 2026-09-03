@@ -41,18 +41,10 @@ class WalmartAdapter extends BaseAdapter {
     const proxyUrl = getProxyUrl('residential');
     const start = Date.now();
 
-    // Race stealth + ScraperAPI — fastest definitive answer wins.
-    // Stealth is free and usually faster (~2-4s). ScraperAPI is reliable (~3-8s, 5 credits).
-    // If stealth gets a definitive answer (product found OR third-party confirmed), use it
-    // and don't wait for ScraperAPI. ScraperAPI result is only used if stealth fails.
-    const stealthPromise = this._stealthFetchProduct(url, productId, proxyUrl);
-    const scraperPromise = this._scraperFetchProduct(productId, url);
-
-    // Try stealth first (free, fast)
-    const stealth = await stealthPromise;
+    // Stealth first (free, ~2-4s). Only fire ScraperAPI if stealth can't parse the page.
+    const stealth = await this._stealthFetchProduct(url, productId, proxyUrl);
 
     if (stealth.product) {
-      // Stealth got a Walmart product — use it, ignore scraper (saves time)
       const product = stealth.product;
       product._watchlist = true;
       logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (stealth)`);
@@ -60,12 +52,12 @@ class WalmartAdapter extends BaseAdapter {
     }
 
     if (stealth.thirdParty) {
-      // Stealth confirmed third-party seller — no Walmart offer, skip scraper
+      // Stealth confirmed third-party — no Walmart offer, skip ScraperAPI (saves 5 credits)
       return null;
     }
 
-    // Stealth failed (challenge/timeout) — wait for ScraperAPI
-    const scraper = await scraperPromise;
+    // Stealth failed (challenge/blocked) — fall back to ScraperAPI (5 credits)
+    const scraper = await this._scraperFetchProduct(productId, url);
 
     if (scraper.product) {
       const product = scraper.product;
