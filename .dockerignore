@@ -4,5 +4,4 @@ node_modules
 *.md
 *.log
 src/config/proxies.json
-src/config/channels.json
 .claude/
