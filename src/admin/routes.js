@@ -452,4 +452,17 @@ router.post('/test-alert', async (req, res) => {
   }
 });
 
+// === Post command guide to a channel ===
+router.post('/post-guide', async (req, res) => {
+  const { channelId } = req.body;
+  if (!channelId) return res.status(400).json({ error: 'channelId required' });
+  try {
+    const { postCommandGuide } = require('../discord/bot');
+    await postCommandGuide(channelId);
+    res.json({ ok: true, channelId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
