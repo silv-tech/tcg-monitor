@@ -5,7 +5,7 @@
     "name": "Walmart Canada",
     "url": "https://www.walmart.ca",
     "adapter": "walmart",
-    "intervalMs": 5000,
+    "intervalMs": 8000,
     "proxyTier": "residential",
     "enabled": true,
     "color": "#0071dc",
