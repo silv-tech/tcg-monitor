@@ -137,9 +137,10 @@ function buildAlertEmbed(event, tier) {
       embed.addFields({ name: isAmazon ? 'ASIN' : 'SKU', value: String(product.sku), inline: true });
     }
 
-    // Stock
-    if (product.stockCount != null && product.stockCount > 0) {
-      embed.addFields({ name: 'Stock', value: String(product.stockCount), inline: true });
+    // Stock — prefer exact quantity from Walmart/Shopify, fallback to 1+
+    const stockQty = product._stockQty || product.stockCount;
+    if (stockQty != null && stockQty > 0) {
+      embed.addFields({ name: 'Stock', value: String(stockQty), inline: true });
     } else {
       embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
     }

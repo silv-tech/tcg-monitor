@@ -357,6 +357,16 @@ class WalmartAdapter extends BaseAdapter {
         logger.debug(`Walmart: ${productId} offerId=${offerId}`);
       }
 
+      // Extract stock quantity from buyBox or item-level data
+      const qty = item.buyBox?.products?.[0]?.maxQuantity
+        || item.buyBox?.products?.[0]?.availableQuantity
+        || item.maxQuantity
+        || item.availableQuantity
+        || null;
+      if (qty != null) {
+        product._stockQty = qty;
+      }
+
       return product;
     } catch {
       return null;
