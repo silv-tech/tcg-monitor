@@ -146,6 +146,10 @@ function buildAlertEmbed(event, tier) {
     }
 
     // Variant ID (Shopify only)
+    if (product._productId) {
+      embed.addFields({ name: 'Product ID', value: String(product._productId), inline: true });
+    }
+
     if (product._variantId) {
       embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
     }

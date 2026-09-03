@@ -17,7 +17,7 @@
     "name": "EB Games",
     "url": "https://www.ebgames.ca",
     "adapter": "ebgames",
-    "intervalMs": 30000,
+    "intervalMs": 20000,
     "proxyTier": "none",
     "enabled": true,
     "maxProducts": 1200,

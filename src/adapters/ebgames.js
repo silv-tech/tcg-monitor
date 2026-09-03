@@ -3,23 +3,14 @@ const logger = require('../monitoring/logger');
 const state = require('../core/state');
 const { sleep, hashSku } = require('../utils/helpers');
 
-const DEEP_CRAWL_INTERVAL = 10 * 60 * 1000;
+const DEEP_CRAWL_INTERVAL = 5 * 60 * 1000;
 const CONCURRENCY = 4;
 
-// Odoo eCommerce category routes. "Other TCG" mixes accessories/D&D, so it's narrowed with search=.
-// fastPages: pages fetched every poll (newest-first + recently-modified). Others rely on the deep crawl.
+// Odoo eCommerce category routes — only the games the client tracks.
+// fastPages: pages fetched every poll (newest-first + recently-modified); the deep crawl covers the rest.
 const SOURCES = [
-  { key: 'pokemon',    path: '/shop/category/trading-cards-pokemon-204', fastPages: 2 },
-  { key: 'onepiece',   path: '/shop/category/trading-cards-one-piece-208', fastPages: 1 },
-  { key: 'dragonball', path: '/shop/category/trading-cards-other-tcg-210', search: 'dragon ball', fastPages: 1 },
-  { key: 'lorcana',    path: '/shop/category/trading-cards-other-tcg-210', search: 'lorcana' },
-  { key: 'starwars',   path: '/shop/category/trading-cards-other-tcg-210', search: 'star wars' },
-  { key: 'digimon',    path: '/shop/category/trading-cards-other-tcg-210', search: 'digimon' },
-  { key: 'unionarena', path: '/shop/category/trading-cards-other-tcg-210', search: 'union arena' },
-  { key: 'gundam',     path: '/shop/category/trading-cards-other-tcg-210', search: 'gundam' },
-  { key: 'riftbound',  path: '/shop/category/trading-cards-riftbound-207' },
-  { key: 'mtg',        path: '/shop/category/trading-cards-magic-the-gathering-205' },
-  { key: 'yugioh',     path: '/shop/category/trading-cards-yu-gi-oh-206' },
+  { key: 'pokemon',  path: '/shop/category/trading-cards-pokemon-204', fastPages: 2 },
+  { key: 'onepiece', path: '/shop/category/trading-cards-one-piece-208', fastPages: 1 },
 ];
 
 const SORT_NEWEST = 'create_date desc';
@@ -83,7 +74,7 @@ function parseCard(card, baseUrl, game) {
     seller: 'EB Games',
     shipsToHome: true,
     templateId,
-    productId: productId ? productId[1] : null,
+    _productId: productId ? productId[1] : null,
     game,
   };
 }
@@ -142,7 +133,6 @@ class EBGamesAdapter extends BaseAdapter {
 
   _listingUrl(source, page, sort) {
     const params = new URLSearchParams({ order: sort });
-    if (source.search) params.set('search', source.search);
     return `${this.url}${source.path}${page > 1 ? `/page/${page}` : ''}?${params}`;
   }
 
@@ -224,7 +214,7 @@ class EBGamesAdapter extends BaseAdapter {
     logger.info(`EB Games: FAST — ${ok}/${jobs.length} pages, ${seen.size} products (${inStock} in stock${added ? `, ${added} new` : ''}), ${Date.now() - start}ms`);
   }
 
-  // Every 10 min: every page of every category (page size is locked to 10 server-side).
+  // Every 5 min: every page of every category (page size is locked to 10 server-side).
   async _deepCrawl() {
     this._deepCrawlRunning = true;
     const start = Date.now();
@@ -314,6 +304,7 @@ class EBGamesAdapter extends BaseAdapter {
     const availability = ld.offers?.availability || '';
     const inStock = /InStock|PreOrder|LimitedAvailability/i.test(availability);
     const known = this._knownProducts.get(id) || {};
+    const pageProductId = html.match(/name="product_id"[^>]*value="(\d+)"/);
     const product = this.classify({
       ...known,
       sku: id,
@@ -328,6 +319,7 @@ class EBGamesAdapter extends BaseAdapter {
       seller: 'EB Games',
       shipsToHome: true,
       templateId: String(templateId),
+      _productId: pageProductId ? pageProductId[1] : known._productId || null,
       gtin: ld.gtin || known.gtin || null,
     });
     product._watchlist = true;
