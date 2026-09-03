@@ -251,11 +251,12 @@ class Scheduler {
       // Fast watchlist polling (every 3s) for adapters that have one
       // Uses direct stealth fetch (free) not ScraperAPI, so high frequency is fine
       if (adapter.watchlist && adapter.watchlist.size > 0) {
+        const wlInterval = id === 'walmart' ? 3000 : 5000;
         const wlTimer = setInterval(() => {
           if (this.running) this.pollWatchlist(adapter);
-        }, 5000);
+        }, wlInterval);
         this.timers.set(`${id}:watchlist`, wlTimer);
-        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} SKUs every 5s`);
+        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} SKUs every ${wlInterval / 1000}s`);
       }
 
       stagger += 3000;
