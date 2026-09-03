@@ -396,4 +396,44 @@ router.put('/proxies', (req, res) => {
   res.json({ ok: true, pool: getProxyPoolStats() });
 });
 
+// === Test alert (fire a single product alert for testing) ===
+router.post('/test-alert', async (req, res) => {
+  const { retailerId, sku, type = 'RESTOCK' } = req.body;
+  if (!retailerId || !sku) return res.status(400).json({ error: 'retailerId and sku required' });
+
+  try {
+    // Try to get product from Redis first
+    let product = await state.getProduct(retailerId, sku);
+
+    if (!product) {
+      // Build minimal product from request body
+      product = {
+        sku,
+        name: req.body.name || sku,
+        price: req.body.price || null,
+        url: req.body.url || '',
+        inStock: true,
+        canAddToCart: true,
+        retailer: req.body.retailer || retailerId,
+        retailerId,
+        category: 'pokemon',
+        isTCG: true,
+      };
+    }
+
+    const event = {
+      type,
+      product,
+      detail: `Test alert for ${product.name}`,
+      _detectedAt: Date.now(),
+      _scanTier: 'scan',
+    };
+
+    await delivery.deliver([event], { skipDedup: true });
+    res.json({ ok: true, product: product.name, offerId: product._offerId || 'will be enriched during delivery' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
