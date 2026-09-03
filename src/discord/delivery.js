@@ -140,6 +140,34 @@ class DeliveryQueue {
       if (product.retailerId) {
         event._lastCheckedAt = await getLastCheck(product.retailerId);
       }
+      // Walmart Offer ID enrichment — free stealth fetch if missing from search results
+      if (product.retailerId === 'walmart' && product.sku && !product._offerId) {
+        try {
+          const { stealthGet } = require('../utils/stealth-http');
+          const { getProxyUrl } = require('../core/proxy');
+          const proxyUrl = getProxyUrl('residential');
+          const html = await stealthGet(`https://www.walmart.ca/ip/${product.sku}`, {
+            proxyUrl,
+            maxRetries: 1,
+            timeoutMs: 8000,
+          });
+          if (html && html.length > 500) {
+            const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+            if (ndMatch) {
+              const nd = JSON.parse(ndMatch[1]);
+              const item = nd?.props?.pageProps?.product || nd?.props?.pageProps?.item || nd?.props?.pageProps?.initialData?.data?.product;
+              const offerId = item?.offerId || item?.buyBox?.products?.[0]?.offerId;
+              if (offerId) {
+                product._offerId = offerId;
+                logger.info(`Walmart: enriched offerId for ${product.sku}: ${offerId.substring(0, 20)}...`);
+              }
+            }
+          }
+        } catch (err) {
+          logger.debug(`Walmart offerId enrichment failed for ${product.sku}: ${err.message}`);
+        }
+      }
+
       // Amazon Offer Listing ID + seller verification — cache-first, ScraperAPI on miss, Playwright fallback
       if (product.retailerId === 'amazon' && product.sku) {
         const asin = product.sku;

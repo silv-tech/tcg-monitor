@@ -380,6 +380,7 @@ class WalmartAdapter extends BaseAdapter {
               url: item.canonicalUrl || item.url || '',
               image: item.imageInfo?.thumbnailUrl || item.image || item.thumbnail || '',
               availability: item.availabilityStatusV2?.value || item.availabilityStatus || '',
+              offerId: item.offerId || item.buyBoxSuppression?.offerId || '',
             })).filter(i => i.name);
           }
         } catch {
@@ -608,6 +609,11 @@ class WalmartAdapter extends BaseAdapter {
           canAddToCart: inStock,
           shipsToHome: true,
         });
+
+        // Attach offerId if available from search results
+        if (item.offerId) {
+          product._offerId = item.offerId;
+        }
 
         products[product.sku] = product;
       } catch (err) {
