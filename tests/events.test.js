@@ -57,6 +57,20 @@ describe('detectEvents', () => {
     assert.ok(priceChange.detail.includes('dropped'));
   });
 
+  it('no PRICE_CHANGE below the 9% minimum swing', () => {
+    const old = makeProduct({ price: 100 });
+    const newProd = makeProduct({ price: 95 });
+    const events = detectEvents(old, newProd);
+    assert.strictEqual(events.find(e => e.type === EVENT_TYPES.PRICE_CHANGE), undefined);
+  });
+
+  it('PRICE_CHANGE at exactly 9%', () => {
+    const old = makeProduct({ price: 100 });
+    const newProd = makeProduct({ price: 91 });
+    const events = detectEvents(old, newProd);
+    assert.ok(events.find(e => e.type === EVENT_TYPES.PRICE_CHANGE));
+  });
+
   it('PRICE_CHANGE with increase', () => {
     const old = makeProduct({ price: 100 });
     const newProd = makeProduct({ price: 120 });

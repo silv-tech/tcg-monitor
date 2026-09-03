@@ -11,6 +11,9 @@ const EVENT_TYPES = {
   EARLY_SKU: 'EARLY_SKU',
 };
 
+// Small retailer price wobbles (rounding, cent-level sales) aren't worth an alert
+const MIN_PRICE_CHANGE_PCT = 9;
+
 function detectEvents(oldProduct, newProduct) {
   const events = [];
 
@@ -34,7 +37,7 @@ function detectEvents(oldProduct, newProduct) {
     });
   }
 
-  // Price change (only if both have valid prices)
+  // Price change (only if both have valid prices and the move clears the minimum swing)
   if (
     oldProduct.price != null &&
     newProduct.price != null &&
@@ -43,7 +46,7 @@ function detectEvents(oldProduct, newProduct) {
     newProduct.price > 0
   ) {
     const pctChange = ((newProduct.price - oldProduct.price) / oldProduct.price) * 100;
-    events.push({
+    if (Math.abs(pctChange) >= MIN_PRICE_CHANGE_PCT) events.push({
       type: EVENT_TYPES.PRICE_CHANGE,
       product: newProduct,
       detail: `Price ${pctChange < 0 ? 'dropped' : 'increased'} ${Math.abs(pctChange).toFixed(1)}%`,
