@@ -648,40 +648,61 @@ async function handlePing(interaction) {
 
 async function handleHelp(interaction) {
   const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle('Nocturne Monitors — Commands')
-    .setDescription('All available slash commands and what they do.')
+    .setColor(0x2b2d31)
+    .setTitle('Nocturne Monitors')
+    .setDescription('Quick command reference — **18 commands** available.')
     .addFields(
-      { name: '🔍 Monitoring', value: [
-        '`/status` — Show all retailers health, last check times, error counts',
-        '`/retailers` — List all retailers with polling intervals and enabled status',
-        '`/check <retailer> <sku>` — Live stock check (fetches product page NOW)',
-        '`/alerts [retailer]` — Show product counts and stats per retailer',
-      ].join('\n') },
-      { name: '🔔 Testing', value: [
-        '`/test` — Send a generic test alert to paid channel',
-        '`/test-sku <retailer> <sku>` — Send enriched alert in current channel (offerId, history, cross-retailer)',
-        '`/test-asin <asin>` — Send Amazon alert with OLID enrichment',
-        '`/scan <window>` — Resend all cached products (12h or 24h)',
-      ].join('\n') },
-      { name: '📋 Watchlist', value: [
-        '`/watchlist` — Show all fast-polled SKUs and their status',
-        '`/watchlist-add <retailer> <sku>` — Add SKU to 5-second polling',
-        '`/watchlist-remove <retailer> <sku>` — Remove SKU from watchlist',
-      ].join('\n') },
-      { name: '🎯 Early Detection', value: [
-        '`/early-add <keyword>` — Watch for a product keyword across all retailers',
-        '`/early-remove <keyword>` — Stop watching a keyword',
-        '`/early-list` — Show all active early detection keywords',
-      ].join('\n') },
-      { name: '⚙️ System', value: [
-        '`/budget` — ScraperAPI credit usage and budget status',
-        '`/freetier` — Toggle free tier alerts on/off',
-        '`/ping` — Check bot latency',
-        '`/help` — This message',
-      ].join('\n') },
+      {
+        name: '📡  Monitoring',
+        value: [
+          '`/status` — Health dashboard',
+          '`/retailers` — All retailers & config',
+          '`/check` `retailer` `sku` — Live lookup',
+          '`/alerts` `[retailer]` — Product stats',
+        ].join('\n'),
+        inline: true,
+      },
+      {
+        name: '🧪  Testing',
+        value: [
+          '`/test` — Test alert',
+          '`/test-sku` `retailer` `sku` — Full preview',
+          '`/test-asin` `asin` — Amazon OLID',
+          '`/scan` `window` — Bulk resend',
+        ].join('\n'),
+        inline: true,
+      },
+      { name: '\u200B', value: '\u200B', inline: false },
+      {
+        name: '📋  Watchlist',
+        value: [
+          '`/watchlist` — View watched SKUs',
+          '`/watchlist-add` `retailer` `sku` — 5s polling',
+          '`/watchlist-remove` `retailer` `sku` — Remove',
+        ].join('\n'),
+        inline: true,
+      },
+      {
+        name: '🎯  Early Detection',
+        value: [
+          '`/early-add` `keyword` — Watch globally',
+          '`/early-remove` `keyword` — Remove',
+          '`/early-list` — View active keywords',
+        ].join('\n'),
+        inline: true,
+      },
+      { name: '\u200B', value: '\u200B', inline: false },
+      {
+        name: '⚙️  System',
+        value: [
+          '`/budget` — ScraperAPI credits & budget',
+          '`/freetier` — Toggle free tier on/off',
+          '`/ping` — Bot latency',
+          '`/help` — This message',
+        ].join('\n'),
+      },
     )
-    .setFooter({ text: 'Nocturne Monitors — All commands are admin-only' })
+    .setFooter({ text: 'Nocturne Monitors  ·  Admin Only' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -777,43 +798,104 @@ async function postCommandGuide(channelId) {
     return;
   }
 
-  const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle('Nocturne Monitors — Bot Commands')
-    .setDescription('Use these slash commands to monitor, test, and manage the alert system.\nAll commands are restricted to authorized admins.')
+  const header = new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setThumbnail(client.user.displayAvatarURL({ size: 128 }))
+    .setDescription([
+      '# NOCTURNE MONITORS',
+      '-# Command Reference Guide',
+      '',
+      'Real-time TCG stock alerts across **37 Canadian retailers** with millisecond-speed detection, early keyword matching, and cross-retailer intelligence.',
+      '',
+      '> All commands are **admin-only** and respond ephemerally (only visible to you).',
+    ].join('\n'));
+
+  const commands = new EmbedBuilder()
+    .setColor(0x2b2d31)
     .addFields(
-      { name: '──── 🔍 Monitoring ────', value: '\u200B' },
-      { name: '/status', value: 'Show all retailers health, last check times, and error counts.', inline: false },
-      { name: '/retailers', value: 'List all retailers with polling intervals, proxy tier, and enabled status.', inline: false },
-      { name: '/check `retailer` `sku`', value: 'Live stock check. Fetches the product page RIGHT NOW and shows price, stock, seller, offerId.\n**Example:** `/check walmart 66WBIOXIU4UC`', inline: false },
-      { name: '/alerts `[retailer]`', value: 'Show product counts, in-stock counts, and last check time per retailer. Use "all" or leave empty for summary.\n**Example:** `/alerts walmart` or `/alerts`', inline: false },
-
-      { name: '──── 🔔 Testing ────', value: '\u200B' },
-      { name: '/test', value: 'Send a generic test alert to the paid channel to verify the system is working.', inline: false },
-      { name: '/test-sku `retailer` `sku`', value: 'Send a fully enriched alert (offerId, restock history, cross-retailer) directly in the current channel.\n**Example:** `/test-sku walmart 66WBIOXIU4UC`', inline: false },
-      { name: '/test-asin `asin`', value: 'Send an Amazon alert with OLID and seller verification.\n**Example:** `/test-asin B0GW2DK37Q`', inline: false },
-      { name: '/scan `window`', value: 'Resend ALL cached in-stock products to paid channels. Choose 12h or 24h window.', inline: false },
-
-      { name: '──── 📋 Watchlist ────', value: '\u200B' },
-      { name: '/watchlist', value: 'Show all SKUs being fast-polled every 5 seconds with their current stock status, price, and seller.', inline: false },
-      { name: '/watchlist-add `retailer` `sku`', value: 'Add a product to the fast-poll watchlist (5-second polling).\n**Example:** `/watchlist-add walmart 6000208831664`', inline: false },
-      { name: '/watchlist-remove `retailer` `sku`', value: 'Remove a product from the fast-poll watchlist.\n**Example:** `/watchlist-remove walmart 6000208831664`', inline: false },
-
-      { name: '──── 🎯 Early Detection ────', value: '\u200B' },
-      { name: '/early-add `keyword`', value: 'Add a keyword to watch across ALL 37 retailers. When a matching product is listed or restocked, a priority alert is sent to #early-detection.\n**Example:** `/early-add destined rivals elite trainer`', inline: false },
-      { name: '/early-remove `keyword`', value: 'Remove a keyword from early detection.\n**Example:** `/early-remove destined rivals elite trainer`', inline: false },
-      { name: '/early-list', value: 'Show all active early detection keywords.', inline: false },
-
-      { name: '──── ⚙️ System ────', value: '\u200B' },
-      { name: '/budget', value: 'Show ScraperAPI credit usage, monthly budget, and whether scraping is paused.', inline: false },
-      { name: '/freetier', value: 'Toggle free tier alerts on or off.', inline: false },
-      { name: '/ping', value: 'Check if the bot is responsive and measure latency.', inline: false },
-      { name: '/help', value: 'Show a quick reference of all commands (ephemeral — only you see it).', inline: false },
+      {
+        name: '📡  MONITORING',
+        value: [
+          '**`/status`**',
+          'System health dashboard — retailer statuses, last check times, consecutive errors, and proxy stats.',
+          '',
+          '**`/retailers`**',
+          'Full retailer list with polling intervals, proxy tiers, and enabled/disabled state.',
+          '',
+          '**`/check`** `<retailer>` `<sku>`',
+          'Live stock check — fetches the product page in real-time. Returns price, stock status, add-to-cart, Offer ID, and restock history.',
+          '-# Example:  `/check walmart 66WBIOXIU4UC`',
+          '',
+          '**`/alerts`** `[retailer]`',
+          'Product counts, in-stock totals, and timing data per retailer. Leave empty for full summary.',
+          '-# Example:  `/alerts walmart`  ·  `/alerts`',
+        ].join('\n'),
+      },
+      {
+        name: '🧪  TESTING & ALERTS',
+        value: [
+          '**`/test`**',
+          'Sends a sample alert to paid channels to verify the pipeline is working.',
+          '',
+          '**`/test-sku`** `<retailer>` `<sku>`',
+          'Fully enriched alert preview — Offer ID, restock history, cross-retailer matches.',
+          '-# Example:  `/test-sku walmart 66WBIOXIU4UC`',
+          '',
+          '**`/test-asin`** `<asin>`',
+          'Amazon alert with OLID enrichment and seller verification.',
+          '-# Example:  `/test-asin B0GW2DK37Q`',
+          '',
+          '**`/scan`** `<window>`',
+          'Resend all cached in-stock products to paid channels. Choose **12h** or **24h** window.',
+        ].join('\n'),
+      },
+      {
+        name: '📋  WATCHLIST',
+        value: [
+          '**`/watchlist`**',
+          'View all fast-polled SKUs with current stock status, price, and seller info.',
+          '',
+          '**`/watchlist-add`** `<retailer>` `<sku>`',
+          'Add a product to the priority queue — polled every **5 seconds** for instant detection.',
+          '-# Example:  `/watchlist-add walmart 6000208831664`',
+          '',
+          '**`/watchlist-remove`** `<retailer>` `<sku>`',
+          'Remove a product from the fast-poll queue.',
+          '',
+          '-# Watchlist changes persist across restarts via Redis.',
+        ].join('\n'),
+      },
+      {
+        name: '🎯  EARLY DETECTION',
+        value: [
+          '**`/early-add`** `<keyword>`',
+          'Monitor a keyword across **all 37 retailers**. When a product matching the keyword is listed or restocked, a priority alert fires in the early detection channel — on top of normal routing.',
+          '-# Example:  `/early-add prismatic evolutions elite trainer`',
+          '',
+          '**`/early-remove`** `<keyword>`',
+          'Remove a keyword from the active detection list.',
+          '-# Example:  `/early-remove prismatic evolutions elite trainer`',
+          '',
+          '**`/early-list`**',
+          'View all active keywords being monitored.',
+          '',
+          '-# Runs on every poll cycle + sitemap scan. Matches are dual-routed.',
+        ].join('\n'),
+      },
+      {
+        name: '⚙️  SYSTEM',
+        value: [
+          '**`/budget`** — ScraperAPI credit usage, monthly budget, and pause status.',
+          '**`/freetier`** — Toggle free tier delayed alerts on or off.',
+          '**`/ping`** — Bot and WebSocket response latency.',
+          '**`/help`** — Compact command reference (ephemeral).',
+        ].join('\n'),
+      },
     )
-    .setFooter({ text: 'Nocturne Monitors v2 — Commands update automatically on deploy' })
+    .setFooter({ text: 'Nocturne Monitors  ·  18 Commands  ·  Admin Only  ·  v2' })
     .setTimestamp();
 
-  await channel.send({ embeds: [embed] });
+  await channel.send({ embeds: [header, commands] });
   logger.info(`Command guide posted to channel ${channelId}`);
 }
 
