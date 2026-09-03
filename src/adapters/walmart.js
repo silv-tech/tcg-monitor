@@ -16,6 +16,10 @@ class WalmartAdapter extends BaseAdapter {
       'pokemon booster box',
       'pokemon elite trainer box',
       'pokemon tcg collection',
+      'one piece card game',
+      'pokemon tin sealed',
+      'tcg booster box',
+      'pokemon scarlet violet',
     ];
   }
 
@@ -36,7 +40,7 @@ class WalmartAdapter extends BaseAdapter {
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
-        timeoutMs: 12000,
+        timeoutMs: 6000,
       });
 
       if (html && html.length > 500 && !html.includes('Verify Your Identity')) {

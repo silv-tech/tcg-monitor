@@ -353,11 +353,13 @@ class Scheduler {
     const adapter = this.adapters.get(adapterId);
     if (!adapter || !adapter.watchlist || adapter.watchlist.size === 0) return;
 
+    // Walmart gets 3s watchlist polling, others get 5s
+    const wlInterval = adapterId === 'walmart' ? 3000 : 5000;
     const wlTimer = setInterval(() => {
       if (this.running) this.pollWatchlist(adapter);
-    }, 5000);
+    }, wlInterval);
     this.timers.set(timerKey, wlTimer);
-    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every 5s`);
+    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every ${wlInterval / 1000}s`);
   }
 
   // Expose circuit breaker status for the admin API
