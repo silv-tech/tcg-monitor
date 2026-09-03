@@ -158,7 +158,7 @@ async function stealthGet(url, opts = {}) {
 
       if (response.status === 429) {
         if (attempt >= maxRetries) throw new Error(`Rate limited (429): ${url}`);
-        const retryAfter = parseInt(response.headers.get('retry-after') || '5') * 1000;
+        const retryAfter = Math.max(parseInt(response.headers.get('retry-after') || '5') * 1000, 2000);
         logger.warn(`Stealth: rate limited on ${url}, waiting ${retryAfter}ms`);
         await sleep(retryAfter);
         continue;

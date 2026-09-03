@@ -1,6 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { sleep } = require('../utils/helpers');
+const state = require('../core/state');
+const { sleep, hashSku } = require('../utils/helpers');
 
 const DEEP_CRAWL_INTERVAL = 10 * 60 * 1000;
 const CONCURRENCY = 4;
@@ -114,6 +115,7 @@ class EBGamesAdapter extends BaseAdapter {
     this._deepCrawlRunning = false;
     this._nextSlot = 0;
     this._cooldownUntil = 0;
+    this._seeded = false;
   }
 
   // Global spacer shared by every EB Games request (crawl, fast poll, watchlist)
@@ -147,13 +149,24 @@ class EBGamesAdapter extends BaseAdapter {
   async _fetchListing(url) {
     await this._throttle();
     try {
-      const html = await this.stealthFetch(url, { ...STEALTH_OPTS, maxRetries: 1 });
+      const html = await this.stealthFetch(url, { ...STEALTH_OPTS, maxRetries: 2, retryDelayMs: 1500 });
       if (isChallenge(html)) throw new Error('Cloudflare challenge');
       return html;
     } catch (err) {
       if (err.message.includes('429')) this._cooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
       throw err;
     }
+  }
+
+  // Runs listing jobs through the pool; whatever failed gets one more attempt after the rest finish
+  async _fetchJobs(jobs) {
+    const results = await runPool(jobs.map(j => () => this._fetchListing(j.url)), CONCURRENCY);
+    const retryIdx = results.map((r, i) => (r.ok ? -1 : i)).filter(i => i >= 0);
+    if (retryIdx.length > 0) {
+      const second = await runPool(retryIdx.map(i => () => this._fetchListing(jobs[i].url)), CONCURRENCY);
+      retryIdx.forEach((idx, k) => { results[idx] = second[k]; });
+    }
+    return results;
   }
 
   _ingest(html, source, into) {
@@ -195,7 +208,7 @@ class EBGamesAdapter extends BaseAdapter {
       }
     }
 
-    const results = await runPool(jobs.map(j => () => this._fetchListing(j.url)), CONCURRENCY);
+    const results = await this._fetchJobs(jobs);
     const seen = new Map();
     let ok = 0;
     results.forEach((r, i) => {
@@ -220,25 +233,20 @@ class EBGamesAdapter extends BaseAdapter {
       let fetched = 0;
       let failed = 0;
 
-      const firstPages = await runPool(
-        SOURCES.map(src => () => this._fetchListing(this._listingUrl(src, 1, SORT_NEWEST))),
-        CONCURRENCY,
-      );
+      const firstJobs = SOURCES.map(src => ({ src, url: this._listingUrl(src, 1, SORT_NEWEST) }));
+      const firstPages = await this._fetchJobs(firstJobs);
       const remaining = [];
-      SOURCES.forEach((src, i) => {
-        const r = firstPages[i];
+      firstPages.forEach((r, i) => {
+        const { src } = firstJobs[i];
         if (!r.ok) { failed++; logger.warn(`EB Games: ${src.key} page 1 failed: ${r.error.message}`); return; }
         fetched++;
         const pages = maxPage(r.value);
         this._pageCounts.set(src.key, pages);
         this._ingest(r.value, src, fresh);
-        for (let p = 2; p <= pages; p++) remaining.push({ src, p });
+        for (let p = 2; p <= pages; p++) remaining.push({ src, url: this._listingUrl(src, p, SORT_NEWEST) });
       });
 
-      const rest = await runPool(
-        remaining.map(({ src, p }) => () => this._fetchListing(this._listingUrl(src, p, SORT_NEWEST))),
-        CONCURRENCY,
-      );
+      const rest = await this._fetchJobs(remaining);
       rest.forEach((r, i) => {
         if (!r.ok) { failed++; return; }
         fetched++;
@@ -250,11 +258,32 @@ class EBGamesAdapter extends BaseAdapter {
       // Only a complete crawl may drop delisted products
       this._merge(fresh, failed === 0);
       this._lastDeepCrawlAt = Date.now();
+      if (!this._seeded) await this._seedRedis(failed === 0);
 
       const inStock = [...this._knownProducts.values()].filter(p => p.inStock).length;
       logger.info(`EB Games: DEEP — ${fetched} pages${failed ? ` (${failed} failed)` : ''}, ${this._knownProducts.size} products (${inStock} in stock), ${Date.now() - start}ms. Next in ${DEEP_CRAWL_INTERVAL / 60000}min.`);
     } finally {
       this._deepCrawlRunning = false;
+    }
+  }
+
+  // Until one complete crawl has been stored, write the catalog straight into Redis so products
+  // a partial first crawl missed don't surface later as a NEW_SKU alert storm
+  async _seedRedis(complete) {
+    try {
+      const existing = await state.getAllProducts(this.id);
+      const missing = [...this._knownProducts.entries()].filter(([sku]) => !existing[sku]);
+      if (missing.length > 0) {
+        const pipeline = state.getRedis().pipeline();
+        for (const [sku, product] of missing) {
+          pipeline.set(`tcg:product:${hashSku(this.id, sku)}`, JSON.stringify(product), 'EX', 86400 * 7);
+        }
+        await pipeline.exec();
+        logger.info(`EB Games: seeded ${missing.length} catalog products into Redis (no alerts)`);
+      }
+      if (complete) this._seeded = true;
+    } catch (err) {
+      logger.warn(`EB Games: Redis seed failed: ${err.message}`);
     }
   }
 
