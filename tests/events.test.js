@@ -71,13 +71,11 @@ describe('detectEvents', () => {
     assert.ok(events.find(e => e.type === EVENT_TYPES.PRICE_CHANGE));
   });
 
-  it('PRICE_CHANGE with increase', () => {
+  it('no PRICE_CHANGE on increase — drops only', () => {
     const old = makeProduct({ price: 100 });
     const newProd = makeProduct({ price: 120 });
     const events = detectEvents(old, newProd);
-    const priceChange = events.find(e => e.type === EVENT_TYPES.PRICE_CHANGE);
-    assert.ok(priceChange);
-    assert.ok(priceChange.detail.includes('increased'));
+    assert.strictEqual(events.find(e => e.type === EVENT_TYPES.PRICE_CHANGE), undefined);
   });
 
   it('no PRICE_CHANGE when prices are equal', () => {
