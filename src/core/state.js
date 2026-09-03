@@ -347,6 +347,33 @@ function getAllCategories() {
   return [...ALL_CATEGORIES];
 }
 
+// ─── Per-store category overrides ────────────────────────────────
+const STORE_CATEGORIES_PREFIX = `${PREFIX}store_categories:`;
+
+async function getStoreCategories(retailerId) {
+  const data = await getRedis().get(`${STORE_CATEGORIES_PREFIX}${retailerId}`);
+  return data ? safeParse(data, null) : null; // null = use global
+}
+
+async function setStoreCategories(retailerId, categories) {
+  await getRedis().set(`${STORE_CATEGORIES_PREFIX}${retailerId}`, JSON.stringify(categories));
+}
+
+async function clearStoreCategories(retailerId) {
+  await getRedis().del(`${STORE_CATEGORIES_PREFIX}${retailerId}`);
+}
+
+async function getAllStoreOverrides() {
+  const keys = await getRedis().keys(`${STORE_CATEGORIES_PREFIX}*`);
+  const overrides = {};
+  for (const key of keys) {
+    const retailerId = key.replace(STORE_CATEGORIES_PREFIX, '');
+    const data = await getRedis().get(key);
+    if (data) overrides[retailerId] = safeParse(data, null);
+  }
+  return overrides;
+}
+
 // ─── Watchlist persistence (survive deploys) ─────────────────────
 const WATCHLIST_KEY = `${PREFIX}watchlist_overrides`;
 
@@ -399,6 +426,10 @@ module.exports = {
   getActiveCategories,
   setActiveCategories,
   getAllCategories,
+  getStoreCategories,
+  setStoreCategories,
+  clearStoreCategories,
+  getAllStoreOverrides,
   getWatchlistOverrides,
   setWatchlistOverride,
   getEarlyKeywords,

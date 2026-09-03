@@ -254,11 +254,13 @@ class DeliveryQueue {
 
     // --- CATEGORY FILTER: only send alerts for active categories ---
     // Scan/test/watchlist/early events bypass this filter
+    // Per-store override takes priority, then falls back to global
     if (!event._scanTier && !product._watchlist && event.type !== 'EARLY_SKU' && !event._earlyKeywordMatch) {
       if (category !== 'default') {
-        const activeCategories = await state.getActiveCategories();
+        const storeOverride = await state.getStoreCategories(retailerId);
+        const activeCategories = storeOverride || await state.getActiveCategories();
         if (!activeCategories.includes(category)) {
-          logger.debug(`Category filter: blocked ${category} alert — ${product.name}`);
+          logger.debug(`Category filter: blocked ${category} alert for ${retailerId} — ${product.name}`);
           return;
         }
       }

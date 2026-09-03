@@ -59,6 +59,8 @@ async function createBot() {
         case 'categories': await handleCategories(interaction); break;
         case 'category-on': await handleCategoryOn(interaction); break;
         case 'category-off': await handleCategoryOff(interaction); break;
+        case 'category-set': await handleCategorySet(interaction); break;
+        case 'category-reset': await handleCategoryReset(interaction); break;
       }
     } catch (err) {
       logger.error(`Command /${interaction.commandName} failed: ${err.message}`);
@@ -77,7 +79,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '9';
+const COMMANDS_VERSION = '10';
 
 async function registerCommands() {
   const commands = [
@@ -226,6 +228,41 @@ async function registerCommands() {
             { name: 'Yu-Gi-Oh', value: 'yugioh' },
             { name: 'Magic: The Gathering', value: 'mtg' },
           )),
+    new SlashCommandBuilder()
+      .setName('category-set')
+      .setDescription('Set a category on/off for a specific store (overrides global)')
+      .addStringOption(opt =>
+        opt.setName('retailer')
+          .setDescription('Retailer ID (e.g. 401games, walmart, facetoface)')
+          .setRequired(true))
+      .addStringOption(opt =>
+        opt.setName('category')
+          .setDescription('Category to toggle')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Pokemon', value: 'pokemon' },
+            { name: 'One Piece', value: 'onepiece' },
+            { name: 'Dragon Ball', value: 'dragonball' },
+            { name: 'Naruto/Boruto', value: 'naruto' },
+            { name: 'Lorcana', value: 'lorcana' },
+            { name: 'Yu-Gi-Oh', value: 'yugioh' },
+            { name: 'Magic: The Gathering', value: 'mtg' },
+          ))
+      .addStringOption(opt =>
+        opt.setName('toggle')
+          .setDescription('Enable or disable')
+          .setRequired(true)
+          .addChoices(
+            { name: 'On', value: 'on' },
+            { name: 'Off', value: 'off' },
+          )),
+    new SlashCommandBuilder()
+      .setName('category-reset')
+      .setDescription('Remove per-store category overrides (fall back to global settings)')
+      .addStringOption(opt =>
+        opt.setName('retailer')
+          .setDescription('Retailer ID (e.g. 401games, walmart, facetoface)')
+          .setRequired(true)),
   ].map(cmd => cmd.toJSON());
 
   // Skip re-registration if commands haven't changed (saves Discord API calls)
@@ -691,7 +728,7 @@ async function handleHelp(interaction) {
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setTitle('Nocturne Monitors')
-    .setDescription('Quick command reference — **21 commands** available.')
+    .setDescription('Quick command reference — **23 commands** available.')
     .addFields(
       {
         name: '📡  Monitoring',
@@ -736,9 +773,10 @@ async function handleHelp(interaction) {
       {
         name: '🏷️  Categories',
         value: [
-          '`/categories` — View active categories',
-          '`/category-on` `category` — Enable',
-          '`/category-off` `category` — Disable',
+          '`/categories` — View active',
+          '`/category-on` · `/category-off` — Global',
+          '`/category-set` — Per-store override',
+          '`/category-reset` — Clear override',
         ].join('\n'),
         inline: true,
       },
@@ -856,6 +894,7 @@ async function handleCategories(interaction) {
 
   const active = await state.getActiveCategories();
   const all = state.getAllCategories();
+  const overrides = await state.getAllStoreOverrides();
 
   const lines = all.map(cat => {
     const on = active.includes(cat);
@@ -865,13 +904,26 @@ async function handleCategories(interaction) {
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setTitle('TCG Categories')
-    .setDescription(lines.join('\n'))
+    .setDescription('**Global Settings**\n' + lines.join('\n'))
     .addFields({
       name: 'Manage',
-      value: '`/category-on` to enable · `/category-off` to disable',
+      value: '`/category-on` · `/category-off` — global toggle\n`/category-set` — per-store override\n`/category-reset` — clear store override',
     })
-    .setFooter({ text: `${active.length}/${all.length} active` })
+    .setFooter({ text: `${active.length}/${all.length} global · ${Object.keys(overrides).length} store override(s)` })
     .setTimestamp();
+
+  // Show per-store overrides if any exist
+  if (Object.keys(overrides).length > 0) {
+    const baseRetailers = require('../config/retailers.json');
+    const storeLines = [];
+    for (const [rid, cats] of Object.entries(overrides)) {
+      const r = baseRetailers.find(r => r.id === rid);
+      const name = r ? r.name : rid;
+      const catNames = cats.map(c => CATEGORY_DISPLAY[c] || c).join(', ');
+      storeLines.push(`**${name}** — ${catNames}`);
+    }
+    embed.addFields({ name: 'Store Overrides', value: storeLines.join('\n') });
+  }
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -912,6 +964,61 @@ async function handleCategoryOff(interaction) {
 
   logger.info(`/category-off: disabled ${category} (${updated.length} active)`);
   await interaction.editReply({ content: `🔴 **${CATEGORY_DISPLAY[category]}** alerts disabled.\n\n**${updated.length}/${state.getAllCategories().length}** categories active.` });
+}
+
+// ─── NEW: /category-set — Per-store category override ────────────
+
+async function handleCategorySet(interaction) {
+  const retailerId = interaction.options.getString('retailer').trim().toLowerCase();
+  const category = interaction.options.getString('category');
+  const toggle = interaction.options.getString('toggle');
+  await interaction.deferReply({ ephemeral: true });
+
+  const baseRetailers = require('../config/retailers.json');
+  const retailer = baseRetailers.find(r => r.id === retailerId);
+  if (!retailer) {
+    await interaction.editReply({ content: `Retailer \`${retailerId}\` not found. Use the retailer ID (e.g. \`401games\`, \`facetoface\`, \`walmart\`).` });
+    return;
+  }
+
+  // Get existing store override or start from global
+  let storeCats = await state.getStoreCategories(retailerId);
+  if (!storeCats) {
+    storeCats = await state.getActiveCategories(); // clone global as starting point
+  }
+
+  if (toggle === 'on') {
+    if (!storeCats.includes(category)) storeCats.push(category);
+  } else {
+    storeCats = storeCats.filter(c => c !== category);
+  }
+
+  await state.setStoreCategories(retailerId, storeCats);
+
+  const icon = toggle === 'on' ? '🟢' : '🔴';
+  const catNames = storeCats.map(c => CATEGORY_DISPLAY[c] || c).join(', ');
+  logger.info(`/category-set: ${retailerId} ${category} ${toggle} (${storeCats.length} active)`);
+  await interaction.editReply({
+    content: `${icon} **${CATEGORY_DISPLAY[category]}** ${toggle === 'on' ? 'enabled' : 'disabled'} for **${retailer.name}**.\n\n**${retailer.name}** active categories: ${catNames || 'none'}`,
+  });
+}
+
+// ─── NEW: /category-reset — Clear per-store override ─────────────
+
+async function handleCategoryReset(interaction) {
+  const retailerId = interaction.options.getString('retailer').trim().toLowerCase();
+  await interaction.deferReply({ ephemeral: true });
+
+  const baseRetailers = require('../config/retailers.json');
+  const retailer = baseRetailers.find(r => r.id === retailerId);
+  if (!retailer) {
+    await interaction.editReply({ content: `Retailer \`${retailerId}\` not found.` });
+    return;
+  }
+
+  await state.clearStoreCategories(retailerId);
+  logger.info(`/category-reset: cleared overrides for ${retailerId}`);
+  await interaction.editReply({ content: `✅ Cleared category overrides for **${retailer.name}**. Now using global settings.` });
 }
 
 // ─── Post command guide to a channel ────────────────────────────
@@ -1013,15 +1120,18 @@ async function postCommandGuide(channelId) {
         name: '🏷️  CATEGORIES',
         value: [
           '**`/categories`**',
-          'View which TCG game categories are active. Toggle them on or off to control which alerts fire.',
+          'View which TCG game categories are active — global and per-store overrides.',
           '',
-          '**`/category-on`** `<category>`',
-          'Enable alerts for a category (Pokemon, One Piece, Yu-Gi-Oh, etc.).',
-          '-# Example:  `/category-on pokemon`',
-          '',
-          '**`/category-off`** `<category>`',
-          'Disable alerts for a category. Watchlist and early detection bypass this filter.',
+          '**`/category-on`** `<category>` · **`/category-off`** `<category>`',
+          'Toggle a category globally for all stores.',
           '-# Example:  `/category-off mtg`',
+          '',
+          '**`/category-set`** `<retailer>` `<category>` `<on/off>`',
+          'Override a category for a specific store (ignores global setting).',
+          '-# Example:  `/category-set 401games onepiece on`',
+          '',
+          '**`/category-reset`** `<retailer>`',
+          'Clear a store\'s overrides — falls back to global settings.',
         ].join('\n'),
       },
       {
