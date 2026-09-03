@@ -708,7 +708,7 @@ router.post('/test-all-live', async (req, res) => {
     results['/scan'] = { pass: typeof rs === 'function', detail: 'runScan available (skipping full scan to avoid spam)' };
   } catch (e) { results['/scan'] = { pass: false, detail: e.message }; }
 
-  // 5. /test-asin — build Amazon embed from cache (NO enrichment — saves credits)
+  // 5. /test-asin — build Amazon embed with OLID enrichment
   try {
     const products = await state.getAllProducts('amazon');
     const asins = Object.keys(products);
@@ -716,10 +716,10 @@ router.post('/test-all-live', async (req, res) => {
       const asin = asins[0];
       const product = { ...products[asin], retailerId: 'amazon' };
       const event = { type: 'RESTOCK', product, detail: `Live test ASIN ${asin}`, _detectedAt: Date.now(), _scanTier: 'scan' };
-      // Skip enrichEvent — it uses ScraperAPI credits for OLID
+      if (req.body.withCredits) await delivery.enrichEvent(event);
       const { embed, components } = buildAlertEmbed(event, 'paid');
-      await channel.send({ content: `**[TEST] /test-asin** (${asin}, no OLID — credit-free test)`, embeds: [embed], components });
-      results['/test-asin'] = { pass: true, detail: `${asin} (cached, no enrichment)` };
+      await channel.send({ content: `**[TEST] /test-asin** (${asin}${req.body.withCredits ? ', OLID enriched' : ', cached'})`, embeds: [embed], components });
+      results['/test-asin'] = { pass: true, detail: `${asin}${req.body.withCredits ? ' (enriched)' : ' (cached)'}` };
     } else {
       results['/test-asin'] = { pass: true, detail: 'No Amazon products cached (skip)' };
     }
@@ -736,27 +736,30 @@ router.post('/test-all-live', async (req, res) => {
     results['/freetier'] = { pass: true, detail: `enabled=${enabled}` };
   } catch (e) { results['/freetier'] = { pass: false, detail: e.message }; }
 
-  // 7. /test-sku — Walmart from cache (NO enrichment — saves credits)
+  // 7. /test-sku — Walmart with optional enrichment
   try {
     const product = await state.getProduct('walmart', '66WBIOXIU4UC');
     if (product) {
       const event = { type: 'RESTOCK', product: { ...product, retailerId: 'walmart' }, detail: 'Live test SKU', _detectedAt: Date.now(), _scanTier: 'scan' };
-      // Skip enrichEvent — offerId stealth fetch is free but let's keep test fast
+      if (req.body.withCredits) await delivery.enrichEvent(event);
       const { embed, components } = buildAlertEmbed(event, 'paid');
-      await channel.send({ content: `**[TEST] /test-sku** (walmart:66WBIOXIU4UC, cached offerId=${product._offerId || 'none'})`, embeds: [embed], components });
-      results['/test-sku'] = { pass: true, detail: `cached offerId=${product._offerId || 'none'}` };
+      await channel.send({ content: `**[TEST] /test-sku** (walmart:66WBIOXIU4UC, offerId=${event.product._offerId || product._offerId || 'none'})`, embeds: [embed], components });
+      results['/test-sku'] = { pass: true, detail: `offerId=${event.product._offerId || product._offerId || 'none'}` };
     } else {
       results['/test-sku'] = { pass: true, detail: 'Walmart Charizard not cached (skip)' };
     }
   } catch (e) { results['/test-sku'] = { pass: false, detail: e.message }; }
 
-  // 8. /check — cached stock check (NO live fetch — saves ScraperAPI credits)
+  // 8. /check — stock check with optional live fetch
   try {
     const cached = await state.getProduct('walmart', '66WBIOXIU4UC');
     const adapter = scheduler.getAdapter('walmart');
     const hasLiveFetch = adapter && typeof adapter.fetchProductPage === 'function';
-    // Skip adapter.fetchProductPage — costs ScraperAPI credits
-    const p = cached;
+    let live = null;
+    if (req.body.withCredits && hasLiveFetch) {
+      try { live = await adapter.fetchProductPage('66WBIOXIU4UC'); } catch {}
+    }
+    const p = live || cached;
     if (p) {
       const embed = new EmbedBuilder()
         .setColor(p.inStock ? 0x57f287 : 0xed4245)
@@ -764,12 +767,12 @@ router.post('/test-all-live', async (req, res) => {
         .addFields(
           { name: 'Status', value: p.inStock ? '🟢 In Stock' : '🔴 OOS', inline: true },
           { name: 'Price', value: p.price ? `$${p.price.toFixed(2)}` : '?', inline: true },
-          { name: 'Source', value: `Cached (liveFetch=${hasLiveFetch})`, inline: true },
+          { name: 'Source', value: live ? 'Live fetch' : `Cached (liveFetch=${hasLiveFetch})`, inline: true },
         )
         .setFooter({ text: `SKU: 66WBIOXIU4UC` });
       if (p._offerId) embed.addFields({ name: 'Offer ID', value: `\`${p._offerId}\``, inline: false });
-      await channel.send({ content: '**[TEST] /check** (walmart 66WBIOXIU4UC, credit-free)', embeds: [embed] });
-      results['/check'] = { pass: true, detail: `inStock=${p.inStock}, liveFetchAvailable=${hasLiveFetch}` };
+      await channel.send({ content: `**[TEST] /check** (walmart 66WBIOXIU4UC${live ? ', LIVE' : ', cached'})`, embeds: [embed] });
+      results['/check'] = { pass: true, detail: `inStock=${p.inStock}, source=${live ? 'live' : 'cached'}` };
     } else {
       results['/check'] = { pass: true, detail: 'Product not available (skip)' };
     }
