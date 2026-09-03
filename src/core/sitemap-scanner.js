@@ -342,6 +342,24 @@ async function scanSitemaps() {
     logger.error(`Early SKU [Pokemon Center]: scan failed: ${err.message}`);
   }
 
+  // Tag events that match early detection keywords
+  try {
+    const earlyKeywords = await state.getEarlyKeywords();
+    if (earlyKeywords.length > 0) {
+      for (const event of allEvents) {
+        if (!event.product?.name) continue;
+        const nameLower = event.product.name.toLowerCase();
+        const matched = earlyKeywords.find(kw => nameLower.includes(kw));
+        if (matched) {
+          event._earlyKeywordMatch = matched;
+          logger.info(`EARLY KEYWORD MATCH (sitemap): "${matched}" → ${event.product.name}`);
+        }
+      }
+    }
+  } catch (err) {
+    logger.debug(`Early keyword check in sitemap failed: ${err.message}`);
+  }
+
   logger.info(`=== Early SKU Detection: complete — ${allEvents.length} total alerts ===`);
 
   // Update last-run timestamp

@@ -265,6 +265,19 @@ class DeliveryQueue {
       return;
     }
 
+    // --- EARLY KEYWORD MATCH: also send to #early-detection (continues normal flow too) ---
+    if (event._earlyKeywordMatch) {
+      const earlyChannel = channelsConfig?.earlyDetectionChannel;
+      if (earlyChannel) {
+        const { embed, components } = buildAlertEmbed(event, 'paid');
+        // Add keyword match info to the embed
+        embed.setFooter({ text: `${embed.data.footer?.text || ''} | 🎯 Keyword: "${event._earlyKeywordMatch}"`.trim() });
+        await this.sendToChannel(earlyChannel, embed, components, null, 'paid');
+        logger.info(`Early keyword alert sent: "${event._earlyKeywordMatch}" → ${product.name} (${product.retailer})`);
+      }
+      // Don't return — continue normal routing so it also goes to the retailer channel
+    }
+
     // --- SCAN: admin utility, paid channel only, no pings ---
     if (event._scanTier === 'scan') {
       const paidChannel = this.resolvePaidChannel(category, retailerId);

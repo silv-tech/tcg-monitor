@@ -46,6 +46,25 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
       for (const event of events) {
         event._detectedAt = detectedAt;
       }
+
+      // Early keyword detection — check new/restocked products against keyword list
+      try {
+        const earlyKeywords = await state.getEarlyKeywords();
+        if (earlyKeywords.length > 0) {
+          for (const event of events) {
+            if (!event.product?.name) continue;
+            const nameLower = event.product.name.toLowerCase();
+            const matched = earlyKeywords.find(kw => nameLower.includes(kw));
+            if (matched) {
+              event._earlyKeywordMatch = matched;
+              logger.info(`EARLY KEYWORD MATCH: "${matched}" → ${event.product.name} (${adapter.name})`);
+            }
+          }
+        }
+      } catch (err) {
+        logger.debug(`Early keyword check failed: ${err.message}`);
+      }
+
       // Record restock timestamps and price changes
       for (const event of events) {
         if (event.type === EVENT_TYPES.RESTOCK && event.product?.sku) {

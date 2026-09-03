@@ -302,6 +302,33 @@ async function cacheSellerInfo(asin, seller) {
   await getRedis().set(key, seller, 'EX', SELLER_TTL);
 }
 
+// ─── Early detection keywords ────────────────────────────────────
+const EARLY_KEYWORDS_KEY = `${PREFIX}early_keywords`;
+
+async function getEarlyKeywords() {
+  const data = await getRedis().get(EARLY_KEYWORDS_KEY);
+  return data ? safeParse(data, []) : [];
+}
+
+async function addEarlyKeyword(keyword) {
+  const keywords = await getEarlyKeywords();
+  const lower = keyword.toLowerCase().trim();
+  if (keywords.includes(lower)) return false;
+  keywords.push(lower);
+  await getRedis().set(EARLY_KEYWORDS_KEY, JSON.stringify(keywords));
+  return true;
+}
+
+async function removeEarlyKeyword(keyword) {
+  const keywords = await getEarlyKeywords();
+  const lower = keyword.toLowerCase().trim();
+  const idx = keywords.indexOf(lower);
+  if (idx === -1) return false;
+  keywords.splice(idx, 1);
+  await getRedis().set(EARLY_KEYWORDS_KEY, JSON.stringify(keywords));
+  return true;
+}
+
 // ─── Watchlist persistence (survive deploys) ─────────────────────
 const WATCHLIST_KEY = `${PREFIX}watchlist_overrides`;
 
@@ -353,5 +380,8 @@ module.exports = {
   cacheSellerInfo,
   getWatchlistOverrides,
   setWatchlistOverride,
+  getEarlyKeywords,
+  addEarlyKeyword,
+  removeEarlyKeyword,
   shutdown,
 };

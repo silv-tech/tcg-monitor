@@ -609,6 +609,21 @@ router.get('/test-commands', async (req, res) => {
     results._watchlistRedis = { pass: true, detail: `${Object.keys(wlOverrides).length} retailers with persisted watchlists` };
   } catch (e) { results._watchlistRedis = { pass: false, detail: e.message }; }
 
+  // 16-18. /early-add, /early-remove, /early-list — keyword functions
+  try {
+    const hasGet = typeof state.getEarlyKeywords === 'function';
+    const hasAdd = typeof state.addEarlyKeyword === 'function';
+    const hasRemove = typeof state.removeEarlyKeyword === 'function';
+    const keywords = await state.getEarlyKeywords();
+    results['early-add'] = { pass: hasAdd, detail: `addEarlyKeyword=${hasAdd}` };
+    results['early-remove'] = { pass: hasRemove, detail: `removeEarlyKeyword=${hasRemove}` };
+    results['early-list'] = { pass: hasGet, detail: `${keywords.length} keywords active` };
+  } catch (e) {
+    results['early-add'] = { pass: false, detail: e.message };
+    results['early-remove'] = { pass: false, detail: e.message };
+    results['early-list'] = { pass: false, detail: e.message };
+  }
+
   // Summary
   const total = Object.keys(results).length;
   const passed = Object.values(results).filter(r => r.pass).length;

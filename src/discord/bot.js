@@ -50,6 +50,9 @@ async function createBot() {
         case 'alerts': await handleAlerts(interaction); break;
         case 'ping': await handlePing(interaction); break;
         case 'help': await handleHelp(interaction); break;
+        case 'early-add': await handleEarlyAdd(interaction); break;
+        case 'early-remove': await handleEarlyRemove(interaction); break;
+        case 'early-list': await handleEarlyList(interaction); break;
       }
     } catch (err) {
       logger.error(`Command /${interaction.commandName} failed: ${err.message}`);
@@ -68,7 +71,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '7';
+const COMMANDS_VERSION = '8';
 
 async function registerCommands() {
   const commands = [
@@ -165,6 +168,23 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName('help')
       .setDescription('List all commands with descriptions'),
+    new SlashCommandBuilder()
+      .setName('early-add')
+      .setDescription('Add a keyword to early detection (alerts when any retailer lists a matching product)')
+      .addStringOption(opt =>
+        opt.setName('keyword')
+          .setDescription('Keyword or phrase to watch for (e.g. "destined rivals elite trainer")')
+          .setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('early-remove')
+      .setDescription('Remove a keyword from early detection')
+      .addStringOption(opt =>
+        opt.setName('keyword')
+          .setDescription('Keyword to remove')
+          .setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('early-list')
+      .setDescription('Show all early detection keywords'),
   ].map(cmd => cmd.toJSON());
 
   // Skip re-registration if commands haven't changed (saves Discord API calls)
@@ -649,6 +669,11 @@ async function handleHelp(interaction) {
         '`/watchlist-add <retailer> <sku>` — Add SKU to 5-second polling',
         '`/watchlist-remove <retailer> <sku>` — Remove SKU from watchlist',
       ].join('\n') },
+      { name: '🎯 Early Detection', value: [
+        '`/early-add <keyword>` — Watch for a product keyword across all retailers',
+        '`/early-remove <keyword>` — Stop watching a keyword',
+        '`/early-list` — Show all active early detection keywords',
+      ].join('\n') },
       { name: '⚙️ System', value: [
         '`/budget` — ScraperAPI credit usage and budget status',
         '`/freetier` — Toggle free tier alerts on/off',
@@ -660,6 +685,85 @@ async function handleHelp(interaction) {
     .setTimestamp();
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+// ─── NEW: /early-add — Add keyword to early detection ───────────
+
+async function handleEarlyAdd(interaction) {
+  const keyword = interaction.options.getString('keyword').trim();
+  await interaction.deferReply({ ephemeral: true });
+
+  if (keyword.length < 3) {
+    await interaction.editReply({ content: 'Keyword must be at least 3 characters.' });
+    return;
+  }
+
+  if (keyword.length > 100) {
+    await interaction.editReply({ content: 'Keyword must be under 100 characters.' });
+    return;
+  }
+
+  const added = await state.addEarlyKeyword(keyword);
+  if (!added) {
+    await interaction.editReply({ content: `\`${keyword}\` is already in the early detection list.` });
+    return;
+  }
+
+  const all = await state.getEarlyKeywords();
+  // Get early detection channel for display
+  const fs = require('fs');
+  const path = require('path');
+  let chConfig;
+  try { chConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '../config/channels.json'), 'utf-8')); } catch { chConfig = {}; }
+  const earlyChId = chConfig.earlyDetectionChannel || 'early-detection';
+
+  logger.info(`/early-add: added "${keyword}" (${all.length} total keywords)`);
+  await interaction.editReply({ content: `✅ Added **"${keyword}"** to early detection.\n\nWhen any retailer lists a product matching this keyword, you'll get a priority alert in <#${earlyChId}>.\n\n**${all.length}** keyword(s) active.` });
+}
+
+// ─── NEW: /early-remove — Remove keyword from early detection ───
+
+async function handleEarlyRemove(interaction) {
+  const keyword = interaction.options.getString('keyword').trim();
+  await interaction.deferReply({ ephemeral: true });
+
+  const removed = await state.removeEarlyKeyword(keyword);
+  if (!removed) {
+    await interaction.editReply({ content: `\`${keyword}\` was not found in the early detection list.` });
+    return;
+  }
+
+  const all = await state.getEarlyKeywords();
+  logger.info(`/early-remove: removed "${keyword}" (${all.length} remaining)`);
+  await interaction.editReply({ content: `✅ Removed **"${keyword}"** from early detection.\n\n**${all.length}** keyword(s) remaining.` });
+}
+
+// ─── NEW: /early-list — Show all early detection keywords ───────
+
+async function handleEarlyList(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const keywords = await state.getEarlyKeywords();
+
+  if (keywords.length === 0) {
+    await interaction.editReply({ content: 'No early detection keywords set.\n\nUse `/early-add` to add keywords like "destined rivals" or "prismatic evolutions etb".' });
+    return;
+  }
+
+  const lines = keywords.map((kw, i) => `${i + 1}. \`${kw}\``);
+
+  const embed = new EmbedBuilder()
+    .setColor(0xf1c40f)
+    .setTitle('Early Detection Keywords')
+    .setDescription(lines.join('\n'))
+    .addFields({
+      name: 'How it works',
+      value: 'When any of the 37 retailers lists a new product or restocks a product matching one of these keywords, a priority alert is sent to the early detection channel — on top of the normal alert.',
+    })
+    .setFooter({ text: `${keywords.length} keyword(s) active` })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
 }
 
 // ─── Post command guide to a channel ────────────────────────────
@@ -694,6 +798,11 @@ async function postCommandGuide(channelId) {
       { name: '/watchlist', value: 'Show all SKUs being fast-polled every 5 seconds with their current stock status, price, and seller.', inline: false },
       { name: '/watchlist-add `retailer` `sku`', value: 'Add a product to the fast-poll watchlist (5-second polling).\n**Example:** `/watchlist-add walmart 6000208831664`', inline: false },
       { name: '/watchlist-remove `retailer` `sku`', value: 'Remove a product from the fast-poll watchlist.\n**Example:** `/watchlist-remove walmart 6000208831664`', inline: false },
+
+      { name: '──── 🎯 Early Detection ────', value: '\u200B' },
+      { name: '/early-add `keyword`', value: 'Add a keyword to watch across ALL 37 retailers. When a matching product is listed or restocked, a priority alert is sent to #early-detection.\n**Example:** `/early-add destined rivals elite trainer`', inline: false },
+      { name: '/early-remove `keyword`', value: 'Remove a keyword from early detection.\n**Example:** `/early-remove destined rivals elite trainer`', inline: false },
+      { name: '/early-list', value: 'Show all active early detection keywords.', inline: false },
 
       { name: '──── ⚙️ System ────', value: '\u200B' },
       { name: '/budget', value: 'Show ScraperAPI credit usage, monthly budget, and whether scraping is paused.', inline: false },
