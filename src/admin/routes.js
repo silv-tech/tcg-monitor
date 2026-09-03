@@ -624,6 +624,46 @@ router.get('/test-commands', async (req, res) => {
     results['early-list'] = { pass: false, detail: e.message };
   }
 
+  // 20. /categories — get/set active categories
+  try {
+    const active = await state.getActiveCategories();
+    const all = state.getAllCategories();
+    results['categories'] = { pass: active.length > 0 && all.length === 7, detail: `${active.length}/${all.length} active` };
+  } catch (e) { results['categories'] = { pass: false, detail: e.message }; }
+
+  // 21. /category-on + /category-off — round-trip toggle
+  try {
+    const before = await state.getActiveCategories();
+    // Turn off mtg if on, turn on if off — then restore
+    const mtgWasOn = before.includes('mtg');
+    if (mtgWasOn) {
+      await state.setActiveCategories(before.filter(c => c !== 'mtg'));
+      const after = await state.getActiveCategories();
+      const offWorked = !after.includes('mtg');
+      // Restore
+      await state.setActiveCategories(before);
+      results['category-toggle'] = { pass: offWorked, detail: `off=${offWorked}, restored` };
+    } else {
+      await state.setActiveCategories([...before, 'mtg']);
+      const after = await state.getActiveCategories();
+      const onWorked = after.includes('mtg');
+      // Restore
+      await state.setActiveCategories(before);
+      results['category-toggle'] = { pass: onWorked, detail: `on=${onWorked}, restored` };
+    }
+  } catch (e) { results['category-toggle'] = { pass: false, detail: e.message }; }
+
+  // 22. /category-set + /category-reset — per-store round-trip
+  try {
+    await state.setStoreCategories('_test_store', ['pokemon', 'onepiece']);
+    const stored = await state.getStoreCategories('_test_store');
+    const setWorked = stored && stored.length === 2 && stored.includes('pokemon');
+    await state.clearStoreCategories('_test_store');
+    const cleared = await state.getStoreCategories('_test_store');
+    const clearWorked = cleared === null;
+    results['category-store'] = { pass: setWorked && clearWorked, detail: `set=${setWorked}, clear=${clearWorked}` };
+  } catch (e) { results['category-store'] = { pass: false, detail: e.message }; }
+
   // Summary
   const total = Object.keys(results).length;
   const passed = Object.values(results).filter(r => r.pass).length;
