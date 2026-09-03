@@ -480,7 +480,7 @@ class WalmartAdapter extends BaseAdapter {
       const groupLabel = this._groupIndex % this._queryGroups.length === 0 ? 'A' : 'B';
       this._groupIndex++;
 
-      // All queries in parallel, no jitter, no retry, no ScraperAPI — pure stealth, $0
+      // Pass 1: all queries in parallel
       const start = Date.now();
       const results = await Promise.allSettled(
         group.map(query =>
@@ -489,18 +489,34 @@ class WalmartAdapter extends BaseAdapter {
       );
 
       let hits = 0;
-      let misses = 0;
-      for (const result of results) {
-        if (result.status === 'rejected') { misses++; continue; }
+      const failedQueries = [];
+      for (const [i, result] of results.entries()) {
+        if (result.status === 'rejected') { failedQueries.push(group[i]); continue; }
         const { query, items } = result.value;
-        if (!items || items.length === 0) { misses++; continue; }
-
+        if (!items || items.length === 0) { failedQueries.push(query); continue; }
         hits++;
         this._processSearchItems(items, products);
       }
 
+      // Pass 2: retry failed queries on a fresh IP
+      if (failedQueries.length > 0) {
+        _clearCache(getProxyUrl('residential'));
+        const retryResults = await Promise.allSettled(
+          failedQueries.map(query =>
+            this._stealthSearch(query).then(items => ({ query, items }))
+          )
+        );
+        for (const result of retryResults) {
+          if (result.status === 'rejected') continue;
+          const { items } = result.value;
+          if (!items || items.length === 0) continue;
+          hits++;
+          this._processSearchItems(items, products);
+        }
+      }
+
       const elapsed = Date.now() - start;
-      logger.info(`Walmart: group ${groupLabel} — ${hits}/${group.length} stealth, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
+      logger.info(`Walmart: group ${groupLabel} — ${hits}/${group.length} stealth${failedQueries.length > 0 ? ` (${failedQueries.length} retried)` : ''}, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
 
       return products;
     } finally {
