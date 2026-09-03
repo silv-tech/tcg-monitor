@@ -452,6 +452,34 @@ router.post('/test-alert', async (req, res) => {
   }
 });
 
+// === Sample alert — a real cached product framed as "now monitoring", routed like a paid alert ===
+// Used to show a client that a retailer is live. Optional sku picks the product.
+router.post('/sample-alert', async (req, res) => {
+  const { retailerId, sku } = req.body;
+  if (!retailerId) return res.status(400).json({ error: 'retailerId required' });
+
+  try {
+    const products = await state.getAllProducts(retailerId);
+    const entries = Object.values(products);
+    const product = sku
+      ? products[sku]
+      : entries.find(p => p.inStock && p.isTCG) || entries.find(p => p.name);
+    if (!product) return res.status(404).json({ error: `No cached product for ${retailerId}${sku ? `:${sku}` : ''}` });
+
+    const event = {
+      type: 'LISTING',
+      product: { ...product, retailerId, lastSeen: Date.now() },
+      detail: `Now monitoring ${entries.length} products at ${product.retailer || retailerId}`,
+      _detectedAt: Date.now(),
+      _scanTier: 'paid',
+    };
+    await delivery.deliver([event], { skipDedup: true });
+    res.json({ ok: true, product: product.name, sku: product.sku, monitored: entries.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // === Post command guide to a channel ===
 router.post('/post-guide', async (req, res) => {
   const { channelId } = req.body;
