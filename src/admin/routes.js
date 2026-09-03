@@ -397,8 +397,9 @@ router.put('/proxies', (req, res) => {
 });
 
 // === Test alert (fire a single product alert for testing) ===
+// Optional channelId param sends directly to that channel instead of normal routing
 router.post('/test-alert', async (req, res) => {
-  const { retailerId, sku, type = 'RESTOCK' } = req.body;
+  const { retailerId, sku, type = 'RESTOCK', channelId } = req.body;
   if (!retailerId || !sku) return res.status(400).json({ error: 'retailerId and sku required' });
 
   try {
@@ -412,6 +413,7 @@ router.post('/test-alert', async (req, res) => {
         name: req.body.name || sku,
         price: req.body.price || null,
         url: req.body.url || '',
+        image: req.body.image || '',
         inStock: true,
         canAddToCart: true,
         retailer: req.body.retailer || retailerId,
@@ -429,8 +431,22 @@ router.post('/test-alert', async (req, res) => {
       _scanTier: 'scan',
     };
 
-    await delivery.deliver([event], { skipDedup: true });
-    res.json({ ok: true, product: product.name, offerId: product._offerId || 'will be enriched during delivery' });
+    // Enrich event (offerId, restock history, etc.)
+    await delivery.enrichEvent(event);
+
+    if (channelId) {
+      // Send directly to specified channel
+      const { getClient } = require('../discord/bot');
+      const { buildAlertEmbed } = require('../discord/embeds');
+      const client = getClient();
+      const channel = await client.channels.fetch(channelId);
+      const { embed, components } = buildAlertEmbed(event, 'paid');
+      await channel.send({ embeds: [embed], components });
+      res.json({ ok: true, product: product.name, channelId, offerId: product._offerId || 'none' });
+    } else {
+      await delivery.deliver([event], { skipDedup: true });
+      res.json({ ok: true, product: product.name, offerId: product._offerId || 'enriched during delivery' });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
