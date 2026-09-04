@@ -119,7 +119,12 @@ function decide(retailerId, currentIntervalMs, now = Date.now()) {
   // percentile — on a 20-sample window p95 is just the maximum, so one cold-start poll
   // would pin a healthy store slow forever.
   const typical = percentile(w.filter((s) => s.ok).map((s) => s.ms), 0.5);
-  const latencyFloor = Math.ceil((typical * 2) / 500) * 500;
+  // 1.5x, not 2x. Detection latency is interval + poll time, so an over-cautious multiplier
+  // directly costs alert speed: Walmart's ~3.7s polls at 2x forced a 7500ms floor and an 11.2s
+  // worst case, missing the sub-10s target on the one store that most needs it. The scheduler
+  // SKIPS a poll that would overlap rather than queueing it, so the headroom here only has to
+  // absorb normal variance, not guarantee zero overlap.
+  const latencyFloor = Math.ceil((typical * 1.5) / 500) * 500;
   const effectiveFloor = Math.max(floor, latencyFloor);
 
   // Rule 3: judge the change we last made, now that we have fresh samples for it.
