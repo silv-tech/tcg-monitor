@@ -16,8 +16,8 @@
  *   1. It can never go below a store's floor. Those floors exist because of anti-bot limits,
  *      and a controller that could tune them away would eventually get us banned.
  *   2. It can never set an interval below what the store actually responds in. Polls that
- *      overlap their own interval queue up and make everything worse, so the observed p95
- *      latency is a moving floor underneath the configured one.
+ *      overlap their own interval get skipped, so the observed typical (median) poll latency
+ *      acts as a moving floor underneath the configured one.
  */
 
 const logger = require('../monitoring/logger');
@@ -88,8 +88,14 @@ function decide(retailerId, currentIntervalMs) {
 
   // A poll that takes longer than its own interval overlaps the next one. Whatever the
   // success rate says, the interval can never sit below what this store actually costs.
-  const p95 = percentile(w.filter((s) => s.ok).map((s) => s.ms), 0.95);
-  const latencyFloor = Math.ceil((p95 * 1.2) / 500) * 500;
+  //
+  // Deliberately the MEDIAN, not a tail percentile. On a 20-sample window a p95 is just the
+  // maximum, so one cold-start poll — Amazon's first poll after a deploy runs ~10s against a
+  // ~1s steady state — would have pinned the floor at 12s and permanently slowed a healthy
+  // store. The median ignores that outlier; doubling it leaves the headroom the tail was for.
+  const okLatencies = w.filter((s) => s.ok).map((s) => s.ms);
+  const typical = percentile(okLatencies, 0.5);
+  const latencyFloor = Math.ceil((typical * 2) / 500) * 500;
   const effectiveFloor = Math.max(floor, latencyFloor);
 
   let next = currentIntervalMs;
@@ -107,7 +113,7 @@ function decide(retailerId, currentIntervalMs) {
   } else if (currentIntervalMs < effectiveFloor) {
     // Latency grew under us; lift off the floor even though nothing is failing yet.
     next = effectiveFloor;
-    reason = `p95 poll ${p95}ms needs at least ${effectiveFloor}ms between polls`;
+    reason = `typical poll ${typical}ms needs at least ${effectiveFloor}ms between polls`;
   } else {
     return null;
   }
@@ -146,7 +152,7 @@ function getState() {
     out[id] = {
       samples: w.length,
       successRate: w.length ? parseFloat((ok / w.length).toFixed(2)) : null,
-      p95PollMs: percentile(w.filter((s) => s.ok).map((s) => s.ms), 0.95),
+      medianPollMs: percentile(w.filter((s) => s.ok).map((s) => s.ms), 0.5),
       bounds: boundsFor(id),
       lastChange: lastChange.get(id) || null,
     };

@@ -167,3 +167,25 @@ function simulatePollResult({ freshness, newCount, oldCount }) {
   if (quality === null && newCount === 0 && oldCount > 0) quality = false;
   return { quality };
 }
+
+describe('autotune: latency floor is outlier-resistant', () => {
+  test('one slow cold-start poll does not pin a fast store slow', () => {
+    // Amazon's real shape: ~1s steady state, one ~10s first poll after a deploy.
+    // With a tail percentile on a 20-sample window this pinned the floor at ~12s.
+    autotune.recordPoll('amazon', { ok: true, ms: 10400 });
+    feed('amazon', 19, true, 1000);
+    let interval = 8000;
+    for (let i = 0; i < 50; i++) {
+      const d = autotune.decide('amazon', interval);
+      if (!d) break;
+      interval = d.intervalMs;
+    }
+    assert.strictEqual(interval, 6000, `outlier must not raise the floor; got ${interval}`);
+  });
+
+  test('a genuinely slow store still gets a raised floor', () => {
+    feed('bestbuy', 20, true, 9000); // consistently slow, not an outlier
+    const d = autotune.decide('bestbuy', 5000);
+    assert.ok(d && d.intervalMs > 9000, 'sustained slowness must still raise the floor');
+  });
+});
