@@ -38,6 +38,7 @@ class WalmartAdapter extends BaseAdapter {
     this._polling = false; // overlap guard
     this._walmartOfferIds = new Map(); // product id → Walmart's own offerId (learned from the pinned page)
     this._lastPageProduct = new Map(); // product id → last full product parsed from the pinned page
+    this._buyBoxSeen = new Map();      // product id → { seller, at } from the JSON leg when a marketplace seller wins
     this._jsonDisabledUntil = 0;
   }
 
@@ -54,7 +55,8 @@ class WalmartAdapter extends BaseAdapter {
     const start = Date.now();
 
     const result = await this._raceParsed([
-      this._fetchOfferJson(id).then(r => ({ ...r, via: 'json' })),
+      this._fetchOfferJson(id, getProxyUrl('residential')).then(r => ({ ...r, via: 'json' })),
+      this._fetchOfferJson(id, null).then(r => ({ ...r, via: 'json-direct' })),
       this._stealthFetchProduct(url, id, getProxyUrl('residential')).then(r => this._notePageResult(id, { ...r, via: 'proxy' })),
       this._stealthFetchProduct(url, id, null).then(r => this._notePageResult(id, { ...r, via: 'direct' })),
     ]);
@@ -67,8 +69,27 @@ class WalmartAdapter extends BaseAdapter {
     }
     if (result.thirdParty) return null;
 
-    logger.warn(`Walmart: WATCHLIST ${id} — all fetch paths failed (${Date.now() - start}ms)`);
+    const seen = this._buyBoxSeen.get(id);
+    const buyBox = seen && Date.now() - seen.at < 15000 ? `buy box: "${seen.seller}" via JSON` : 'JSON leg silent too';
+    logger.warn(`Walmart: WATCHLIST ${id} — page legs failed, ${buyBox} (${Date.now() - start}ms)`);
     return null;
+  }
+
+  // After a restart (or while PerimeterX blocks page loads) the JSON leg still needs a base product:
+  // fall back to the last one stored in Redis, retrying at most once a minute
+  async _seedPageProduct(id) {
+    const last = this._seedAttemptAt?.get(id) || 0;
+    if (Date.now() - last < 60000) return null;
+    (this._seedAttemptAt ||= new Map()).set(id, Date.now());
+    try {
+      const stored = await state.getProduct(this.id, id);
+      if (!stored?.name) return null;
+      this._lastPageProduct.set(id, { ...stored });
+      if (stored._offerId) this._walmartOfferIds.set(id, stored._offerId);
+      return stored;
+    } catch {
+      return null;
+    }
   }
 
   // The JSON leg has no name/image and only sees the buy-box winner, so it needs the pinned page's
@@ -86,9 +107,9 @@ class WalmartAdapter extends BaseAdapter {
    * source of the stock count (fulfillmentOptions[].availableQuantity). It reports the buy-box
    * winner, so it only stands in for Walmart's offer when the offerId matches the pinned page's.
    */
-  async _fetchOfferJson(id) {
+  async _fetchOfferJson(id, proxyUrl) {
     if (Date.now() < this._jsonDisabledUntil) return { product: null, thirdParty: false };
-    const base = this._lastPageProduct.get(id);
+    const base = this._lastPageProduct.get(id) || await this._seedPageProduct(id);
     if (!base) return { product: null, thirdParty: false };
 
     const variables = JSON.stringify({ iId: id, fSId: true, enableMultiSave: false, enableVariantMigration: false });
@@ -98,7 +119,7 @@ class WalmartAdapter extends BaseAdapter {
 
     try {
       const body = await stealthGet(url, {
-        proxyUrl: getProxyUrl('residential'),
+        proxyUrl,
         maxRetries: 1,
         timeoutMs: 4000,
         rawHeaders: true,
@@ -144,7 +165,11 @@ class WalmartAdapter extends BaseAdapter {
       const walmartOffer = this._walmartOfferIds.get(id);
       const seller = `${item.sellerDisplayName || item.sellerName || ''}`.toLowerCase();
       const isWalmart = walmartOffer ? item.offerId === walmartOffer : (seller.includes('walmart') || item.sellerType === 'INTERNAL');
-      if (!isWalmart) return { product: null, thirdParty: false }; // a marketplace seller holds the buy box — the pinned page decides
+      if (!isWalmart) {
+        // A marketplace seller holds the buy box — the pinned page decides; remember it for diagnostics
+        this._buyBoxSeen.set(id, { seller: item.sellerDisplayName || item.sellerId || '?', at: Date.now() });
+        return { product: null, thirdParty: false };
+      }
 
       const shipping = (item.fulfillmentOptions || []).find(f => f.type === 'SHIPPING') || {};
       const inStock = (item.availabilityStatus || shipping.availabilityStatus) === 'IN_STOCK';

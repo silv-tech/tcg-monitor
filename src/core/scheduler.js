@@ -342,7 +342,7 @@ class Scheduler {
   _startWatchlistLoop(adapter) {
     const key = `${adapter.id}:watchlist`;
     if (this.timers.has(key)) return;
-    const floorMs = adapter.id === 'walmart' ? 1000 : 5000;
+    const floorMs = adapter.id === 'walmart' ? 2000 : 5000;
     const loop = { stopped: false, stop() { loop.stopped = true; } };
     this.timers.set(key, loop);
     (async () => {
