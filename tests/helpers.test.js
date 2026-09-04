@@ -77,3 +77,36 @@ describe('truncate', () => {
     assert.strictEqual(truncate(null), '');
   });
 });
+
+// --- TCG-only scope: merchandise must never alert -------------------------------
+{
+  const { isTCGProduct, classifyCategory } = require('../src/utils/helpers');
+  const { categories } = require('../src/config/products.json');
+  const alerts = (n) => isTCGProduct(n) && ['pokemon', 'onepiece'].includes(classifyCategory(n, categories));
+
+  const SEALED = [
+    'Pokemon TCG 30th Celebration Elite Trainer Box',
+    'Pokemon TCG Mega Evolution Pitch Black Booster Display Box',
+    'Pokemon TCG 30th Celebration Booster Bundle 6 Packs',
+    'Pokemon TCG 30th Celebration Knock Out Collection',
+    'Pokemon TCG Mega Charizard Tin Mega Charizard X',
+    'One Piece Card Game OP-09 Booster Box',
+  ];
+  // Pokemon Center titles merchandise "Pokemon TCG ..." even when it holds no cards.
+  const MERCH = [
+    'Pokemon TCG Celestial Espeon and Umbreon Bag Tag',
+    'Pokemon TCG Celestial Espeon and Umbreon Convertible Shoulder Bag',
+    'Pokemon TCG Mewtwo and Mew DNA Premium Zip Binder',
+    'Pokemon TCG Opening Scene Playmat',
+    'Pokemon TCG Deck Buddies Gengar Deck Box',
+    'Pokemon TCG Pikachu Keychain',
+    'Pokemon Pikachu Plush 8 inch',
+  ];
+  for (const n of SEALED) {
+    if (!alerts(n)) { console.error(`FAIL: sealed product must alert -> ${n}`); process.exitCode = 1; }
+  }
+  for (const n of MERCH) {
+    if (alerts(n)) { console.error(`FAIL: merchandise must NOT alert -> ${n}`); process.exitCode = 1; }
+  }
+  console.log(`TCG-only scope: ${SEALED.length} sealed alert, ${MERCH.length} merch blocked`);
+}

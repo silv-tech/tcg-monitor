@@ -42,6 +42,12 @@ const NON_TCG_KEYWORDS = [
   'toploader', 'top loader', 'display case', 'acrylic', 'portfolio',
   'card storage', 'storage box', 'card organizer', 'card holder',
   'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box',
+  // Bags and tags. Pokemon Center titles many of these "Pokemon TCG ..." even though they
+  // hold no cards, so the franchise words alone let them through: "Pokemon TCG Celestial
+  // Espeon and Umbreon Bag Tag" and "... Convertible Shoulder Bag" both passed as sealed
+  // product before this. The client wants cards, not merchandise.
+  'bag tag', 'shoulder bag', 'tote bag', 'duffel', 'lanyard', 'keychain', 'key chain',
+  'pin collection', 'enamel pin', 'wallet', 'pouch', 'sticker sheet',
   // Figures, toys, clothing
   'action figure', 'figure series', 'plush', 'stuffed', 'figurine',
   'video game', 'nintendo switch', 'ps4', 'ps5', 'xbox',
