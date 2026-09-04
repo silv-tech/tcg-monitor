@@ -116,6 +116,23 @@ async function main() {
   const baseRetailers = require('./config/retailers.json');
   const overrides = await stateModule.getRetailerOverrides();
   const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+
+  // Redis overrides silently win over retailers.json, so the file on disk can disagree with
+  // what is actually running. Say so at boot rather than letting the next reader be misled.
+  const drift = [];
+  for (const base of baseRetailers) {
+    const ov = overrides[base.id];
+    if (!ov) continue;
+    for (const [k, v] of Object.entries(ov)) {
+      if (JSON.stringify(base[k]) !== JSON.stringify(v)) drift.push(`${base.id}.${k}: file=${JSON.stringify(base[k])} live=${JSON.stringify(v)}`);
+    }
+  }
+  if (drift.length > 0) {
+    logger.warn(`Config drift — ${drift.length} value(s) overridden in Redis, retailers.json is NOT the source of truth:`);
+    for (const d of drift) logger.warn(`  ${d}`);
+  }
+  const live = retailers.filter(r => r.enabled);
+  logger.info(`Effective config: ${live.length}/${retailers.length} retailers enabled — ${live.map(r => `${r.id}@${Math.round(r.intervalMs / 1000)}s`).join(', ')}`);
   for (const retailer of retailers) {
     const AdapterClass = ADAPTER_MAP[retailer.adapter];
     if (!AdapterClass) {

@@ -22,6 +22,7 @@ class BaseAdapter {
     this.color = retailerConfig.color;
     this.enabled = retailerConfig.enabled;
     this.maxProducts = retailerConfig.maxProducts || 500; // Configurable cap (#17)
+    this.timing = retailerConfig.timing || {}; // Per-store cadence overrides (retailers.json / Redis)
 
     // Circuit breaker: stop wasting proxy bandwidth after consecutive browser failures
     this._browserFailCount = 0;
@@ -29,6 +30,30 @@ class BaseAdapter {
     this._browserCircuitOpenedAt = 0;
     this._BROWSER_FAIL_THRESHOLD = 3;       // Open circuit after 3 consecutive failures
     this._BROWSER_RETRY_INTERVAL = 600000;  // Try browser again every 10 minutes
+  }
+
+  /**
+   * Read a per-store cadence knob, clamped to a floor the site's anti-bot tolerates.
+   * Floors are enforced here rather than at the API so a value edited straight into
+   * Redis still can't poll a retailer fast enough to get the proxy pool banned.
+   */
+  /** Merge new cadence values in and let the adapter re-derive — no redeploy needed. */
+  applyTiming(timing) {
+    this.timing = { ...this.timing, ...timing };
+    this._deriveTiming();
+  }
+
+  /** Adapters that cache timing-derived values override this to recompute them. */
+  _deriveTiming() {}
+
+  timingValue(key, fallback, floorMs = 0) {
+    const raw = Number(this.timing[key]);
+    if (!Number.isFinite(raw) || raw <= 0) return fallback;
+    if (raw < floorMs) {
+      logger.warn(`${this.name}: timing.${key}=${raw}ms is below the ${floorMs}ms floor — using ${floorMs}ms`);
+      return floorMs;
+    }
+    return raw;
   }
 
   getProxy() {
@@ -67,7 +92,7 @@ class BaseAdapter {
     const { url: proxyUrl, proxyObj } = this.getProxy();
     try {
       const result = await stealthGet(url, { ...opts, proxyUrl });
-      recordRequest(this.id, false, this.proxyTier);
+      recordRequest(this.id, false, this.proxyTier, typeof result === 'string' ? result.length : 0);
       if (proxyObj) markProxySuccess(proxyObj);
       return result;
     } catch (err) {
@@ -264,8 +289,11 @@ class BaseAdapter {
     const start = Date.now();
     try {
       const products = await this.fetchProducts();
-      // Product cap (#17) — prevent runaway adapters from consuming too much memory/Redis
-      const keys = Object.keys(products);
+      // Product cap (#17) — prevent runaway adapters from consuming too much memory/Redis.
+      // Sorted so the kept subset is the SAME set every poll: with insertion order the
+      // retained 500 rotated, which re-fired NEW_SKU for old products and left a 7-day
+      // Redis key behind for every product that ever cycled through.
+      const keys = Object.keys(products).sort();
       if (keys.length > this.maxProducts) {
         logger.warn(`${this.name}: ${keys.length} products exceeds cap of ${this.maxProducts}, truncating`);
         for (const key of keys.slice(this.maxProducts)) {

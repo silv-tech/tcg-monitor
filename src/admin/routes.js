@@ -45,6 +45,17 @@ router.get('/retailers', async (req, res) => {
   res.json(retailers);
 });
 
+// Per-store cadence knobs accepted by PATCH /api/retailers/:id and the /speed command.
+// Each adapter clamps these to a floor its anti-bot tolerates (base.timingValue).
+const TIMING_KEYS = [
+  'watchlistIntervalMs',  // walmart, costco, pokemoncenter — fast-poll cadence
+  'discoveryIntervalMs',  // amazon — paid ScraperAPI search cadence
+  'deepCrawlIntervalMs',  // ebgames — full-catalog sweep
+  'minSpacingMs',         // ebgames — gap between any two requests
+  'checksPerPoll',        // pokemoncenter — paid availability checks per poll
+  'pollTimeoutMs',        // any — overrides max(intervalMs*2, 120s)
+];
+
 // Toggle / update retailer — saves overrides to Redis (persists across deploys)
 router.patch('/retailers/:id', async (req, res) => {
   const retailers = await getRetailersWithOverrides();
@@ -62,6 +73,23 @@ router.patch('/retailers/:id', async (req, res) => {
       return res.status(400).json({ error: 'intervalMs must be a number between 5000 and 600000' });
     }
     changes.intervalMs = req.body.intervalMs;
+  }
+  if (req.body.timing !== undefined) {
+    const t = req.body.timing;
+    if (typeof t !== 'object' || t === null || Array.isArray(t)) {
+      return res.status(400).json({ error: 'timing must be an object' });
+    }
+    for (const [k, v] of Object.entries(t)) {
+      if (!TIMING_KEYS.includes(k)) {
+        return res.status(400).json({ error: `unknown timing key "${k}" — allowed: ${TIMING_KEYS.join(', ')}` });
+      }
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+        return res.status(400).json({ error: `timing.${k} must be a positive number` });
+      }
+    }
+    // Per-adapter floors are enforced in base.timingValue, so a too-low value is clamped
+    // rather than rejected — the adapter logs what it actually used.
+    changes.timing = { ...(retailer.timing || {}), ...t };
   }
   if (Object.keys(changes).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
 

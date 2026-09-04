@@ -7,6 +7,9 @@ const logger = require('../monitoring/logger');
 
 const retailersPath = path.join(__dirname, '../config/retailers.json');
 
+// Most a single /scan may post per retailer — a sweep is a diagnostic, not a broadcast
+const MAX_PER_RETAILER = 25;
+
 let scanning = false;
 
 async function runScan(hoursBack = 12) {
@@ -36,8 +39,16 @@ async function runScan(hoursBack = 12) {
         continue;
       }
 
+      // Hard ceiling: at ~20 messages/sec a full sweep of every cached product would post
+      // for many minutes and block real restock alerts behind it in the delivery queue.
+      const capped = recent.slice(0, MAX_PER_RETAILER);
+      if (recent.length > capped.length) {
+        logger.warn(`Scan: ${retailer.name} — ${recent.length} products in window, sending the first ${capped.length}`);
+        results.truncated = (results.truncated || 0) + (recent.length - capped.length);
+      }
+
       // Build LISTING events
-      const events = recent.map(product => ({
+      const events = capped.map(product => ({
         type: EVENT_TYPES.LISTING,
         product: {
           ...product,
@@ -50,10 +61,10 @@ async function runScan(hoursBack = 12) {
       await delivery.deliver(events, { skipDedup: true });
 
       results.totalProducts += recent.length;
-      results.totalSent += recent.length;
-      results.retailers.push({ retailer: retailer.id, name: retailer.name, found: entries.length, sent: recent.length });
+      results.totalSent += capped.length;
+      results.retailers.push({ retailer: retailer.id, name: retailer.name, found: entries.length, sent: capped.length });
 
-      logger.info(`Scan: ${retailer.name} — ${recent.length}/${entries.length} products within ${hoursBack}h window`);
+      logger.info(`Scan: ${retailer.name} — sent ${capped.length}/${recent.length} products within ${hoursBack}h window`);
     }
 
     logger.info(`Scan complete: ${results.totalSent} products sent across ${results.retailers.length} retailers`);

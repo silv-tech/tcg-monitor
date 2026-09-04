@@ -3,7 +3,8 @@ const logger = require('../monitoring/logger');
 const state = require('../core/state');
 const { sleep, hashSku } = require('../utils/helpers');
 
-const DEEP_CRAWL_INTERVAL = 5 * 60 * 1000;
+const DEEP_CRAWL_INTERVAL_DEFAULT = 5 * 60 * 1000;
+const DEEP_CRAWL_INTERVAL_FLOOR = 60 * 1000;
 const CONCURRENCY = 4;
 
 // Odoo eCommerce category routes — only the games the client tracks.
@@ -20,7 +21,8 @@ const SORT_MODIFIED = 'write_date desc';
 const STEALTH_OPTS = { ignoreTlsErrors: true, timeoutMs: 12000 };
 
 // Cloudflare rate-limits bursts (~90 requests in 7s got 429s, 2 req/s still tripped it occasionally)
-const MIN_SPACING_MS = 750;
+const MIN_SPACING_DEFAULT = 750;
+const MIN_SPACING_FLOOR = 400;
 const RATE_LIMIT_COOLDOWN_MS = 15000;
 
 const CARD_RE = /<form role="article"[^>]*\boe_product_cart\b[^>]*>[\s\S]*?<\/form>/g;
@@ -107,25 +109,33 @@ class EBGamesAdapter extends BaseAdapter {
     this._nextSlot = 0;
     this._cooldownUntil = 0;
     this._seeded = false;
+    this._deriveTiming();
+  }
+
+  _deriveTiming() {
+    this.deepCrawlIntervalMs = this.timingValue('deepCrawlIntervalMs', DEEP_CRAWL_INTERVAL_DEFAULT, DEEP_CRAWL_INTERVAL_FLOOR);
+    this.minSpacingMs = this.timingValue('minSpacingMs', MIN_SPACING_DEFAULT, MIN_SPACING_FLOOR);
   }
 
   // Global spacer shared by every EB Games request (crawl, fast poll, watchlist)
   async _throttle() {
     const now = Date.now();
     const slot = Math.max(now, this._nextSlot, this._cooldownUntil);
-    this._nextSlot = slot + MIN_SPACING_MS;
+    this._nextSlot = slot + this.minSpacingMs;
     if (slot > now) await sleep(slot - now);
   }
 
   async fetchProducts() {
     if (this._knownProducts.size === 0) {
-      // First run seeds the whole catalog synchronously — otherwise the deep crawl's
-      // products would land later and diff as hundreds of NEW_SKU events.
-      // If the scheduler timed out a still-running first crawl, don't start a second one.
-      if (this._deepCrawlRunning) return {};
-      await this._deepCrawl();
+      // First run seeds the catalog. It is backgrounded so a slow crawl can't blow the
+      // scheduler's adapter timeout; the poll returns empty and the next one picks up
+      // the seeded catalog. _seedRedis keeps that first landing from firing NEW_SKU.
+      if (!this._deepCrawlRunning) {
+        this._deepCrawl().catch(err => logger.warn(`EB Games: seed crawl error: ${err.message}`));
+      }
+      return {};
     } else {
-      if (!this._deepCrawlRunning && Date.now() - this._lastDeepCrawlAt >= DEEP_CRAWL_INTERVAL) {
+      if (!this._deepCrawlRunning && Date.now() - this._lastDeepCrawlAt >= this.deepCrawlIntervalMs) {
         this._deepCrawl().catch(err => logger.warn(`EB Games: deep crawl error: ${err.message}`));
       }
       await this._fastPoll();
@@ -253,7 +263,7 @@ class EBGamesAdapter extends BaseAdapter {
       if (!this._seeded) await this._seedRedis(failed === 0);
 
       const inStock = [...this._knownProducts.values()].filter(p => p.inStock).length;
-      logger.info(`EB Games: DEEP — ${fetched} pages${failed ? ` (${failed} failed)` : ''}, ${this._knownProducts.size} products (${inStock} in stock), ${Date.now() - start}ms. Next in ${DEEP_CRAWL_INTERVAL / 60000}min.`);
+      logger.info(`EB Games: DEEP — ${fetched} pages${failed ? ` (${failed} failed)` : ''}, ${this._knownProducts.size} products (${inStock} in stock), ${Date.now() - start}ms. Next in ${Math.round(this.deepCrawlIntervalMs / 60000)}min.`);
     } finally {
       this._deepCrawlRunning = false;
     }

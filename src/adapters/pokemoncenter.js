@@ -34,12 +34,46 @@ class PokemonCenterAdapter extends BaseAdapter {
     this.lastSitemapScan = 0;
     this.SITEMAP_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours (products don't change that fast)
 
-    // Availability check rotation
-    this.checkIndex = 0;
-    this.CHECKS_PER_POLL = 10;
+    // Availability sits behind two bot walls: DataDome answers every HTTP client with 403
+    // (any TLS fingerprint, any IP) and Incapsula serves headless Chromium a block iframe.
+    // ScraperAPI ultra_premium is the only path through, at 25 credits a call — so sweeping
+    // 1,195 products is impossible. Paid checks are spent only where they buy something:
+    // products that just appeared in the sitemap, and explicitly watchlisted SKUs.
+    this._deriveTiming();
+    this.watchlist = new Set(config.watchlist || []);
+
+    this._knownSkus = new Set();      // every sku seen in a sitemap scan
+    this._newSkuQueue = [];           // newly listed skus awaiting a paid check
+    this._seededSkus = false;         // first scan seeds silently — no flood after a restart
+    this._watchlistCheckedAt = new Map();
+    this._stealthBlockedUntil = 0;    // free-path circuit; retried occasionally in case the block lifts
 
     // Track consecutive full-poll failures to avoid noisy error logging
     this._consecutiveFailures = 0;
+  }
+
+  _deriveTiming() {
+    this.checksPerPoll = this.timingValue('checksPerPoll', 3, 1);
+    this.watchlistIntervalMs = this.timingValue('watchlistIntervalMs', 30 * 60 * 1000, 5 * 60 * 1000);
+  }
+
+  /** Products the paid checker should spend credits on this poll. */
+  _selectCheckTargets() {
+    const now = Date.now();
+    const targets = [];
+
+    for (const sku of this.watchlist) {
+      if (!this.sitemapProducts.has(sku)) continue;
+      if (now - (this._watchlistCheckedAt.get(sku) || 0) < this.watchlistIntervalMs) continue;
+      targets.push(sku);
+    }
+
+    while (this._newSkuQueue.length > 0 && targets.length < this.checksPerPoll) {
+      const sku = this._newSkuQueue.shift();
+      if (this.sitemapProducts.has(sku) && !targets.includes(sku)) targets.push(sku);
+    }
+
+    return targets.slice(0, Math.max(this.checksPerPoll, this.watchlist.size));
   }
 
   isChallengePage(html) {
@@ -75,16 +109,17 @@ class PokemonCenterAdapter extends BaseAdapter {
       throw new Error('No TCG products in sitemap cache');
     }
 
-    // Phase 2: Check availability for a rotating batch of products
-    const entries = [...this.sitemapProducts.entries()];
-    const start = this.checkIndex % entries.length;
-    const batchSize = Math.min(this.CHECKS_PER_POLL, entries.length);
+    // Phase 2: paid availability checks, only for newly listed and watchlisted products
+    const targets = this._selectCheckTargets();
+    const batchSize = targets.length;
 
     let checked = 0;
     const failureCounts = {};
     for (let i = 0; i < batchSize; i++) {
-      const idx = (start + i) % entries.length;
-      const [sku, meta] = entries[idx];
+      const sku = targets[i];
+      const meta = this.sitemapProducts.get(sku);
+      if (!meta) continue;
+      if (this.watchlist.has(sku)) this._watchlistCheckedAt.set(sku, Date.now());
       try {
         const { data, failReason } = await this.checkProductAvailability(sku, meta);
         if (data) {
@@ -101,7 +136,6 @@ class PokemonCenterAdapter extends BaseAdapter {
       // Small delay between checks to avoid triggering rate limits
       if (i < batchSize - 1) await sleep(500 + Math.floor(Math.random() * 1000));
     }
-    this.checkIndex = (start + batchSize) % entries.length;
 
     // Phase 3: Build full product list — use cached availability for all products
     // Keep last-known availability (even if stale) — prevents false OOS events
@@ -120,6 +154,13 @@ class PokemonCenterAdapter extends BaseAdapter {
       });
     }
 
+    // Nothing new and nothing due: a quiet poll, not a failed one
+    if (batchSize === 0) {
+      this._consecutiveFailures = 0;
+      logger.info(`Pokemon Center: ${Object.keys(products).length} products, no checks due (${this._newSkuQueue.length} queued, ${this.availabilityCache.size} with known stock)`);
+      return products;
+    }
+
     // Track consecutive failures
     if (checked === 0 && batchSize > 0) {
       this._consecutiveFailures++;
@@ -134,7 +175,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       this._consecutiveFailures = 0;
     }
 
-    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} fresh, ${this.availabilityCache.size} cached)`);
+    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} checked, ${this._newSkuQueue.length} queued, ${this.availabilityCache.size} with known stock)`);
     return products;
   }
 
@@ -228,29 +269,56 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     if (newProducts.size > 0) {
       this.sitemapProducts = newProducts;
-      logger.info(`Pokemon Center: sitemap parsed — ${newProducts.size} TCG products (${urlMatches.length} total URLs)`);
+
+      // Diff against what we have seen before — the sitemap is the only free signal this
+      // site gives us, so a sku appearing here is what earns a paid availability check.
+      if (!this._seededSkus) {
+        for (const sku of newProducts.keys()) this._knownSkus.add(sku);
+        this._seededSkus = true;
+        logger.info(`Pokemon Center: sitemap parsed — ${newProducts.size} TCG products seeded (${urlMatches.length} total URLs)`);
+      } else {
+        const appeared = [];
+        for (const sku of newProducts.keys()) {
+          if (this._knownSkus.has(sku)) continue;
+          this._knownSkus.add(sku);
+          appeared.push(sku);
+        }
+        for (const sku of appeared) {
+          if (!this._newSkuQueue.includes(sku)) this._newSkuQueue.push(sku);
+        }
+        logger.info(`Pokemon Center: sitemap parsed — ${newProducts.size} TCG products (${urlMatches.length} total URLs)${appeared.length ? `, ${appeared.length} newly listed` : ''}`);
+      }
     } else if (urlMatches.length > 0) {
       logger.warn(`Pokemon Center: sitemap had ${urlMatches.length} URLs but 0 matched TCG keywords`);
     }
   }
 
   async checkProductAvailability(sku, meta) {
-    // Method 1: Stealth HTTP (impit) — free, fast
-    // Many product pages serve JSON-LD and __NEXT_DATA__ even without JS execution
-    try {
-      const proxyUrl = getProxyUrl('residential');
-      const html = await stealthGet(meta.url, {
-        proxyUrl,
-        maxRetries: 1,
-        timeoutMs: 15000,
-      });
+    // Method 1: Stealth HTTP (impit) — free, fast.
+    // DataDome currently 403s every HTTP client here, so after a failure we stop trying for
+    // a while instead of burning a proxy request per check; the probe re-runs periodically
+    // so the free path comes straight back if the block is ever lifted.
+    if (Date.now() >= this._stealthBlockedUntil) {
+      try {
+        const proxyUrl = getProxyUrl('residential');
+        const html = await stealthGet(meta.url, {
+          proxyUrl,
+          maxRetries: 1,
+          timeoutMs: 15000,
+        });
 
-      if (html && !this.isChallengePage(html)) {
-        const data = this._parseProductHtml(html);
-        if (data) return { data, failReason: null };
+        if (html && !this.isChallengePage(html)) {
+          const data = this._parseProductHtml(html);
+          if (data) {
+            if (this._stealthBlockedUntil) logger.info('Pokemon Center: stealth path is working again');
+            this._stealthBlockedUntil = 0;
+            return { data, failReason: null };
+          }
+        }
+        this._stealthBlockedUntil = Date.now() + 30 * 60 * 1000;
+      } catch {
+        this._stealthBlockedUntil = Date.now() + 30 * 60 * 1000;
       }
-    } catch {
-      // Stealth failed — try next method
     }
 
     // Method 2: protectedFetch (browser → ScraperAPI) — expensive fallback

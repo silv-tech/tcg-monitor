@@ -220,6 +220,7 @@ function getProxyUrl(proxyTier, retailerId) {
 const stats = {
   requests: 0,
   blocked: 0,
+  totalBytes: 0,
   startedAt: Date.now(),
   byRetailer: {},
   latency: {
@@ -233,25 +234,36 @@ const stats = {
   cost: {
     totalEstimatedUsd: 0,
     byTier: { residential: 0, datacenter: 0, isp: 0, none: 0 },
+    measuredRequests: 0,
+    estimatedRequests: 0,
   },
 };
 
 const MAX_LATENCY_SAMPLES = 100;
 
-function recordRequest(retailerId, blocked = false, proxyTier = 'none') {
+function recordRequest(retailerId, blocked = false, proxyTier = 'none', bytes = 0) {
   stats.requests++;
   if (blocked) stats.blocked++;
   if (!stats.byRetailer[retailerId]) {
-    stats.byRetailer[retailerId] = { requests: 0, blocked: 0, totalLatencyMs: 0, polls: 0 };
+    stats.byRetailer[retailerId] = { requests: 0, blocked: 0, totalLatencyMs: 0, polls: 0, bytes: 0 };
   }
   stats.byRetailer[retailerId].requests++;
   if (blocked) stats.byRetailer[retailerId].blocked++;
+  if (bytes > 0) {
+    stats.byRetailer[retailerId].bytes = (stats.byRetailer[retailerId].bytes || 0) + bytes;
+    stats.totalBytes += bytes;
+  }
 
-  // Estimate proxy cost
+  // Cost from the real response size when the caller reported one. The old flat 300 KB
+  // estimate under-counted Amazon's ~1.9 MB product pages by more than 6x, which is
+  // exactly where the bandwidth bill actually lives.
   if (proxyTier !== 'none' && COST_PER_GB[proxyTier]) {
-    const costPerReq = (AVG_RESPONSE_KB / 1024 / 1024) * COST_PER_GB[proxyTier];
+    const kb = bytes > 0 ? bytes / 1024 : AVG_RESPONSE_KB;
+    const costPerReq = (kb / 1024 / 1024) * COST_PER_GB[proxyTier];
     stats.cost.totalEstimatedUsd += costPerReq;
     stats.cost.byTier[proxyTier] = (stats.cost.byTier[proxyTier] || 0) + costPerReq;
+    if (bytes > 0) stats.cost.measuredRequests++;
+    else stats.cost.estimatedRequests++;
   }
 }
 
@@ -280,9 +292,16 @@ function getStats() {
     ...stats,
     uptimeHours: (uptimeMs / 3600000).toFixed(1),
     requestsPerMinute: stats.requests > 0 ? (stats.requests / (uptimeMs / 60000)).toFixed(1) : 0,
+    totalGb: parseFloat((stats.totalBytes / 1073741824).toFixed(3)),
+    projectedGbPerDay: uptimeMs > 60000
+      ? parseFloat(((stats.totalBytes / 1073741824) * (86400000 / uptimeMs)).toFixed(2))
+      : 0,
     cost: {
       ...stats.cost,
       totalEstimatedUsd: parseFloat(stats.cost.totalEstimatedUsd.toFixed(4)),
+      projectedUsdPerDay: uptimeMs > 60000
+        ? parseFloat((stats.cost.totalEstimatedUsd * (86400000 / uptimeMs)).toFixed(2))
+        : 0,
     },
     proxyPool: getProxyPoolStats(),
   };
@@ -291,6 +310,7 @@ function getStats() {
 function resetStats() {
   stats.requests = 0;
   stats.blocked = 0;
+  stats.totalBytes = 0;
   stats.startedAt = Date.now();
   stats.byRetailer = {};
   stats.latency = { polls: [], alerts: [], avgPollMs: 0, avgAlertMs: 0, maxPollMs: 0, maxAlertMs: 0 };

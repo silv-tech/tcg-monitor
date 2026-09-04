@@ -9,7 +9,12 @@
     "proxyTier": "residential",
     "enabled": true,
     "color": "#0071dc",
-    "watchlist": ["6000208831664"]
+    "watchlist": [
+      "6000208831664"
+    ],
+    "timing": {
+      "watchlistIntervalMs": 2000
+    }
   },
   {
     "_phase": 1,
@@ -21,7 +26,12 @@
     "proxyTier": "none",
     "enabled": true,
     "maxProducts": 1200,
-    "color": "#e31937"
+    "color": "#e31937",
+    "timing": {
+      "deepCrawlIntervalMs": 300000,
+      "minSpacingMs": 750,
+      "pollTimeoutMs": 180000
+    }
   },
   {
     "_phase": 1,
@@ -33,7 +43,13 @@
     "proxyTier": "isp",
     "enabled": true,
     "color": "#e31837",
-    "watchlist": ["4201042492", "2007494"]
+    "watchlist": [
+      "4201042492",
+      "2007494"
+    ],
+    "timing": {
+      "watchlistIntervalMs": 5000
+    }
   },
   {
     "_phase": 1,
@@ -44,7 +60,10 @@
     "intervalMs": 120000,
     "proxyTier": "residential-us",
     "enabled": true,
-    "color": "#ff9900"
+    "color": "#ff9900",
+    "timing": {
+      "discoveryIntervalMs": 1800000
+    }
   },
   {
     "_phase": 1,
@@ -55,9 +74,12 @@
     "intervalMs": 300000,
     "proxyTier": "residential",
     "enabled": true,
-    "color": "#ffcb05"
+    "color": "#ffcb05",
+    "timing": {
+      "checksPerPoll": 3,
+      "watchlistIntervalMs": 1800000
+    }
   },
-
   {
     "_phase": 2,
     "id": "bestbuy",
@@ -68,7 +90,15 @@
     "proxyTier": "none",
     "enabled": true,
     "color": "#0046be",
-    "searchQueries": ["pokemon booster box", "pokemon elite trainer box", "pokemon tcg", "one piece tcg", "dragon ball tcg", "lorcana tcg", "yugioh booster box"]
+    "searchQueries": [
+      "pokemon booster box",
+      "pokemon elite trainer box",
+      "pokemon tcg",
+      "one piece tcg",
+      "dragon ball tcg",
+      "lorcana tcg",
+      "yugioh booster box"
+    ]
   },
   {
     "_phase": 2,
@@ -81,7 +111,14 @@
     "enabled": false,
     "color": "#1a1a2e",
     "collections": [],
-    "searchKeywords": ["pokemon", "booster box", "elite trainer box", "one piece", "dragon ball", "sealed"]
+    "searchKeywords": [
+      "pokemon",
+      "booster box",
+      "elite trainer box",
+      "one piece",
+      "dragon ball",
+      "sealed"
+    ]
   },
   {
     "_phase": 2,
@@ -93,8 +130,17 @@
     "proxyTier": "none",
     "enabled": false,
     "color": "#2d5a27",
-    "collections": ["pokemon-sealed", "pokemon-new-releases-and-preorders"],
-    "searchKeywords": ["pokemon", "booster box", "etb", "one piece", "dragon ball"]
+    "collections": [
+      "pokemon-sealed",
+      "pokemon-new-releases-and-preorders"
+    ],
+    "searchKeywords": [
+      "pokemon",
+      "booster box",
+      "etb",
+      "one piece",
+      "dragon ball"
+    ]
   },
   {
     "_phase": 2,
@@ -108,7 +154,27 @@
     "color": "#ff6600",
     "maxProducts": 2500,
     "collections": [],
-    "searchKeywords": ["pokemon", "pokémon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "yugioh", "yu-gi-oh", "digimon", "magic the gathering", "flesh and blood", "weiss schwarz", "cardfight vanguard", "union arena", "star wars unlimited", "sealed", "tcg", "trading card"]
+    "searchKeywords": [
+      "pokemon",
+      "pokémon",
+      "booster",
+      "elite trainer",
+      "one piece",
+      "dragon ball",
+      "lorcana",
+      "yugioh",
+      "yu-gi-oh",
+      "digimon",
+      "magic the gathering",
+      "flesh and blood",
+      "weiss schwarz",
+      "cardfight vanguard",
+      "union arena",
+      "star wars unlimited",
+      "sealed",
+      "tcg",
+      "trading card"
+    ]
   },
   {
     "_phase": 2,
@@ -120,8 +186,18 @@
     "proxyTier": "none",
     "enabled": false,
     "color": "#d63031",
-    "collections": ["pokemon-sealed", "pokemon-new-releases"],
-    "searchKeywords": ["pokemon", "booster box", "elite trainer box", "one piece", "dragon ball", "lorcana"]
+    "collections": [
+      "pokemon-sealed",
+      "pokemon-new-releases"
+    ],
+    "searchKeywords": [
+      "pokemon",
+      "booster box",
+      "elite trainer box",
+      "one piece",
+      "dragon ball",
+      "lorcana"
+    ]
   },
   {
     "_phase": 2,
@@ -133,8 +209,18 @@
     "proxyTier": "none",
     "enabled": false,
     "color": "#0984e3",
-    "collections": ["pokemon-tcg", "pokemon-showcase"],
-    "searchKeywords": ["pokemon", "booster box", "elite trainer box", "one piece", "dragon ball", "lorcana"]
+    "collections": [
+      "pokemon-tcg",
+      "pokemon-showcase"
+    ],
+    "searchKeywords": [
+      "pokemon",
+      "booster box",
+      "elite trainer box",
+      "one piece",
+      "dragon ball",
+      "lorcana"
+    ]
   },
   {
     "_phase": 2,
@@ -423,6 +509,26 @@
     "color": "#1a1a2e",
     "maxProducts": 4000,
     "collections": [],
-    "searchKeywords": ["pokemon", "pokémon", "booster", "elite trainer", "one piece", "dragon ball", "lorcana", "yugioh", "yu-gi-oh", "digimon", "magic the gathering", "flesh and blood", "weiss schwarz", "cardfight vanguard", "union arena", "star wars unlimited", "sealed", "tcg", "trading card"]
+    "searchKeywords": [
+      "pokemon",
+      "pokémon",
+      "booster",
+      "elite trainer",
+      "one piece",
+      "dragon ball",
+      "lorcana",
+      "yugioh",
+      "yu-gi-oh",
+      "digimon",
+      "magic the gathering",
+      "flesh and blood",
+      "weiss schwarz",
+      "cardfight vanguard",
+      "union arena",
+      "star wars unlimited",
+      "sealed",
+      "tcg",
+      "trading card"
+    ]
   }
 ]

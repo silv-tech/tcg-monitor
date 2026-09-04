@@ -51,6 +51,7 @@ async function createBot() {
         case 'watchlist-remove': await handleWatchlistRemove(interaction); break;
         case 'budget': await handleBudget(interaction); break;
         case 'alerts': await handleAlerts(interaction); break;
+        case 'speed': await handleSpeed(interaction); break;
         case 'ping': await handlePing(interaction); break;
         case 'help': await handleHelp(interaction); break;
         case 'early-add': await handleEarlyAdd(interaction); break;
@@ -79,7 +80,7 @@ async function createBot() {
 }
 
 // Version bump this when command definitions change (P1-6)
-const COMMANDS_VERSION = '10';
+const COMMANDS_VERSION = '11';
 
 async function registerCommands() {
   const commands = [
@@ -169,6 +170,29 @@ async function registerCommands() {
       .addStringOption(opt =>
         opt.setName('retailer')
           .setDescription('Retailer ID (or "all" for summary)')
+          .setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('speed')
+      .setDescription('Show or change how fast a store is checked')
+      .addStringOption(opt =>
+        opt.setName('retailer')
+          .setDescription('Retailer ID, e.g. walmart (omit to list every store)')
+          .setRequired(false))
+      .addStringOption(opt =>
+        opt.setName('setting')
+          .setDescription('Which cadence to change')
+          .setRequired(false)
+          .addChoices(
+            { name: 'Poll interval (main sweep)', value: 'intervalMs' },
+            { name: 'Watchlist interval (drop detection)', value: 'watchlistIntervalMs' },
+            { name: 'Amazon discovery interval (costs credits)', value: 'discoveryIntervalMs' },
+            { name: 'EB Games deep crawl interval', value: 'deepCrawlIntervalMs' },
+            { name: 'EB Games request spacing', value: 'minSpacingMs' },
+            { name: 'Pokemon Center checks per poll', value: 'checksPerPoll' },
+          ))
+      .addNumberOption(opt =>
+        opt.setName('value')
+          .setDescription('Seconds (or a plain count for checks per poll)')
           .setRequired(false)),
     new SlashCommandBuilder()
       .setName('ping')
@@ -461,6 +485,92 @@ async function handleTestSku(interaction) {
   await interaction.editReply({ embeds: [embed], components });
 
   logger.info(`/test-sku: sent ${retailerId}:${sku} to #${interaction.channel.name} (offerId=${product._offerId || 'none'})`);
+}
+
+// ─── /speed — show or change per-store polling cadence ──────────
+
+// checksPerPoll is a count; everything else is a duration the user gives in seconds
+const SPEED_COUNT_KEYS = ['checksPerPoll'];
+const SPEED_LABELS = {
+  intervalMs: 'poll interval',
+  watchlistIntervalMs: 'watchlist interval',
+  discoveryIntervalMs: 'discovery interval',
+  deepCrawlIntervalMs: 'deep crawl interval',
+  minSpacingMs: 'request spacing',
+  checksPerPoll: 'checks per poll',
+};
+
+function formatSpeed(key, value) {
+  if (SPEED_COUNT_KEYS.includes(key)) return String(value);
+  return value >= 60000 ? `${Math.round(value / 60000)}min` : `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
+}
+
+async function handleSpeed(interaction) {
+  const retailerId = interaction.options.getString('retailer')?.trim().toLowerCase();
+  const setting = interaction.options.getString('setting');
+  const value = interaction.options.getNumber('value');
+  await interaction.deferReply();
+
+  const base = require('../config/retailers.json');
+  const overrides = await state.getRetailerOverrides();
+  const retailers = base.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+
+  // No retailer named: list the big-box stores and their current cadence
+  if (!retailerId) {
+    const bigBox = retailers.filter(r => r.adapter !== 'shopify' && r.enabled);
+    const lines = bigBox.map(r => {
+      const extras = Object.entries(r.timing || {})
+        .map(([k, v]) => `${SPEED_LABELS[k] || k} ${formatSpeed(k, v)}`)
+        .join(' · ');
+      return `**${r.name}** — poll ${formatSpeed('intervalMs', r.intervalMs)}${extras ? `\n${extras}` : ''}`;
+    });
+    const shopifyCount = retailers.filter(r => r.adapter === 'shopify' && r.enabled).length;
+    return interaction.editReply(
+      `**Current speeds**\n\n${lines.join('\n\n')}\n\n_+${shopifyCount} card shops on their own intervals._\n` +
+      'Change one with `/speed retailer:walmart setting:… value:…`'
+    );
+  }
+
+  const retailer = retailers.find(r => r.id === retailerId);
+  if (!retailer) {
+    return interaction.editReply(`Unknown retailer \`${retailerId}\`. Try \`/speed\` with no options to see the list.`);
+  }
+
+  // Retailer named but no change requested: show just that store
+  if (!setting || value == null) {
+    const extras = Object.entries(retailer.timing || {})
+      .map(([k, v]) => `• ${SPEED_LABELS[k] || k}: **${formatSpeed(k, v)}**`)
+      .join('\n');
+    return interaction.editReply(
+      `**${retailer.name}**\n• poll interval: **${formatSpeed('intervalMs', retailer.intervalMs)}**\n${extras || '_no per-store overrides set_'}`
+    );
+  }
+
+  const isCount = SPEED_COUNT_KEYS.includes(setting);
+  const raw = isCount ? Math.round(value) : Math.round(value * 1000);
+  if (raw <= 0) return interaction.editReply('Value must be greater than zero.');
+
+  const changes = setting === 'intervalMs'
+    ? { intervalMs: Math.min(Math.max(raw, 5000), 600000) }
+    : { timing: { ...(retailer.timing || {}), [setting]: raw } };
+
+  await state.setRetailerOverride(retailerId, changes);
+  const scheduler = require('../core/scheduler');
+  scheduler.updateAdapter(retailerId, changes);
+
+  // The adapter clamps to its own floor, so report what it will actually use
+  const adapter = scheduler.getAdapter(retailerId);
+  const effective = setting === 'intervalMs'
+    ? changes.intervalMs
+    : (adapter && adapter.timing ? adapter[setting] ?? raw : raw);
+  const clamped = effective !== raw;
+
+  logger.info(`/speed: ${retailerId}.${setting} = ${raw}${clamped ? ` (clamped to ${effective})` : ''}`);
+  return interaction.editReply(
+    `**${retailer.name}** — ${SPEED_LABELS[setting] || setting} set to **${formatSpeed(setting, effective)}**` +
+    (clamped ? `\n_Requested ${formatSpeed(setting, raw)}, clamped to this store's safe floor._` : '') +
+    '\nApplied live and saved — it survives redeploys.'
+  );
 }
 
 // ─── NEW: /check — Live stock check ─────────────────────────────
@@ -783,6 +893,7 @@ async function handleHelp(interaction) {
       {
         name: '⚙️  System',
         value: [
+          '`/speed` — Per-store polling speed',
           '`/budget` — ScraperAPI credits',
           '`/freetier` — Toggle free tier',
           '`/ping` — Latency',

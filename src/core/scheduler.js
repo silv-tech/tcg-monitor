@@ -8,6 +8,9 @@ const { pollAdapterOnce } = require('./poll-adapter');
 const { recordRestock, recordPrice } = require('./state');
 
 // Circuit breaker thresholds
+// Hard floor for watchlist fast-polling. Walmart's JSON legs are ~7KB so the limit is
+// PerimeterX block rate, not bandwidth; below ~1.5s the challenge rate climbs sharply.
+const WATCHLIST_FLOOR_MS = 1500;
 const CIRCUIT_ERROR_THRESHOLD = 5;   // consecutive errors to trip
 const CIRCUIT_PROBE_INTERVAL = 300000; // 5 minutes between recovery probes
 
@@ -94,7 +97,10 @@ class Scheduler {
 
     this.polling.add(adapter.id);
     const circuit = this._getCircuit(adapter.id);
-    const ADAPTER_TIMEOUT = Math.max(adapter.intervalMs * 2, 120000);
+    const defaultTimeout = Math.max(adapter.intervalMs * 2, 120000);
+    const ADAPTER_TIMEOUT = typeof adapter.timingValue === 'function'
+      ? adapter.timingValue('pollTimeoutMs', defaultTimeout, 30000)
+      : defaultTimeout;
 
     try {
       // Delegate to extracted poll module (#22)
@@ -287,6 +293,10 @@ class Scheduler {
     // Apply changes to the live adapter instance
     if (changes.intervalMs !== undefined) adapter.intervalMs = changes.intervalMs;
     if (changes.enabled !== undefined) adapter.enabled = changes.enabled;
+    if (changes.timing !== undefined && typeof adapter.applyTiming === 'function') {
+      adapter.applyTiming(changes.timing);
+      logger.info(`${adapter.name}: timing updated — ${JSON.stringify(changes.timing)}`);
+    }
 
     // Clear existing timers (main poll + watchlist)
     const existingTimer = this.timers.get(adapterId);
@@ -342,7 +352,10 @@ class Scheduler {
   _startWatchlistLoop(adapter) {
     const key = `${adapter.id}:watchlist`;
     if (this.timers.has(key)) return;
-    const floorMs = adapter.id === 'walmart' ? 2000 : 5000;
+    const defaultFloor = adapter.id === 'walmart' ? 2000 : 5000;
+    const floorMs = typeof adapter.timingValue === 'function'
+      ? adapter.timingValue('watchlistIntervalMs', defaultFloor, WATCHLIST_FLOOR_MS)
+      : defaultFloor;
     const loop = { stopped: false, stop() { loop.stopped = true; } };
     this.timers.set(key, loop);
     (async () => {

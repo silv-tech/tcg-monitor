@@ -23,8 +23,11 @@ const ACCESSORY_KEYWORDS = [
   'divider', 'accessories',
 ];
 
-// How often to run full ScraperAPI search for NEW product discovery
-const DISCOVERY_INTERVAL = 10 * 60 * 1000; // 10 minutes
+// How often to run the paid ScraperAPI search for NEW listings. This is the whole
+// ScraperAPI bill: 3 queries x 5 credits per run. It does NOT affect restock speed —
+// _monitorKnownAsins re-checks every known ASIN on every poll, free, regardless.
+const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
+const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
@@ -33,6 +36,7 @@ class AmazonAdapter extends BaseAdapter {
     this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
+    this._deriveTiming();
 
     // Consolidated queries — removed 5 redundant Pokemon queries
     // "pokemon tcg sealed" covers ETBs, UPCs, bundles, preorders, collections
@@ -41,6 +45,10 @@ class AmazonAdapter extends BaseAdapter {
       'pokemon tcg sealed',
       'one piece card game booster box',
     ];
+  }
+
+  _deriveTiming() {
+    this.discoveryIntervalMs = this.timingValue('discoveryIntervalMs', DISCOVERY_INTERVAL_DEFAULT, DISCOVERY_INTERVAL_FLOOR);
   }
 
   /**
@@ -146,7 +154,7 @@ class AmazonAdapter extends BaseAdapter {
     const products = {};
     const now = Date.now();
     const timeSinceDiscovery = now - this._lastDiscoveryAt;
-    const needsDiscovery = timeSinceDiscovery >= DISCOVERY_INTERVAL || this._knownProducts.size === 0;
+    const needsDiscovery = timeSinceDiscovery >= this.discoveryIntervalMs || this._knownProducts.size === 0;
 
     if (needsDiscovery) {
       // ── DISCOVERY ── ScraperAPI search for new products (paid, every 10 min)
@@ -165,7 +173,7 @@ class AmazonAdapter extends BaseAdapter {
         }
       }
 
-      logger.info(`Amazon: DISCOVERY — ${Object.keys(products).length} products, ${this._knownProducts.size} known ASINs. Next in ${DISCOVERY_INTERVAL / 60000}min.`);
+      logger.info(`Amazon: DISCOVERY — ${Object.keys(products).length} products, ${this._knownProducts.size} known ASINs. Next in ${Math.round(this.discoveryIntervalMs / 60000)}min.`);
     } else {
       // ── MONITOR ── Stealth-check known ASINs via /dp/ pages (FREE, every poll)
       await this._monitorKnownAsins(products);
