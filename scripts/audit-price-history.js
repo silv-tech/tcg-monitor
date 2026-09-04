@@ -24,6 +24,7 @@ const Redis = require('ioredis');
 const STORES = ['amazon', 'walmart', 'costco', 'bestbuy', 'ebgames', 'pokemoncenter'];
 const SWING_RATIO = 3;      // max/min beyond this is not a normal retail move
 const OSCILLATION_MIN = 3;  // times a value must recur alternating to look like parser flapping
+const OSCILLATION_MIN_SWING = 0.09; // and the values must differ by at least the price-alert threshold
 
 async function scanKeys(redis, pattern) {
   const keys = [];
@@ -36,13 +37,24 @@ async function scanKeys(redis, pattern) {
   return keys;
 }
 
-/** True when the series flips back and forth between a small set of values. */
+/**
+ * True when the series flips between a small set of MATERIALLY different values.
+ *
+ * The magnitude test matters. Walmart legitimately flip-flops by a cent or two as the buy box
+ * rotates between sellers (24.98 -> 24.97 -> 24.98 -> 24.97), and an audit that flags those
+ * is worse than no audit — it trains you to ignore it. Real parser corruption swings between
+ * unrelated products' prices (699.99 -> 39.98 -> 12.99), never by pennies. The threshold is
+ * tied to the alert threshold: anything that could not even fire a price-drop alert is noise.
+ */
 function looksOscillating(prices) {
   if (prices.length < 4) return false;
   const counts = new Map();
   for (const p of prices) counts.set(p, (counts.get(p) || 0) + 1);
-  const repeated = [...counts.values()].filter((c) => c >= OSCILLATION_MIN);
-  return repeated.length >= 2;
+  const recurring = [...counts.entries()].filter(([, c]) => c >= OSCILLATION_MIN).map(([p]) => p);
+  if (recurring.length < 2) return false;
+  const min = Math.min(...recurring);
+  const max = Math.max(...recurring);
+  return (max - min) / min >= OSCILLATION_MIN_SWING;
 }
 
 async function main() {
