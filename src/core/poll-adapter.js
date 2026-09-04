@@ -37,9 +37,40 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
     logger.info(`${adapter.name}: first poll — seeding ${Object.keys(newProducts).length} products (no alerts fired)`);
   }
 
+  // Product keys carry a 7-day TTL and each poll only refreshes what the retailer actually
+  // surfaced — Walmart's search returns 5-8 of ~353 known products — so most entries age out
+  // untouched. When one later reappears in results the diff has no record of it and fires a
+  // NEW_SKU, alerting a "new product" that has been on the shelf for weeks. This set remembers
+  // every SKU we have ever seen, well past the product TTL, purely to catch that case.
+  const SEEN_KEY = `tcg:seen:${adapter.id}`;
+  const SEEN_TTL_SEC = 86400 * 30;
+
   let eventCount = 0;
   if (!isFirstPoll) {
-    const events = diffProducts(oldProducts, newProducts);
+    let events = diffProducts(oldProducts, newProducts);
+
+    // Drop NEW_SKU events for products we have seen before — they are reappearances.
+    const newSkuEvents = events.filter(
+      (e) => e.type === EVENT_TYPES.NEW_SKU && e.product && e.product.sku != null,
+    );
+    if (newSkuEvents.length > 0) {
+      try {
+        const checkPipe = state.getRedis().pipeline();
+        for (const e of newSkuEvents) checkPipe.sismember(SEEN_KEY, String(e.product.sku));
+        const checked = await checkPipe.exec();
+        const stale = new Set();
+        newSkuEvents.forEach((e, i) => {
+          if (checked && checked[i] && checked[i][1]) stale.add(e);
+        });
+        if (stale.size > 0) {
+          events = events.filter((e) => !stale.has(e));
+          logger.info(`${adapter.name}: suppressed ${stale.size} false NEW_SKU (SKU seen before — cache had aged out)`);
+        }
+      } catch (err) {
+        // Never let the de-dup lookup block real alerting.
+        logger.debug(`${adapter.name}: NEW_SKU seen-check failed: ${err.message}`);
+      }
+    }
 
     if (events.length > 0) {
       // Stamp the moment the poll STARTED, not the moment the diff finished. The diff runs
@@ -97,6 +128,20 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
     }
     await pipeline.exec();
     state.setRetailerIndex(adapter.id, newProducts);
+
+    // Remember every SKU we know of — this poll's results AND everything already cached — so
+    // a later reappearance is never mistaken for new. Seeding from oldProducts matters on an
+    // existing deployment: without it the set would only learn the handful of products each
+    // poll surfaces, and the rest would still misfire when their 7-day TTL lapsed.
+    try {
+      const skus = [...new Set([...Object.keys(newProducts), ...Object.keys(oldProducts)])].map(String);
+      const seenPipe = state.getRedis().pipeline();
+      for (let i = 0; i < skus.length; i += 500) seenPipe.sadd(SEEN_KEY, ...skus.slice(i, i + 500));
+      seenPipe.expire(SEEN_KEY, SEEN_TTL_SEC);
+      await seenPipe.exec();
+    } catch (err) {
+      logger.debug(`${adapter.name}: seen-set update failed: ${err.message}`);
+    }
   }
 
   // Clean up stale products (with partial-result safety)

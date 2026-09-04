@@ -4,6 +4,7 @@ const { normalizePrice, sleep } = require('../utils/helpers');
 const { FAILURE_REASONS, classifyError } = require('../core/failure-reasons');
 const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl } = require('../core/proxy');
+const state = require('../core/state');
 
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
@@ -273,6 +274,24 @@ class PokemonCenterAdapter extends BaseAdapter {
     throw new Error('Sitemap unreachable and no cached products');
   }
 
+  /**
+   * Mark URLs as already-known in the early-SKU scanner's Redis set, so it does not raise a
+   * duplicate alert for something this adapter has already reported.
+   */
+  _registerWithEarlyScanner(rawUrls) {
+    if (!rawUrls || rawUrls.length === 0) return;
+    try {
+      const redis = state.getRedis();
+      if (!redis) return;
+      // Fire-and-forget: de-duplication must never delay or break detection.
+      redis.sadd('tcg:sitemap:pokemoncenter:known', ...rawUrls)
+        .then(() => redis.expire('tcg:sitemap:pokemoncenter:known', 86400 * 30))
+        .catch((err) => logger.debug(`Pokemon Center: early-scanner dedup failed: ${err.message}`));
+    } catch (err) {
+      logger.debug(`Pokemon Center: early-scanner dedup skipped: ${err.message}`);
+    }
+  }
+
   _parseSitemap(xml) {
     const urlMatches = xml.match(/<loc>([^<]+)<\/loc>/g) || [];
     const newProducts = new Map();
@@ -293,7 +312,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       const caUrl = url.replace(/\/en-[a-z]{2}\/product\//, '/en-ca/product/')
         .replace(/^(https?:\/\/[^/]+)\/product\//, '$1/en-ca/product/');
 
-      newProducts.set(sku, { url: caUrl, name });
+      newProducts.set(sku, { url: caUrl, name, rawUrl: url });
     }
 
     if (newProducts.size > 0) {
@@ -312,6 +331,12 @@ class PokemonCenterAdapter extends BaseAdapter {
           this._knownSkus.add(sku);
           appeared.push(sku);
         }
+        // Register these with the 12-hourly early-SKU scanner, which diffs the SAME sitemap
+        // against its own Redis set. This adapter now checks that sitemap every ~8s, so it
+        // always sees a new listing first; without this the scanner would rediscover the same
+        // product hours later and fire a second, duplicate alert for it.
+        this._registerWithEarlyScanner(appeared.map((s) => newProducts.get(s)?.rawUrl).filter(Boolean));
+
         for (const sku of appeared) {
           if (!this._newSkuQueue.includes(sku)) this._newSkuQueue.push(sku);
         }

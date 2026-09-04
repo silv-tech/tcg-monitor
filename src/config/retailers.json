@@ -86,7 +86,9 @@
       "paidCheckIntervalMs": 300000
     },
     "parseCanary": false,
-    "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked"
+    "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked",
+    "maxProducts": 1400,
+    "_maxProductsNote": "PC sitemap carries ~1195 TCG products; the default 500 cap hid ~695 of them"
   },
   {
     "_phase": 2,
