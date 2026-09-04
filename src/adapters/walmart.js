@@ -87,7 +87,7 @@ class WalmartAdapter extends BaseAdapter {
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
-        timeoutMs: 6000,
+        timeoutMs: 5000,
       });
 
       if (html && html.length > 500 && !html.includes('Verify Your Identity')) {
