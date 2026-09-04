@@ -22,14 +22,14 @@
     "name": "EB Games",
     "url": "https://www.ebgames.ca",
     "adapter": "ebgames",
-    "intervalMs": 8000,
+    "intervalMs": 6000,
     "proxyTier": "none",
     "enabled": true,
     "maxProducts": 1200,
     "color": "#e31937",
     "timing": {
       "deepCrawlIntervalMs": 300000,
-      "minSpacingMs": 750,
+      "minSpacingMs": 400,
       "pollTimeoutMs": 180000
     },
     "watchlist": []
@@ -96,7 +96,7 @@
     "enabled": true,
     "color": "#0046be",
     "timing": {
-      "discoveryIntervalMs": 300000
+      "discoveryIntervalMs": 8000
     },
     "watchlist": []
   },

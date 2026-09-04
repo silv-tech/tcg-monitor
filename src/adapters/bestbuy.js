@@ -8,8 +8,11 @@ const { isTCGProduct } = require('../utils/helpers');
 // parallel — while the availability API answers for 10 SKUs in one fast call. So the
 // two are split, exactly like Amazon: search occasionally to find new SKUs, and check
 // stock on the known set every poll.
-const DISCOVERY_INTERVAL_DEFAULT = 5 * 60 * 1000;
-const DISCOVERY_INTERVAL_FLOOR = 60 * 1000;
+// Search is free and answers in ~1.5s, so discovery can run on the normal poll cadence.
+// At 5 minutes a brand-new listing sat unseen for up to five minutes before anything
+// started checking its stock, which is the whole game on a drop.
+const DISCOVERY_INTERVAL_DEFAULT = 8 * 1000;
+const DISCOVERY_INTERVAL_FLOOR = 5 * 1000;
 const AVAILABILITY_BATCH = 10;
 
 // Availability API rejects anything that does not look like the site's own XHR (412)
