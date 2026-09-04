@@ -202,3 +202,80 @@ describe('autotune: latency floor is outlier-resistant', () => {
     assert.ok(d && d.intervalMs > 9000, 'sustained slowness must still raise the floor');
   });
 });
+
+describe('autotune: knowing when to stop', () => {
+  test('a change that makes success worse is reverted, not kept', () => {
+    feed('costco', 20, true, 900);                 // healthy at 8000
+    const d1 = autotune.decide('costco', 8000);
+    assert.ok(d1 && d1.intervalMs < 8000, 'speeds up first');
+    autotune.noteApplied('costco', 8000, d1.intervalMs, d1);
+
+    feed('costco', 20, false, 900);                // going faster made it worse
+    const d2 = autotune.decide('costco', d1.intervalMs);
+    assert.ok(d2, 'must react');
+    assert.strictEqual(d2.revert, true, 'should revert');
+    assert.strictEqual(d2.intervalMs, 8000, 'reverts to the previous setting');
+  });
+
+  test('stops trying after repeated failed attempts and holds the known-good setting', () => {
+    let interval = 8000;
+    let clock = Date.now();
+    for (let probe = 0; probe < autotune.MAX_FAILED_PROBES; probe++) {
+      feed('costco', 20, true, 900);
+      const up = autotune.decide('costco', interval, clock);
+      assert.ok(up, `probe ${probe}: expected a speed-up attempt`);
+      autotune.noteApplied('costco', interval, up.intervalMs, up);
+
+      feed('costco', 20, false, 900);              // every attempt makes it worse
+      const back = autotune.decide('costco', up.intervalMs, clock);
+      assert.ok(back && back.revert, `probe ${probe}: should revert`);
+      autotune.noteApplied('costco', up.intervalMs, back.intervalMs, back);
+      interval = back.intervalMs;
+
+      clock += 2 * 60 * 60 * 1000;                 // wait out the hold before trying again
+    }
+    const st = autotune.getState().costco;
+    assert.strictEqual(st.settled, true, 'must declare itself settled');
+    assert.ok(st.holdingForMs > 30 * 60 * 1000, 'holds for a long stretch, not seconds');
+  });
+
+  test('while holding, it does not probe at all', () => {
+    feed('costco', 20, true, 900);
+    const now = Date.now();
+    autotune.noteApplied('costco', 8000, 7000, { reason: 'x' });
+    // force a freeze
+    feed('costco', 20, false, 900);
+    const rev = autotune.decide('costco', 7000, now);
+    assert.ok(rev && rev.revert);
+    autotune.noteApplied('costco', 7000, rev.intervalMs, rev);
+    feed('costco', 20, true, 900);
+    assert.strictEqual(autotune.decide('costco', rev.intervalMs, now + 60000), null,
+      'frozen window must produce no changes');
+  });
+
+  test('safety outranks stability: a settled store still backs off if it starts failing', () => {
+    feed('costco', 20, true, 900);
+    autotune.noteApplied('costco', 8000, 7000, { reason: 'x' });
+    feed('costco', 20, false, 900);
+    const rev = autotune.decide('costco', 7000);
+    autotune.noteApplied('costco', 7000, rev.intervalMs, rev);
+
+    // long after the hold expires, the store is now genuinely failing
+    feed('costco', 20, false, 900);
+    const later = Date.now() + 2 * 60 * 60 * 1000;
+    const d = autotune.decide('costco', rev.intervalMs, later);
+    assert.ok(d, 'a settled store must still be able to back off');
+    assert.ok(d.intervalMs > rev.intervalMs, 'backs off for safety');
+  });
+
+  test('remembers the best cadence it has actually observed', () => {
+    feed('costco', 20, true, 900);
+    const d = autotune.decide('costco', 8000);
+    autotune.noteApplied('costco', 8000, d.intervalMs, d);
+    feed('costco', 20, true, 900);                 // change held up
+    autotune.decide('costco', d.intervalMs);
+    const st = autotune.getState().costco;
+    assert.ok(st.best, 'should record a best-known-good');
+    assert.strictEqual(st.best.intervalMs, d.intervalMs);
+  });
+});
