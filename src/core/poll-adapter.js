@@ -133,7 +133,7 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
   }
 
   // Parse-quality canary — catches a parser that still returns rows but with empty fields
-  recordParseQuality(adapter.id, newProducts);
+  recordParseQuality(adapter.id, newProducts, adapter.parseCanary !== false);
 
   // Detection health — adapters that can tell live data from cache report it here
   if (adapter._lastFreshness) {

@@ -116,8 +116,12 @@ const QUALITY_THRESHOLD = 3;    // consecutive bad polls before we call it broke
 
 /**
  * @param {object} products - the poll's product map, post-cap
+ * @param {boolean} enabled - false for adapters whose catalogue legitimately lacks prices
  */
-function recordParseQuality(retailerId, products) {
+function recordParseQuality(retailerId, products, enabled = true) {
+  // Pokemon Center publishes a 1,195-product sitemap but can only price the handful it
+  // pays to check, so a zero priced-ratio there is correct, not a regression.
+  if (!enabled) return;
   const values = Object.values(products || {});
   if (values.length < MIN_SAMPLE) return; // not enough to judge — stay silent
 

@@ -35,6 +35,7 @@ function decodeEntities(str) {
 // _monitorKnownAsins re-checks every known ASIN on every poll, free, regardless.
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
+const AOD_COOLDOWN_MS = 10 * 60 * 1000;
 
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
@@ -43,6 +44,8 @@ class AmazonAdapter extends BaseAdapter {
     this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
+    this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
+    this._lastFetchThrottled = false;
     this._deriveTiming();
 
     // Consolidated queries — removed 5 redundant Pokemon queries
@@ -89,6 +92,12 @@ class AmazonAdapter extends BaseAdapter {
         },
       });
 
+      this._lastFetchThrottled = false;
+      // Amazon answers an over-used AOD endpoint with a 503 that redirects to /error/500
+      if (html && html.includes('/error/500')) {
+        this._lastFetchThrottled = true;
+        return null;
+      }
       if (!html || html.length < 1000) return null;
       if (html.includes('Click the button below to continue shopping')) {
         if (proxyUrl) _clearCache(proxyUrl);
@@ -103,7 +112,9 @@ class AmazonAdapter extends BaseAdapter {
       }
 
       return this._parseAod(html, asin);
-    } catch {
+    } catch (err) {
+      // stealthGet throws on 503 before we can read the body
+      this._lastFetchThrottled = /50[03]|Blocked after/.test(err.message || '');
       if (proxyUrl) _clearCache(proxyUrl);
       return null;
     }
@@ -230,8 +241,8 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
-   * Monitor: stealth-check known ASINs via product pages (FREE).
-   * Returns cached data for ASINs where stealth fails (prevents false OOS).
+   * Monitor: check known ASINs via the AOD offer endpoint (FREE).
+   * Returns cached data for ASINs where the fetch fails (prevents false OOS).
    */
   async _monitorKnownAsins(products) {
     const asins = [...this._knownProducts.keys()];
@@ -240,9 +251,20 @@ class AmazonAdapter extends BaseAdapter {
       return;
     }
 
+    // AOD is cheap per request but Amazon throttles it per-endpoint: 12 ASINs in ~7s
+    // earned a 503 redirect to /error/500 on every call, direct and proxied alike.
+    // Pairs with a wide gap keep the same 2-minute cadence well inside the limit.
+    if (Date.now() < this._aodCooldownUntil) {
+      const waitSec = Math.round((this._aodCooldownUntil - Date.now()) / 1000);
+      logger.warn(`Amazon: MONITOR skipped — AOD throttled, retrying in ${waitSec}s`);
+      for (const [asin, cached] of this._knownProducts) products[asin] = cached;
+      return;
+    }
+
     let checked = 0;
     let updated = 0;
-    const BATCH = 4;
+    let throttled = 0;
+    const BATCH = 2;
 
     for (let i = 0; i < asins.length; i += BATCH) {
       const batch = asins.slice(i, i + BATCH);
@@ -278,23 +300,35 @@ class AmazonAdapter extends BaseAdapter {
           this._knownProducts.set(asin, product);
           products[asin] = product;
         } else {
-          // Stealth failed — return cached data unchanged (no false OOS events)
+          // Fetch failed — return cached data unchanged (no false OOS events)
+          if (this._lastFetchThrottled) throttled++;
           const cached = this._knownProducts.get(asin);
           if (cached) products[asin] = cached;
         }
+      }
+
+      // Back off the whole pass as soon as Amazon starts throttling, rather than
+      // walking the rest of the list into the same wall
+      if (throttled >= 2) {
+        this._aodCooldownUntil = Date.now() + AOD_COOLDOWN_MS;
+        logger.warn(`Amazon: AOD throttled (${throttled} x 503) — pausing the monitor for ${AOD_COOLDOWN_MS / 60000}min`);
+        for (const [asin, cached] of this._knownProducts) {
+          if (!(asin in products)) products[asin] = cached;
+        }
+        break;
       }
 
       // IP rotation between batches
       if (i + BATCH < asins.length) {
         const px = getProxyUrl('residential');
         if (px) _clearCache(px);
-        await sleep(1000 + Math.floor(Math.random() * 1500));
+        await sleep(2500 + Math.floor(Math.random() * 2000));
       }
     }
 
     this.reportFreshness(updated, checked);
-    this._monitorSuccessRate = asins.length > 0 ? Math.round((updated / asins.length) * 100) : 0;
-    logger.info(`Amazon: MONITOR — ${updated}/${checked} ASINs updated (free stealth). ${this._monitorSuccessRate}% success.`);
+    this._monitorSuccessRate = checked > 0 ? Math.round((updated / checked) * 100) : 0;
+    logger.info(`Amazon: MONITOR — ${updated}/${checked} ASINs updated (free stealth). ${this._monitorSuccessRate}% success.${throttled ? ` ${throttled} throttled.` : ''}`);
   }
 
   /**

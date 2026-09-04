@@ -24,6 +24,8 @@ class BaseAdapter {
     this.maxProducts = retailerConfig.maxProducts || 500; // Configurable cap (#17)
     this.timing = retailerConfig.timing || {}; // Per-store cadence overrides (retailers.json / Redis)
     this._lastFreshness = null; // set via reportFreshness() by adapters that serve cached data
+    // Opt out where a priceless catalogue is expected rather than a parser fault
+    this.parseCanary = retailerConfig.parseCanary !== false;
 
     // Circuit breaker: stop wasting proxy bandwidth after consecutive browser failures
     this._browserFailCount = 0;

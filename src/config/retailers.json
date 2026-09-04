@@ -78,7 +78,9 @@
     "timing": {
       "checksPerPoll": 3,
       "watchlistIntervalMs": 1800000
-    }
+    },
+    "parseCanary": false,
+    "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked"
   },
   {
     "_phase": 2,
