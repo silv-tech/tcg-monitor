@@ -27,6 +27,11 @@ class WalmartAdapter extends BaseAdapter {
     this.searchQueries = config.searchQueries || SEARCH_QUERIES;
     this._groupIndex = 0;
     this._polling = false; // overlap guard
+    // Adaptive search pacing. PerimeterX punishes volume, and the retry pass makes a bad
+    // patch worse: at 46% success we retried ~2 of 4 queries every cycle, pushing the real
+    // rate to ~0.78 req/s and driving success down further. Backing off is what recovers it.
+    this._successWindow = [];
+    this._skipCounter = 0;
     this._walmartOfferIds = new Map(); // product id → Walmart's own offerId (learned from the pinned page)
     this._lastPageProduct = new Map(); // product id → last full product parsed from the pinned page
     this._jsonDisabledUntil = 0;
@@ -510,6 +515,15 @@ class WalmartAdapter extends BaseAdapter {
     try {
       const products = {};
 
+      // Skip cycles while we are being challenged, so the pool can cool off. One in two
+      // below 50% success, two in three below 30%.
+      const rate = this._recentSuccessRate();
+      const skipEvery = rate === null ? 0 : rate < 0.3 ? 3 : rate < 0.5 ? 2 : 0;
+      if (skipEvery > 0 && ++this._skipCounter % skipEvery !== 0) {
+        logger.debug(`Walmart: search backing off (${Math.round(rate * 100)}% success) — skipping cycle`);
+        return {};
+      }
+
       const group = this.searchQueries;
 
       // Pass 1: all queries in parallel — results returned IMMEDIATELY for alerting
@@ -531,13 +545,16 @@ class WalmartAdapter extends BaseAdapter {
       }
 
       const elapsed = Date.now() - start;
-      logger.info(`Walmart: search — ${hits}/${group.length} stealth, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
+      this._recordSuccess(hits, group.length);
+      const pct = this._recentSuccessRate();
+      logger.info(`Walmart: search — ${hits}/${group.length} stealth${pct !== null ? ` (${Math.round(pct * 100)}% avg)` : ''}, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
       this.reportFreshness(hits, group.length);
 
       // Pass 2 (background): retry failed queries on a fresh IP.
       // Runs AFTER pass-1 products are returned for immediate alerting.
       // Recovered products are saved directly to Redis so they appear in the next diff.
-      if (failedQueries.length > 0) {
+      // Only retry while the pool is healthy — retrying into a block is what deepens it
+      if (failedQueries.length > 0 && (this._recentSuccessRate() ?? 1) >= 0.5) {
         this._retryInBackground(failedQueries);
       }
 
@@ -545,6 +562,18 @@ class WalmartAdapter extends BaseAdapter {
     } finally {
       this._polling = false;
     }
+  }
+
+  _recordSuccess(hits, total) {
+    if (!total) return;
+    this._successWindow.push(hits / total);
+    if (this._successWindow.length > 12) this._successWindow.shift();
+  }
+
+  /** Rolling stealth success over the last dozen cycles, or null until we have a read. */
+  _recentSuccessRate() {
+    if (this._successWindow.length < 4) return null;
+    return this._successWindow.reduce((a, b) => a + b, 0) / this._successWindow.length;
   }
 
   /**
