@@ -390,7 +390,9 @@ class CostcoAdapter extends BaseAdapter {
         html = await scraperApi.scraperFetch(url, {
           render: true,
           premium: true,
-          country: 'ca',
+          // Plan has no CA geotargeting (403). costco.ca serves CAD regardless of exit IP —
+          // verified: identical prices from Canadian and US IPs.
+          country: 'us',
           retailerId: this.id,
         });
         if (html) logger.debug(`Costco: ScraperAPI fallback succeeded for ${productId}`);

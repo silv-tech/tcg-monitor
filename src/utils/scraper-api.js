@@ -98,7 +98,12 @@ async function scraperFetch(targetUrl, opts = {}) {
     render = true,
     premium = true,
     ultraPremium = false,
-    country = 'ca',
+    // ScraperAPI geotargeting note: this account's plan does NOT include Canada. A request with
+    // country_code=ca returns 403 "Your plan does not include geotargeting for this country",
+    // verified directly against the API. Every Canadian retailer we hit is on a .ca domain or a
+    // locale-scoped URL (pokemoncenter.com/en-ca/...), and both were checked to return CAD from a
+    // US exit IP, so 'us' is the correct working default here — not a compromise on currency.
+    country = 'us',
     timeoutMs = 60000,
     retailerId = 'unknown',
   } = opts;
@@ -243,7 +248,7 @@ async function amazonSearch(query, opts = {}) {
     api_key: SCRAPER_API_KEY,
     url: targetUrl,
     autoparse: 'true',
-    country_code: 'ca',
+    country_code: 'us', // plan has no CA geotargeting — see note above
   });
 
   const apiUrl = `${SCRAPER_API_BASE}?${params}`;
@@ -304,7 +309,7 @@ async function fetchAmazonOlidAndSeller(asin) {
     api_key: SCRAPER_API_KEY,
     url: targetUrl,
     premium: 'true',
-    country_code: 'ca',
+    country_code: 'us', // plan has no CA geotargeting — see note above
   });
 
   const apiUrl = `${SCRAPER_API_BASE}?${params}`;
