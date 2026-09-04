@@ -32,7 +32,12 @@ class PokemonCenterAdapter extends BaseAdapter {
     this.sitemapProducts = new Map(); // sku -> { url, name }
     this.availabilityCache = new Map(); // sku -> { inStock, price, image, checkedAt }
     this.lastSitemapScan = 0;
-    this.SITEMAP_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours (products don't change that fast)
+    // The sitemap is the ONE thing on this site DataDome does not guard — it answers a plain
+    // stealth GET, and it honours If-None-Match with a 304 in ~500ms and zero bytes. So the
+    // new-listing check costs nothing and can run on the poll cadence; the 24.6MB body is only
+    // pulled when Pokemon Center actually republishes. At the old 4-hour timer a new product
+    // could sit unseen for four hours even though spotting it was free.
+    this._sitemapValidators = null;
 
     // Availability sits behind two bot walls: DataDome answers every HTTP client with 403
     // (any TLS fingerprint, any IP) and Incapsula serves headless Chromium a block iframe.
@@ -47,6 +52,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     this._seededSkus = false;         // first scan seeds silently — no flood after a restart
     this._watchlistCheckedAt = new Map();
     this._stealthBlockedUntil = 0;    // free-path circuit; retried occasionally in case the block lifts
+    this._lastPaidCheckAt = 0;        // wall-clock gate on ScraperAPI spend (see _deriveTiming)
 
     // Track consecutive full-poll failures to avoid noisy error logging
     this._consecutiveFailures = 0;
@@ -55,6 +61,12 @@ class PokemonCenterAdapter extends BaseAdapter {
   _deriveTiming() {
     this.checksPerPoll = this.timingValue('checksPerPoll', 3, 1);
     this.watchlistIntervalMs = this.timingValue('watchlistIntervalMs', 30 * 60 * 1000, 5 * 60 * 1000);
+    this.sitemapIntervalMs = this.timingValue('sitemapIntervalMs', 8 * 1000, 5 * 1000);
+    // Paid availability checks are gated on WALL CLOCK, never on poll count. The free sitemap
+    // check now runs every ~8s; if the paid checks rode the same cadence, checksPerPoll=3 would
+    // mean ~32,000 ScraperAPI calls a day at 25 credits each. This is the only thing standing
+    // between a fast poll loop and the entire monthly budget.
+    this.paidCheckIntervalMs = this.timingValue('paidCheckIntervalMs', 5 * 60 * 1000, 60 * 1000);
   }
 
   /** Products the paid checker should spend credits on this poll. */
@@ -91,7 +103,7 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     // Phase 1: Discover products from sitemap (every 4 hours)
     // NEVER throw if sitemap fails — use cached products instead
-    if (Date.now() - this.lastSitemapScan > this.SITEMAP_INTERVAL || this.sitemapProducts.size === 0) {
+    if (Date.now() - this.lastSitemapScan > this.sitemapIntervalMs || this.sitemapProducts.size === 0) {
       try {
         await this.scanSitemap();
         this.lastSitemapScan = Date.now();
@@ -109,8 +121,11 @@ class PokemonCenterAdapter extends BaseAdapter {
       throw new Error('No TCG products in sitemap cache');
     }
 
-    // Phase 2: paid availability checks, only for newly listed and watchlisted products
-    const targets = this._selectCheckTargets();
+    // Phase 2: paid availability checks, only for newly listed and watchlisted products, and
+    // only when the paid-check clock says so — the free sitemap phase above runs far more often.
+    const paidDue = Date.now() - this._lastPaidCheckAt >= this.paidCheckIntervalMs;
+    const targets = paidDue ? this._selectCheckTargets() : [];
+    if (targets.length > 0) this._lastPaidCheckAt = Date.now();
     const batchSize = targets.length;
 
     let checked = 0;
@@ -187,15 +202,27 @@ class PokemonCenterAdapter extends BaseAdapter {
     // Method 1: Stealth HTTP (impit) — fastest, free, works if sitemap isn't behind challenge
     try {
       const proxyUrl = getProxyUrl('residential');
-      xml = await stealthGet(this.sitemapUrl, {
+      const conditional = this._sitemapValidators || {};
+      const res = await stealthGet(this.sitemapUrl, {
         proxyUrl,
         maxRetries: 2,
-        timeoutMs: 20000,
+        timeoutMs: 30000,
+        withResponse: true,
         headers: {
           'Accept': 'application/xml, text/xml, */*',
+          ...(conditional.etag ? { 'If-None-Match': conditional.etag } : {}),
+          ...(conditional.lastModified ? { 'If-Modified-Since': conditional.lastModified } : {}),
         },
       });
+      if (res && res.status === 304) {
+        // Unchanged since last look — no new listings, nothing to parse, no bytes moved.
+        return;
+      }
+      xml = res && res.body;
       if (xml && xml.includes('<loc>') && !this.isChallengePage(xml)) {
+        const etag = res.headers['etag'];
+        const lastModified = res.headers['last-modified'];
+        if (etag || lastModified) this._sitemapValidators = { etag, lastModified };
         logger.info('Pokemon Center: sitemap fetched via stealth HTTP (free)');
         this._parseSitemap(xml);
         return;

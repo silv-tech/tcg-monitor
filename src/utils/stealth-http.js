@@ -55,6 +55,9 @@ async function stealthGet(url, opts = {}) {
     // node-fetch, which Costco's gateway simply hangs up on.
     method = 'GET',
     body = null,
+    // Return {status, headers, body} instead of just the body — needed for conditional
+    // requests, where a 304 carries no body and the status is the whole answer.
+    withResponse = false,
   } = opts;
   const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
 
@@ -106,6 +109,16 @@ async function stealthGet(url, opts = {}) {
           continue;
         }
         throw new Error(`Blocked after ${maxRetries} stealth attempts: ${response.status}`);
+      }
+
+      // Conditional requests: a 304 has no body, and the caller needs the status to know
+      // nothing changed. Only returned when explicitly asked for, so existing callers that
+      // expect a plain string are unaffected.
+      if (withResponse) {
+        const headers = {};
+        if (response.headers?.forEach) response.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+        const body = response.status === 304 ? '' : await response.text();
+        return { status: response.status, headers, body };
       }
 
       if (json) {

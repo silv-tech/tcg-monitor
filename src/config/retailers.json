@@ -75,13 +75,15 @@
     "name": "Pokemon Center",
     "url": "https://www.pokemoncenter.com",
     "adapter": "pokemoncenter",
-    "intervalMs": 300000,
+    "intervalMs": 8000,
     "proxyTier": "residential",
     "enabled": true,
     "color": "#ffcb05",
     "timing": {
       "checksPerPoll": 3,
-      "watchlistIntervalMs": 1800000
+      "watchlistIntervalMs": 1800000,
+      "sitemapIntervalMs": 8000,
+      "paidCheckIntervalMs": 300000
     },
     "parseCanary": false,
     "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked"
