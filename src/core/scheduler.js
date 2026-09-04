@@ -106,14 +106,18 @@ class Scheduler {
     const startedAt = Date.now();
     try {
       // Delegate to extracted poll module (#22)
-      await pollAdapterOnce(adapter, circuit, this.onEvents, ADAPTER_TIMEOUT);
+      const result = await pollAdapterOnce(adapter, circuit, this.onEvents, ADAPTER_TIMEOUT);
 
       // Success — reset circuit breaker
       if (circuit.state === 'open') {
         this._closeCircuit(adapter);
       }
       circuit.errors = 0;
-      autotune.recordPoll(adapter.id, { ok: true, ms: Date.now() - startedAt });
+      // quality is the data signal, not the exception signal: false means the poll returned
+      // cleanly but produced nothing, null means nothing was due (neutral — don't record it).
+      if (result && result.quality !== null && result.quality !== undefined) {
+        autotune.recordPoll(adapter.id, { ok: result.quality, ms: Date.now() - startedAt });
+      }
     } catch (err) {
       recordPollLatency(adapter.id, 0);
       autotune.recordPoll(adapter.id, { ok: false, ms: Date.now() - startedAt });

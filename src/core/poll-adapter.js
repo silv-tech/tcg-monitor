@@ -135,14 +135,24 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
   // Parse-quality canary — catches a parser that still returns rows but with empty fields
   recordParseQuality(adapter.id, newProducts, adapter.parseCanary !== false);
 
-  // Detection health — adapters that can tell live data from cache report it here
+  // Detection health — adapters that can tell live data from cache report it here.
+  // This is also the honest signal for the cadence controller: a poll that returns without
+  // throwing is NOT the same as a poll that worked. Walmart in particular returns cleanly
+  // with 0/4 searches through and zero products, and on exception-only signalling the
+  // controller read that as a 100% success and sped up into a wall.
+  let quality = null;
   if (adapter._lastFreshness) {
     const { fresh, attempted } = adapter._lastFreshness;
     recordFreshness(adapter.id, fresh, attempted);
+    // attempted === 0 means nothing was due this cycle — neutral, not a failure.
+    if (attempted > 0) quality = fresh > 0;
     adapter._lastFreshness = null;
   }
+  // Fallback for adapters with no freshness signal: returning nothing when we previously
+  // held products is a failed poll, however cleanly it returned.
+  if (quality === null && newCount === 0 && oldCount > 0) quality = false;
 
-  return { success: true, productCount: newCount, eventCount, pollMs };
+  return { success: true, productCount: newCount, eventCount, pollMs, quality };
 }
 
 module.exports = { pollAdapterOnce };
