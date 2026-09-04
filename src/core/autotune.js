@@ -57,7 +57,17 @@ const BOUNDS = {
   ebgames:       { floor: 5000, ceiling: 30000 },
   pokemoncenter: { floor: 8000, ceiling: 120000 },
 };
-const DEFAULT_BOUNDS = { floor: 8000, ceiling: 120000 };
+// Everything not named above is a small Shopify card shop. Their floor is deliberately far
+// higher than the big six, and it is a GLOBAL-capacity decision rather than a per-store one.
+//
+// Autotune tunes each store in isolation, so when 31 shops all measured healthy it walked
+// every one of them from 45-60s down toward the old 8s floor. Thirty-one extra stores polling
+// every 8 seconds starved the six that matter: Costco's poll went 942ms -> 4,975ms and
+// Walmart's 2,936ms -> 6,712ms, pushing five of the big six back over the 10s target they had
+// just been tuned to meet. Optimising locally pessimised globally.
+//
+// These shops carry a fraction of the drop volume and a 30s floor is ample for them.
+const DEFAULT_BOUNDS = { floor: 30000, ceiling: 120000 };
 
 const windows = new Map();  // retailerId -> [{ ok, ms, at }]
 const memory = new Map();   // retailerId -> tuning memory (see newMemory)
