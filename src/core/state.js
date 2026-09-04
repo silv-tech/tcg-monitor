@@ -49,7 +49,7 @@ async function getAllProducts(retailerId) {
   const keys = [];
   let cursor = '0';
   do {
-    const [nextCursor, batch] = await getRedis().scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+    const [nextCursor, batch] = await getRedis().scan(cursor, 'MATCH', pattern, 'COUNT', 5000);
     cursor = nextCursor;
     keys.push(...batch);
   } while (cursor !== '0');
@@ -191,7 +191,7 @@ async function rebuildCrossRetailerIndex() {
   const keys = [];
   let cursor = '0';
   do {
-    const [nextCursor, batch] = await getRedis().scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+    const [nextCursor, batch] = await getRedis().scan(cursor, 'MATCH', pattern, 'COUNT', 5000);
     cursor = nextCursor;
     keys.push(...batch);
   } while (cursor !== '0');
