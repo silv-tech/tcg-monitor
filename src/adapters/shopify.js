@@ -1,5 +1,18 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
+
+// Shopify prices by the CALLER'S GEOGRAPHY. The app runs from Railway in Virginia, so these
+// Canadian stores were quoting USD while we labelled the result CAD — measured on live stores:
+//   zardocards    US 602.00  vs  CA 800.00   (-25%)
+//   hobbiesville  US 600.00  vs  CA 829.95   (-28%)
+//   kanzengames   US 117.90  vs  CA 159.95   (-26%)
+// Every Shopify alert was understating the price by about a quarter. This cookie pins the
+// storefront to Canada, verified from a US IP to return prices identical to a Canadian one.
+// It is free — the alternative was routing every catalogue fetch through a Canadian proxy.
+const CA_LOCALE_HEADERS = {
+  'Cookie': 'localization=CA; cart_currency=CAD',
+  'Accept-Language': 'en-CA,en;q=0.9',
+};
 const { normalizePrice } = require('../utils/helpers');
 
 /**
@@ -46,7 +59,7 @@ class ShopifyAdapter extends BaseAdapter {
 
     while (hasMore) {
       const url = `${this.url}/collections/${handle}/products.json?limit=${this.pageLimit}&page=${page}`;
-      const data = await this.fetch(url, { json: true, timeoutMs: 15000 });
+      const data = await this.fetch(url, { json: true, timeoutMs: 15000, headers: CA_LOCALE_HEADERS });
 
       if (!data.products || data.products.length === 0) {
         hasMore = false;
@@ -74,7 +87,7 @@ class ShopifyAdapter extends BaseAdapter {
 
     while (hasMore) {
       const url = `${this.url}/products.json?limit=${this.pageLimit}&page=${page}`;
-      const data = await this.fetch(url, { json: true, timeoutMs: 15000 });
+      const data = await this.fetch(url, { json: true, timeoutMs: 15000, headers: CA_LOCALE_HEADERS });
 
       if (!data.products || data.products.length === 0) {
         hasMore = false;
