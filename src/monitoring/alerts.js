@@ -42,20 +42,27 @@ async function checkAndAlert(discordClient) {
       .setDescription(`${newlyUnhealthy.length} retailer(s) unhealthy`)
       .setTimestamp();
 
-    for (const r of newlyUnhealthy) {
-      const parts = [];
-      if (r.consecutiveErrors > 0) parts.push(`Errors: ${r.consecutiveErrors}`);
-      if (r.stale) parts.push('⏰ STALE — no check in expected window');
-      if (r.zeroProductPolls >= 3) parts.push(`⚠️ 0 products for ${r.zeroProductPolls} polls`);
-      if (r.lastError) parts.push(`Last error: ${r.lastError.message}\nat ${new Date(r.lastError.time).toISOString()}`);
-      embed.addFields({
-        name: r.name,
-        value: parts.join('\n') || 'Unknown issue',
-        inline: false,
-      });
+    // Discord embeds take at most 25 fields — a mass outage lists the first 24 and counts the rest
+    const MAX_LISTED = 24;
+    newlyUnhealthy.forEach((r, i) => {
+      if (i < MAX_LISTED) {
+        const parts = [];
+        if (r.consecutiveErrors > 0) parts.push(`Errors: ${r.consecutiveErrors}`);
+        if (r.stale) parts.push('⏰ STALE — no check in expected window');
+        if (r.zeroProductPolls >= 3) parts.push(`⚠️ 0 products for ${r.zeroProductPolls} polls`);
+        if (r.lastError) parts.push(`Last error: ${r.lastError.message}\nat ${new Date(r.lastError.time).toISOString()}`);
+        embed.addFields({
+          name: r.name,
+          value: (parts.join('\n') || 'Unknown issue').slice(0, 1024),
+          inline: false,
+        });
+      }
 
       // Mark as alerted — won't alert again until it recovers
       alertedRetailers.add(r.id);
+    });
+    if (newlyUnhealthy.length > MAX_LISTED) {
+      embed.addFields({ name: 'More', value: `…and ${newlyUnhealthy.length - MAX_LISTED} more retailers`, inline: false });
     }
 
     try {
