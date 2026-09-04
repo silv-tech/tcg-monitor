@@ -44,6 +44,7 @@ class AmazonAdapter extends BaseAdapter {
     this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
+    this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
     this._lastFetchThrottled = false;
     this._deriveTiming();
@@ -261,10 +262,13 @@ class AmazonAdapter extends BaseAdapter {
       return;
     }
 
+    // Measured ceiling: sequential at ~0.5 req/s passes (5/5), two concurrent at ~1.3 req/s
+    // fails (7/8 x 503) — and a fresh residential IP per request does not change that, so
+    // the throttle is endpoint-wide rather than per-IP. One at a time it is.
     let checked = 0;
     let updated = 0;
     let throttled = 0;
-    const BATCH = 2;
+    const BATCH = 1;
 
     for (let i = 0; i < asins.length; i += BATCH) {
       const batch = asins.slice(i, i + BATCH);
@@ -318,11 +322,10 @@ class AmazonAdapter extends BaseAdapter {
         break;
       }
 
-      // IP rotation between batches
       if (i + BATCH < asins.length) {
         const px = getProxyUrl('residential');
         if (px) _clearCache(px);
-        await sleep(2500 + Math.floor(Math.random() * 2000));
+        await sleep(1600 + Math.floor(Math.random() * 600));
       }
     }
 

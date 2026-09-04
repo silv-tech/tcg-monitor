@@ -19,20 +19,14 @@ class WalmartAdapter extends BaseAdapter {
     super(config);
     this.domain = 'www.walmart.ca';
     this.watchlist = new Set(config.watchlist || []);
-    // Search queries for ScraperAPI structured endpoint
-    this.searchQueries = [
+    // Four broad queries, all run every cycle. Seven queries split into alternating
+    // groups meant each term was only searched every 16s; these four overlap enough to
+    // cover the same catalogue at the same request rate, so every term is seen every 8s.
+    this.searchQueries = config.searchQueries || [
       'pokemon tcg',
       'pokemon booster box',
       'pokemon elite trainer box',
-      'pokemon tcg collection',
-      'pokemon tin sealed',
-      'tcg booster box',
-      'pokemon scarlet violet',
-    ];
-    // Staggered groups — alternate each cycle for continuous coverage
-    this._queryGroups = [
-      this.searchQueries.slice(0, 4),  // Group A
-      this.searchQueries.slice(4),     // Group B
+      'one piece card game',
     ];
     this._groupIndex = 0;
     this._polling = false; // overlap guard
@@ -519,11 +513,7 @@ class WalmartAdapter extends BaseAdapter {
     try {
       const products = {};
 
-      // Staggered groups: alternate A/B each cycle for continuous coverage
-      // Group A fires on even cycles, Group B on odd — every 5s one group runs
-      const group = this._queryGroups[this._groupIndex % this._queryGroups.length];
-      const groupLabel = this._groupIndex % this._queryGroups.length === 0 ? 'A' : 'B';
-      this._groupIndex++;
+      const group = this.searchQueries;
 
       // Pass 1: all queries in parallel — results returned IMMEDIATELY for alerting
       const start = Date.now();
@@ -544,13 +534,14 @@ class WalmartAdapter extends BaseAdapter {
       }
 
       const elapsed = Date.now() - start;
-      logger.info(`Walmart: group ${groupLabel} — ${hits}/${group.length} stealth, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
+      logger.info(`Walmart: search — ${hits}/${group.length} stealth, ${Object.keys(products).length} products, ${elapsed}ms ($0)`);
+      this.reportFreshness(hits, group.length);
 
       // Pass 2 (background): retry failed queries on a fresh IP.
       // Runs AFTER pass-1 products are returned for immediate alerting.
       // Recovered products are saved directly to Redis so they appear in the next diff.
       if (failedQueries.length > 0) {
-        this._retryInBackground(failedQueries, groupLabel);
+        this._retryInBackground(failedQueries);
       }
 
       return products;
@@ -563,7 +554,7 @@ class WalmartAdapter extends BaseAdapter {
    * Background retry: recover failed queries on a fresh IP and save to Redis.
    * Fire-and-forget — never blocks pass-1 alerting.
    */
-  _retryInBackground(failedQueries, groupLabel) {
+  _retryInBackground(failedQueries) {
     setImmediate(async () => {
       try {
         _clearCache(getProxyUrl('residential'));
@@ -594,7 +585,7 @@ class WalmartAdapter extends BaseAdapter {
           await pipeline.exec();
         }
 
-        logger.info(`Walmart: group ${groupLabel} retry — ${retryHits}/${failedQueries.length} recovered, ${entries.length} products saved to Redis`);
+        logger.info(`Walmart: search retry — ${retryHits}/${failedQueries.length} recovered, ${entries.length} products saved to Redis`);
       } catch (err) {
         logger.warn(`Walmart: background retry error: ${err.message}`);
       }
