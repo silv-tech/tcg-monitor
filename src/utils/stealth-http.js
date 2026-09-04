@@ -120,6 +120,7 @@ async function stealthGet(url, opts = {}) {
     headers = {},
     useCookieJar = false,
     ignoreTlsErrors = false,
+    rawHeaders = false,
   } = opts;
   const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
 
@@ -130,8 +131,9 @@ async function stealthGet(url, opts = {}) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Build headers — optionally inject cookies from warmup jar
-      const requestHeaders = {
+      // Build headers — optionally inject cookies from warmup jar.
+      // rawHeaders skips the document-navigation defaults (XHR-style requests send their own set).
+      const requestHeaders = rawHeaders ? { ...headers } : {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
         'Accept-Encoding': 'gzip, deflate, br',

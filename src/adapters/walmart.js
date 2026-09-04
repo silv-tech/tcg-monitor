@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
@@ -5,6 +6,13 @@ const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const { hashSku } = require('../utils/helpers');
+
+// Persisted-query hash and platform version of the product page's DynamicItemById call.
+// Both rotate with walmart.ca deploys — override via env when the JSON leg starts logging rejections.
+const DYNAMIC_ITEM_HASH = process.env.WALMART_DYNAMIC_ITEM_HASH
+  || '9ffbc1ef35327cf00cba1825ff8acaccc03b18a6d1d514d346ea06a786b30c8e';
+const WALMART_PLATFORM_VERSION = process.env.WALMART_PLATFORM_VERSION
+  || 'caweb-1.173.1-c25ee44a95e7802fdc2073b775d1044335bb50e0-8311154r';
 
 class WalmartAdapter extends BaseAdapter {
   constructor(config) {
@@ -28,6 +36,9 @@ class WalmartAdapter extends BaseAdapter {
     ];
     this._groupIndex = 0;
     this._polling = false; // overlap guard
+    this._walmartOfferIds = new Map(); // product id → Walmart's own offerId (learned from the pinned page)
+    this._lastPageProduct = new Map(); // product id → last full product parsed from the pinned page
+    this._jsonDisabledUntil = 0;
   }
 
   /**
@@ -36,26 +47,120 @@ class WalmartAdapter extends BaseAdapter {
    * cost 15-60s of blindness after every stealth miss during the Prismatic drop.
    */
   async fetchProductPage(productId) {
+    const id = String(productId);
     // selectedSellerId=0 pins Walmart's own offer — the plain page only shows the buy-box winner,
     // which lagged ~70s behind Walmart's offer going live during the Prismatic drop
-    const url = `https://www.walmart.ca/ip/${productId}?selectedSellerId=0`;
+    const url = `https://www.walmart.ca/ip/${id}?selectedSellerId=0`;
     const start = Date.now();
 
     const result = await this._raceParsed([
-      this._stealthFetchProduct(url, productId, getProxyUrl('residential')).then(r => ({ ...r, via: 'proxy' })),
-      this._stealthFetchProduct(url, productId, null).then(r => ({ ...r, via: 'direct' })),
+      this._fetchOfferJson(id).then(r => ({ ...r, via: 'json' })),
+      this._stealthFetchProduct(url, id, getProxyUrl('residential')).then(r => this._notePageResult(id, { ...r, via: 'proxy' })),
+      this._stealthFetchProduct(url, id, null).then(r => this._notePageResult(id, { ...r, via: 'direct' })),
     ]);
 
     if (result.product) {
       const product = result.product;
       product._watchlist = true;
-      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (${result.via})`);
+      logger.info(`Walmart: WATCHLIST ${id} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | qty=${product._stockQty ?? '-'} limit=${product._cartLimit ?? '-'} | ${Date.now() - start}ms (${result.via})`);
       return product;
     }
     if (result.thirdParty) return null;
 
-    logger.warn(`Walmart: WATCHLIST ${productId} — stealth failed on both paths (${Date.now() - start}ms)`);
+    logger.warn(`Walmart: WATCHLIST ${id} — all fetch paths failed (${Date.now() - start}ms)`);
     return null;
+  }
+
+  // The JSON leg has no name/image and only sees the buy-box winner, so it needs the pinned page's
+  // last product and Walmart's own offerId to build a product and recognise Walmart's offer
+  _notePageResult(id, result) {
+    if (result.product) {
+      this._lastPageProduct.set(id, { ...result.product });
+      if (result.product._offerId) this._walmartOfferIds.set(id, result.product._offerId);
+    }
+    return result;
+  }
+
+  /**
+   * The product page's own DynamicItemById GraphQL call: ~7KB, ~1s through the proxy, and the only
+   * source of the stock count (fulfillmentOptions[].availableQuantity). It reports the buy-box
+   * winner, so it only stands in for Walmart's offer when the offerId matches the pinned page's.
+   */
+  async _fetchOfferJson(id) {
+    if (Date.now() < this._jsonDisabledUntil) return { product: null, thirdParty: false };
+    const base = this._lastPageProduct.get(id);
+    if (!base) return { product: null, thirdParty: false };
+
+    const variables = JSON.stringify({ iId: id, fSId: true, enableMultiSave: false, enableVariantMigration: false });
+    const url = `https://www.walmart.ca/orchestra/pdp/graphql/DynamicItemById/${DYNAMIC_ITEM_HASH}/ip/${id}?variables=${encodeURIComponent(variables)}`;
+    const pageUrl = `https://www.walmart.ca/en/ip/${id}?selectedSellerId=0`;
+    const correlationId = crypto.randomBytes(18).toString('base64url');
+
+    try {
+      const body = await stealthGet(url, {
+        proxyUrl: getProxyUrl('residential'),
+        maxRetries: 1,
+        timeoutMs: 4000,
+        rawHeaders: true,
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Content-Type': 'application/json',
+          'Referer': pageUrl,
+          'Origin': 'https://www.walmart.ca',
+          'Sec-Fetch-Dest': 'empty',
+          'Sec-Fetch-Mode': 'cors',
+          'Sec-Fetch-Site': 'same-origin',
+          'x-apollo-operation-name': 'DynamicItemById',
+          'x-o-gql-query': 'query DynamicItemById',
+          'x-o-bu': 'WALMART-CA',
+          'x-o-ccm': 'server',
+          'x-o-mart': 'B2C',
+          'x-o-platform': 'rweb',
+          'x-o-platform-version': WALMART_PLATFORM_VERSION,
+          'x-o-segment': 'oaoh',
+          'x-o-item-id': id,
+          'wm_mp': 'true',
+          'wm_page_url': pageUrl,
+          'wm_qos.correlation_id': correlationId,
+          'x-o-correlation-id': correlationId,
+          'traceparent': `00-${crypto.randomBytes(16).toString('hex')}-${crypto.randomBytes(8).toString('hex')}-00`,
+        },
+      });
+
+      let json;
+      try { json = JSON.parse(body); } catch { return { product: null, thirdParty: false }; }
+
+      if (Array.isArray(json?.errors) && json.errors.some(e => /persisted/i.test(`${e.message} ${e.extensions?.code}`))) {
+        this._jsonDisabledUntil = Date.now() + 10 * 60 * 1000;
+        logger.warn('Walmart: DynamicItemById hash rejected — JSON leg paused 10min (walmart.ca deploy? set WALMART_DYNAMIC_ITEM_HASH)');
+        return { product: null, thirdParty: false };
+      }
+
+      const item = json?.data?.product;
+      if (!item) return { product: null, thirdParty: false };
+
+      const walmartOffer = this._walmartOfferIds.get(id);
+      const seller = `${item.sellerDisplayName || item.sellerName || ''}`.toLowerCase();
+      const isWalmart = walmartOffer ? item.offerId === walmartOffer : (seller.includes('walmart') || item.sellerType === 'INTERNAL');
+      if (!isWalmart) return { product: null, thirdParty: false }; // a marketplace seller holds the buy box — the pinned page decides
+
+      const shipping = (item.fulfillmentOptions || []).find(f => f.type === 'SHIPPING') || {};
+      const inStock = (item.availabilityStatus || shipping.availabilityStatus) === 'IN_STOCK';
+      const product = this.classify({
+        ...base,
+        price: item.priceInfo?.currentPrice?.price || base.price,
+        inStock,
+        canAddToCart: inStock && item.showAtc !== false,
+      });
+      product._offerId = item.offerId || base._offerId;
+      if (item.orderLimit > 0) product._cartLimit = item.orderLimit;
+      if (shipping.availableQuantity != null) product._stockQty = shipping.availableQuantity;
+      return { product, thirdParty: false };
+    } catch {
+      return { product: null, thirdParty: false };
+    }
   }
 
   // Resolves with the first attempt that parsed a page (a product, or a confirmed third-party page)
