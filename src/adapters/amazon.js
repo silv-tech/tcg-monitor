@@ -281,8 +281,27 @@ class AmazonAdapter extends BaseAdapter {
     for (const card of cards) {
       const asin = (card.match(/data-csa-c-item-id="amzn1\.asin\.([A-Z0-9]{10})"/) || [])[1];
       if (!asin) continue;
-      const name = (card.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
-      if (!name) continue;
+      const ariaName = (card.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
+      if (!ariaName) continue;
+      let name = ariaName;
+      // Amazon's aria-label drops an accented brand prefix, so "Pokémon TCG: Mega
+      // Evolution—Pitch Black Elite Trainer Box" arrives as "TCG: Mega Evolution—Pitch Black
+      // Elite Trainer Box". That is what produced the truncated alert titles, and it also
+      // stripped the franchise word the category classifier relies on. The product image's
+      // alt keeps the full title.
+      //
+      // Restored ONLY when the alt is our exact title with a short prefix in front. An alt
+      // inside a card's slice can belong to a neighbouring sponsored product — observed:
+      // aria "The World Game - Geography Card Game" alongside alt "9-Pocket Top Loader
+      // Binder" — so anything that is not a strict prefix-extension is ignored. By
+      // construction this can only prepend a few characters, never swap in another product.
+      const altRaw = (card.match(/class="s-image"[^>]*alt="([^"]{8,250})"/) || [])[1];
+      if (altRaw) {
+        const alt = decodeEntities(altRaw.trim());
+        const bare = decodeEntities(ariaName.trim());
+        const prefixLen = alt.length - bare.length;
+        if (prefixLen > 0 && prefixLen <= 30 && alt.endsWith(bare)) name = alt;
+      }
       // Scope the price to the card's OWN price block. A card's slice routinely contains
       // prices belonging to other ASINs — sponsored placements and related-item strips render
       // inside the result grid — so taking the first a-offscreen in the slice read a
