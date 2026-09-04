@@ -39,7 +39,9 @@ class WalmartAdapter extends BaseAdapter {
    * Saves 60-70% of ScraperAPI costs vs pure ScraperAPI polling.
    */
   async fetchProductPage(productId) {
-    const url = `https://www.walmart.ca/ip/${productId}`;
+    // selectedSellerId=0 pins Walmart's own offer — the plain page only shows the buy-box winner,
+    // which lagged ~70s behind Walmart's offer going live during the Prismatic drop
+    const url = `https://www.walmart.ca/ip/${productId}?selectedSellerId=0`;
     const proxyUrl = getProxyUrl('residential');
     const start = Date.now();
 
@@ -168,9 +170,7 @@ class WalmartAdapter extends BaseAdapter {
       }
 
       if (inStock === null) {
-        const state = require('../core/state');
-        const oldProducts = await state.getAllProducts(this.id);
-        const old = oldProducts[String(productId)];
+        const old = await state.getProduct(this.id, String(productId));
         inStock = old ? old.inStock : false;
       }
 
@@ -367,6 +367,9 @@ class WalmartAdapter extends BaseAdapter {
         || null;
       if (qty != null) {
         product._stockQty = qty;
+      }
+      if (item.orderLimit > 0) {
+        product._cartLimit = item.orderLimit;
       }
 
       return product;

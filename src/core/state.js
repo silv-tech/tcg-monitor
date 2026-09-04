@@ -187,8 +187,6 @@ function jaccardSimilarity(a, b) {
 
 async function rebuildCrossRetailerIndex() {
   const now = Date.now();
-  if (now - indexLastBuilt < INDEX_TTL) return;
-
   const pattern = `${PREFIX}product:*`;
   const keys = [];
   let cursor = '0';
@@ -214,6 +212,7 @@ async function rebuildCrossRetailerIndex() {
       retailerId: p.retailerId,
       sku: p.sku,
       name: p.name || '',
+      tokens: tokenize(p.name || ''),
       price: p.price,
       url: p.url,
       asin: p.retailerId === 'amazon' ? p.sku : null,
@@ -223,8 +222,26 @@ async function rebuildCrossRetailerIndex() {
   indexLastBuilt = now;
 }
 
+let indexRefreshing = null;
+function refreshCrossRetailerIndex() {
+  if (!indexRefreshing) {
+    indexRefreshing = rebuildCrossRetailerIndex()
+      .catch(() => {})
+      .finally(() => { indexRefreshing = null; });
+  }
+  return indexRefreshing;
+}
+
+// Keeps the index warm so alerts never wait on a full product scan
+function startCrossRetailerIndexRefresh() {
+  refreshCrossRetailerIndex();
+  setInterval(refreshCrossRetailerIndex, INDEX_TTL).unref();
+}
+
 async function findCrossRetailerMatches(product) {
-  await rebuildCrossRetailerIndex();
+  // Only the very first lookup blocks on a build; a stale index refreshes in the background
+  if (indexLastBuilt === 0) await refreshCrossRetailerIndex();
+  else if (Date.now() - indexLastBuilt >= INDEX_TTL) refreshCrossRetailerIndex();
 
   const sourceTokens = tokenize(product.name || '');
   if (!sourceTokens.length && !product.sku) return [];
@@ -241,7 +258,7 @@ async function findCrossRetailerMatches(product) {
 
     // Jaccard name similarity
     if (sourceTokens.length > 0) {
-      const sim = jaccardSimilarity(sourceTokens, tokenize(p.name));
+      const sim = jaccardSimilarity(sourceTokens, p.tokens);
       if (sim >= 0.4) {
         matches.push({ retailer: p.retailerId, price: p.price, url: p.url, similarity: sim });
       }
@@ -397,6 +414,7 @@ async function shutdown() {
 
 module.exports = {
   getRedis,
+  startCrossRetailerIndexRefresh,
   getProduct,
   setProduct,
   deleteProduct,

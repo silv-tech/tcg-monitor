@@ -139,9 +139,8 @@ class Scheduler {
         const product = await adapter.fetchProductPage(productId);
         if (!product) continue; // 404, blocked, or parse failure
 
-        const oldProducts = await state.getAllProducts(adapter.id);
         const key = product.sku;
-        const oldProduct = oldProducts[key];
+        const oldProduct = await state.getProduct(adapter.id, key);
 
         if (oldProduct) {
           // Already known — check for stock changes (RESTOCK, PRICE_CHANGE)

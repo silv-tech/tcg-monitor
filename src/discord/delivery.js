@@ -147,7 +147,7 @@ class DeliveryQueue {
           const { stealthGet } = require('../utils/stealth-http');
           const { getProxyUrl } = require('../core/proxy');
           const proxyUrl = getProxyUrl('residential');
-          const html = await stealthGet(`https://www.walmart.ca/ip/${product.sku}`, {
+          const html = await stealthGet(`https://www.walmart.ca/ip/${product.sku}?selectedSellerId=0`, {
             proxyUrl,
             maxRetries: 1,
             timeoutMs: 8000,

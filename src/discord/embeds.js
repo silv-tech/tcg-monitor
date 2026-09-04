@@ -145,11 +145,16 @@ function buildAlertEmbed(event, tier) {
       embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
     }
 
-    // Variant ID (Shopify only)
+    if (product._cartLimit) {
+      embed.addFields({ name: 'Cart Limit', value: String(product._cartLimit), inline: true });
+    }
+
+    // Odoo product id (EB Games)
     if (product._productId) {
       embed.addFields({ name: 'Product ID', value: String(product._productId), inline: true });
     }
 
+    // Variant ID (Shopify only)
     if (product._variantId) {
       embed.addFields({ name: 'Variant', value: String(product._variantId), inline: true });
     }

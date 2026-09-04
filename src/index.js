@@ -132,6 +132,7 @@ async function main() {
 
   // 5. Start scheduler
   await scheduler.start();
+  stateModule.startCrossRetailerIndexRefresh();
 
   // 5b. Start Early SKU Detection (Walmart sitemap scanner)
   let sitemapTimer = null;
