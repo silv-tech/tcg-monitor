@@ -139,9 +139,22 @@ describe('autotune: the signal it acts on', () => {
     assert.strictEqual(quality, true);
   });
 
-  test('nothing due this cycle is neutral, not a failure', () => {
+  test('nothing due this cycle falls back to whether products came back', () => {
+    // Pokemon Center reports attempted:0 whenever no paid check is owed. Treating that as
+    // neutral meant it was never sampled at all and got no self-repair.
     const { quality } = simulatePollResult({ freshness: { fresh: 0, attempted: 0 }, newCount: 500, oldCount: 500 });
-    assert.strictEqual(quality, null, 'must not penalise a cycle with no work due');
+    assert.strictEqual(quality, true, 'a healthy no-work cycle still counts as working');
+  });
+
+  test('a healthy poll with no freshness signal counts as SUCCESS', () => {
+    // EB Games emits no freshness. Scoring only its failures meant it could never speed up.
+    const { quality } = simulatePollResult({ freshness: null, newCount: 250, oldCount: 801 });
+    assert.strictEqual(quality, true);
+  });
+
+  test('cold start is not read as breakage', () => {
+    const { quality } = simulatePollResult({ freshness: null, newCount: 0, oldCount: 0 });
+    assert.strictEqual(quality, null, 'no baseline yet — stay neutral');
   });
 
   test('no freshness signal: empty result with cached products is a failure', () => {
@@ -164,7 +177,7 @@ function simulatePollResult({ freshness, newCount, oldCount }) {
     const { fresh, attempted } = freshness;
     if (attempted > 0) quality = fresh > 0;
   }
-  if (quality === null && newCount === 0 && oldCount > 0) quality = false;
+  if (quality === null && oldCount > 0) quality = newCount > 0;
   return { quality };
 }
 

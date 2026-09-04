@@ -148,9 +148,15 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
     if (attempted > 0) quality = fresh > 0;
     adapter._lastFreshness = null;
   }
-  // Fallback for adapters with no freshness signal: returning nothing when we previously
-  // held products is a failed poll, however cleanly it returned.
-  if (quality === null && newCount === 0 && oldCount > 0) quality = false;
+  // Fallback when there is no usable freshness signal — either the adapter emits none
+  // (EB Games) or nothing was due this cycle (Pokemon Center reports attempted: 0 when no
+  // paid check is owed). Judge on whether the poll produced products at all, but only once
+  // there is a baseline to compare against, so a cold start is not read as breakage.
+  //
+  // This has to be symmetric. Scoring only the failures meant EB Games could accumulate
+  // nothing but failures and never earn a speed-up, and Pokemon Center was never sampled at
+  // all — both were invisible to the controller.
+  if (quality === null && oldCount > 0) quality = newCount > 0;
 
   return { success: true, productCount: newCount, eventCount, pollMs, quality };
 }
