@@ -54,7 +54,7 @@ const NON_TCG_KEYWORDS = [
   // Board games / party games
   'cards against humanity', 'monopoly', 'uno ', 'uno:', 'phase 10',
   'exploding kittens', 'codenames', 'catan', 'risk ', 'clue ',
-  'sorry!', 'skip-bo', 'sequence', 'apples to apples',
+  'sorry!', 'skip-bo', 'skip bo', 'skipbo', 'sequence', 'apples to apples',
 ];
 
 function isTCGProduct(name) {
