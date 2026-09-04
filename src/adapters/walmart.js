@@ -38,7 +38,6 @@ class WalmartAdapter extends BaseAdapter {
     this._polling = false; // overlap guard
     this._walmartOfferIds = new Map(); // product id → Walmart's own offerId (learned from the pinned page)
     this._lastPageProduct = new Map(); // product id → last full product parsed from the pinned page
-    this._buyBoxSeen = new Map();      // product id → { seller, at } from the JSON leg when a marketplace seller wins
     this._jsonDisabledUntil = 0;
   }
 
@@ -54,12 +53,20 @@ class WalmartAdapter extends BaseAdapter {
     const url = `https://www.walmart.ca/ip/${id}?selectedSellerId=0`;
     const start = Date.now();
 
-    const result = await this._raceParsed([
+    // The ~7KB JSON legs run every cycle; the ~330KB page legs (which can see Walmart's offer before
+    // it wins the buy box) every third cycle, or until a first page parse exists to seed the JSON leg
+    this._cycle = (this._cycle || 0) + 1;
+    const attempts = [
       this._fetchOfferJson(id, getProxyUrl('residential')).then(r => ({ ...r, via: 'json' })),
       this._fetchOfferJson(id, null).then(r => ({ ...r, via: 'json-direct' })),
-      this._stealthFetchProduct(url, id, getProxyUrl('residential')).then(r => this._notePageResult(id, { ...r, via: 'proxy' })),
-      this._stealthFetchProduct(url, id, null).then(r => this._notePageResult(id, { ...r, via: 'direct' })),
-    ]);
+    ];
+    if (!this._lastPageProduct.has(id) || this._cycle % 3 === 0) {
+      attempts.push(
+        this._stealthFetchProduct(url, id, getProxyUrl('residential')).then(r => this._notePageResult(id, { ...r, via: 'proxy' })),
+        this._stealthFetchProduct(url, id, null).then(r => this._notePageResult(id, { ...r, via: 'direct' })),
+      );
+    }
+    const result = await this._raceParsed(attempts);
 
     if (result.product) {
       const product = result.product;
@@ -69,9 +76,13 @@ class WalmartAdapter extends BaseAdapter {
     }
     if (result.thirdParty) return null;
 
-    const seen = this._buyBoxSeen.get(id);
-    const buyBox = seen && Date.now() - seen.at < 15000 ? `buy box: "${seen.seller}" via JSON` : 'JSON leg silent too';
-    logger.warn(`Walmart: WATCHLIST ${id} — page legs failed, ${buyBox} (${Date.now() - start}ms)`);
+    // Nothing to report this cycle — say why, but only once every 30s per product
+    const lastNote = this._lastMissNote?.get(id) || 0;
+    if (Date.now() - lastNote > 30000) {
+      (this._lastMissNote ||= new Map()).set(id, Date.now());
+      const why = result.observed ? `buy box held by "${result.observed}" (JSON), page legs ${attempts.length > 2 ? 'blocked' : 'skipped'}` : 'every leg failed';
+      logger.warn(`Walmart: WATCHLIST ${id} — no Walmart offer read: ${why} (${Date.now() - start}ms)`);
+    }
     return null;
   }
 
@@ -166,9 +177,8 @@ class WalmartAdapter extends BaseAdapter {
       const seller = `${item.sellerDisplayName || item.sellerName || ''}`.toLowerCase();
       const isWalmart = walmartOffer ? item.offerId === walmartOffer : (seller.includes('walmart') || item.sellerType === 'INTERNAL');
       if (!isWalmart) {
-        // A marketplace seller holds the buy box — the pinned page decides; remember it for diagnostics
-        this._buyBoxSeen.set(id, { seller: item.sellerDisplayName || item.sellerId || '?', at: Date.now() });
-        return { product: null, thirdParty: false };
+        // A marketplace seller holds the buy box — a real observation, just not Walmart's offer
+        return { product: null, thirdParty: false, observed: item.sellerDisplayName || item.sellerId || '?' };
       }
 
       const shipping = (item.fulfillmentOptions || []).find(f => f.type === 'SHIPPING') || {};
@@ -193,15 +203,17 @@ class WalmartAdapter extends BaseAdapter {
     return new Promise(resolve => {
       let pending = attempts.length;
       let settled = false;
+      let observed = null;
       for (const attempt of attempts) {
         attempt.catch(() => ({ product: null, thirdParty: false })).then(r => {
           if (settled) return;
+          if (r.observed) observed = r.observed;
           if (r.product || r.thirdParty) {
             settled = true;
             resolve(r);
           } else if (--pending === 0) {
             settled = true;
-            resolve({ product: null, thirdParty: false });
+            resolve({ product: null, thirdParty: false, observed });
           }
         });
       }
