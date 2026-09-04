@@ -75,17 +75,17 @@ async function main() {
       const entries = Object.entries(retailerChannels).filter(([, id]) => id);
 
       if (entries.length > 0) {
-        let accessible = 0;
-        let failed = 0;
-        for (const [retailerId, channelId] of entries) {
+        const results = await Promise.all(entries.map(async ([retailerId, channelId]) => {
           try {
             await client.channels.fetch(channelId);
-            accessible++;
+            return true;
           } catch (err) {
-            failed++;
             logger.error(`CHANNEL ACCESS DENIED: ${retailerId} → ${channelId} (${err.message}). Alerts for this retailer will be DROPPED.`);
+            return false;
           }
-        }
+        }));
+        const accessible = results.filter(Boolean).length;
+        const failed = results.length - accessible;
         logger.info(`Channel verification: ${accessible}/${entries.length} retailer channels accessible${failed > 0 ? `, ${failed} FAILED` : ''}`);
       }
 

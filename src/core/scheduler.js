@@ -129,10 +129,6 @@ class Scheduler {
     if (this.polling.has(watchlistKey)) return;
     if (!adapter.watchlist || adapter.watchlist.size === 0) return;
 
-    // Don't fast-poll watchlist if circuit is open
-    const circuit = this._getCircuit(adapter.id);
-    if (circuit.state === 'open') return;
-
     this.polling.add(watchlistKey);
     try {
       for (const productId of adapter.watchlist) {
@@ -201,7 +197,7 @@ class Scheduler {
 
     // P2-4: Clear any leftover timers to prevent double-polling on re-start
     for (const [, timer] of this.timers) {
-      clearInterval(timer);
+      this._clearTimer(timer);
     }
     this.timers.clear();
 
@@ -243,15 +239,8 @@ class Scheduler {
         this.timers.set(id, timer);
       }, stagger);
 
-      // Fast watchlist polling (every 3s) for adapters that have one
-      // Uses direct stealth fetch (free) not ScraperAPI, so high frequency is fine
       if (adapter.watchlist && adapter.watchlist.size > 0) {
-        const wlInterval = id === 'walmart' ? 2000 : 5000;
-        const wlTimer = setInterval(() => {
-          if (this.running) this.pollWatchlist(adapter);
-        }, wlInterval);
-        this.timers.set(`${id}:watchlist`, wlTimer);
-        logger.info(`Fast watchlist polling enabled for ${adapter.name}: ${adapter.watchlist.size} SKUs every ${wlInterval / 1000}s`);
+        this._startWatchlistLoop(adapter);
       }
 
       stagger += 3000;
@@ -276,8 +265,8 @@ class Scheduler {
 
   stop() {
     this.running = false;
-    for (const [id, timer] of this.timers) {
-      clearInterval(timer);
+    for (const [, timer] of this.timers) {
+      this._clearTimer(timer);
     }
     this.timers.clear();
     if (this._redisWatchdog) {
@@ -302,12 +291,12 @@ class Scheduler {
     // Clear existing timers (main poll + watchlist)
     const existingTimer = this.timers.get(adapterId);
     if (existingTimer) {
-      clearInterval(existingTimer);
+      this._clearTimer(existingTimer);
       this.timers.delete(adapterId);
     }
     const wlTimer = this.timers.get(`${adapterId}:watchlist`);
     if (wlTimer) {
-      clearInterval(wlTimer);
+      this._clearTimer(wlTimer);
       this.timers.delete(`${adapterId}:watchlist`);
     }
 
@@ -342,20 +331,34 @@ class Scheduler {
    * Called when a SKU is added to a watchlist at runtime.
    */
   ensureWatchlistTimer(adapterId) {
-    const timerKey = `${adapterId}:watchlist`;
-    if (this.timers.has(timerKey)) return; // already running
     if (!this.running) return;
-
     const adapter = this.adapters.get(adapterId);
     if (!adapter || !adapter.watchlist || adapter.watchlist.size === 0) return;
+    this._startWatchlistLoop(adapter);
+  }
 
-    // Walmart gets 2s watchlist polling, others get 5s
-    const wlInterval = adapterId === 'walmart' ? 2000 : 5000;
-    const wlTimer = setInterval(() => {
-      if (this.running) this.pollWatchlist(adapter);
-    }, wlInterval);
-    this.timers.set(timerKey, wlTimer);
-    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs every ${wlInterval / 1000}s`);
+  // Self-scheduling loop: the next check starts the moment the previous one finishes (subject to
+  // the floor). A fixed setInterval plus the overlap guard alternated 2s/4s between checks.
+  _startWatchlistLoop(adapter) {
+    const key = `${adapter.id}:watchlist`;
+    if (this.timers.has(key)) return;
+    const floorMs = adapter.id === 'walmart' ? 1000 : 5000;
+    const loop = { stopped: false, stop() { loop.stopped = true; } };
+    this.timers.set(key, loop);
+    (async () => {
+      while (this.running && !loop.stopped) {
+        const started = Date.now();
+        await this.pollWatchlist(adapter);
+        const wait = floorMs - (Date.now() - started);
+        if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    })();
+    logger.info(`Fast watchlist polling started for ${adapter.name}: ${adapter.watchlist.size} SKUs, floor ${floorMs / 1000}s`);
+  }
+
+  _clearTimer(timer) {
+    if (timer && typeof timer.stop === 'function') timer.stop();
+    else clearInterval(timer);
   }
 
   // Expose circuit breaker status for the admin API

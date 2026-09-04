@@ -3,6 +3,12 @@ const logger = require('../monitoring/logger');
 
 const PREFIX = 'tcg:dedup:';
 const DEDUP_TTL = 600; // 10 minutes — allows legitimate rapid restocks (P1-3)
+// Drop waves arrive minutes apart; the 10-minute window would swallow every wave after the first
+const WATCHLIST_RESTOCK_TTL = 45;
+
+function ttlFor(event) {
+  return event.type === 'RESTOCK' && event.product?._watchlist ? WATCHLIST_RESTOCK_TTL : DEDUP_TTL;
+}
 
 // In-memory fallback dedup when Redis is unavailable
 const memoryDedup = new Map();
@@ -25,13 +31,13 @@ function isMemoryDuplicate(key) {
   return true;
 }
 
-function markMemory(key) {
+function markMemory(key, ttl) {
   // Evict oldest entries if cache is full
   if (memoryDedup.size >= MEMORY_MAX_SIZE) {
     const oldest = memoryDedup.keys().next().value;
     memoryDedup.delete(oldest);
   }
-  memoryDedup.set(key, Date.now() + DEDUP_TTL * 1000);
+  memoryDedup.set(key, Date.now() + ttl * 1000);
 }
 
 async function isDuplicate(event) {
@@ -42,9 +48,10 @@ async function isDuplicate(event) {
 
 async function markSent(event) {
   const key = eventKey(event);
-  await state.getRedis().set(key, '1', 'EX', DEDUP_TTL);
+  const ttl = ttlFor(event);
+  await state.getRedis().set(key, '1', 'EX', ttl);
   // Also mark in memory so fallback stays in sync
-  markMemory(key);
+  markMemory(key, ttl);
 }
 
 async function filterDuplicates(events) {
@@ -63,7 +70,7 @@ async function filterDuplicates(events) {
         logger.debug(`Dedup: memory fallback skipping ${event.type} for ${event.product.sku}`);
         continue;
       }
-      markMemory(key);
+      markMemory(key, ttlFor(event));
     }
     unique.push(event);
   }

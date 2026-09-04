@@ -88,6 +88,13 @@ class DeliveryQueue {
           continue;
         }
       }
+      if (event.product?._watchlist) {
+        // Drop alerts never wait behind the queue — an Amazon enrichment can hold it for 30s
+        this.routeEvent(event, Date.now())
+          .then(() => (event._scanTier ? null : markSent(event)))
+          .catch(err => logger.error('Failed to send watchlist alert', { sku: event.product?.sku, error: err.message }));
+        continue;
+      }
       this.queue.push({ event, queuedAt: Date.now() });
     }
 
@@ -309,19 +316,22 @@ class DeliveryQueue {
       const adminCh = channelsConfig?.adminChannel || config.discord.adminChannelId;
       const { embed, components } = buildAlertEmbed(event, 'paid');
 
-      // Send to watchlist channel (or admin if no watchlist channel set)
+      // Watchlist channel (or admin if none) and the retailer channel are sent in parallel
       const targetCh = watchCh || adminCh;
+      const paidChannel = this.resolvePaidChannel(category, retailerId);
+      const sends = [];
       if (targetCh) {
-        await this.sendToChannel(targetCh, embed, components, '🚨 **WATCHLIST ALERT** 🚨', 'paid');
-        logger.info(`WATCHLIST alert sent: ${event.type} — ${product.name} (${product.sku})`);
+        sends.push(this.sendToChannel(targetCh, embed, components, '🚨 **WATCHLIST ALERT** 🚨', 'paid'));
       } else {
         logger.error(`WATCHLIST alert generated but no target channel configured! SKU: ${product.sku}, Name: ${product.name}`);
       }
-
-      // Also send to paid channel as normal
-      const paidChannel = this.resolvePaidChannel(category, retailerId);
       if (paidChannel && paidChannel !== targetCh) {
-        await this.sendToChannel(paidChannel, embed, components, null, 'paid');
+        sends.push(this.sendToChannel(paidChannel, embed, components, null, 'paid'));
+      }
+      await Promise.all(sends);
+      if (targetCh) {
+        const e2e = event._detectedAt ? Date.now() - event._detectedAt : Date.now() - queuedAt;
+        logger.info(`WATCHLIST alert sent in ${e2e}ms: ${event.type} — ${product.name} (${product.sku})`);
       }
 
       const latency = Date.now() - queuedAt;
@@ -479,6 +489,7 @@ class DeliveryQueue {
   }
 
   resolveWebhook(tier) {
+    if (tier === 'paid' && config.discord.paidWebhookUrl) return config.discord.paidWebhookUrl;
     if (!channelsConfig?.webhooks) return null;
     return channelsConfig.webhooks[`${tier}_default`] || null;
   }

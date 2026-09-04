@@ -1,7 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { walmartProductLookup } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
@@ -32,48 +31,51 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   /**
-   * Fetch a single product page by Walmart SKU/product ID.
-   * Hybrid approach for near-100% success + minimal cost:
-   *  1. Try stealth HTTP + residential proxy (FREE, ~60-70% success)
-   *  2. On challenge, fall back to ScraperAPI (5 credits, 100% success)
-   * Saves 60-70% of ScraperAPI costs vs pure ScraperAPI polling.
+   * Fetch Walmart's own offer for a product id. A proxied and a direct stealth fetch race and the
+   * first parsed page wins. No ScraperAPI here: it only returns the buy-box winner, and awaiting it
+   * cost 15-60s of blindness after every stealth miss during the Prismatic drop.
    */
   async fetchProductPage(productId) {
     // selectedSellerId=0 pins Walmart's own offer — the plain page only shows the buy-box winner,
     // which lagged ~70s behind Walmart's offer going live during the Prismatic drop
     const url = `https://www.walmart.ca/ip/${productId}?selectedSellerId=0`;
-    const proxyUrl = getProxyUrl('residential');
     const start = Date.now();
 
-    // Stealth first (free, ~2-4s). Only fire ScraperAPI if stealth can't parse the page.
-    const stealth = await this._stealthFetchProduct(url, productId, proxyUrl);
+    const result = await this._raceParsed([
+      this._stealthFetchProduct(url, productId, getProxyUrl('residential')).then(r => ({ ...r, via: 'proxy' })),
+      this._stealthFetchProduct(url, productId, null).then(r => ({ ...r, via: 'direct' })),
+    ]);
 
-    if (stealth.product) {
-      const product = stealth.product;
+    if (result.product) {
+      const product = result.product;
       product._watchlist = true;
-      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (stealth)`);
+      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (${result.via})`);
       return product;
     }
+    if (result.thirdParty) return null;
 
-    if (stealth.thirdParty) {
-      // Stealth confirmed third-party — no Walmart offer, skip ScraperAPI (saves 5 credits)
-      return null;
-    }
-
-    // Stealth failed (challenge/blocked) — fall back to ScraperAPI (5 credits)
-    const scraper = await this._scraperFetchProduct(productId, url);
-
-    if (scraper.product) {
-      const product = scraper.product;
-      product._watchlist = true;
-      logger.info(`Walmart: WATCHLIST ${productId} — "${product.name}" | inStock=${product.inStock} | $${product.price || '?'} | ${Date.now() - start}ms (scraper fallback)`);
-      return product;
-    }
-
-    if (scraper.thirdParty) return null;
-
-    logger.warn(`Walmart: WATCHLIST ${productId} — both methods failed (${Date.now() - start}ms)`);
+    logger.warn(`Walmart: WATCHLIST ${productId} — stealth failed on both paths (${Date.now() - start}ms)`);
     return null;
+  }
+
+  // Resolves with the first attempt that parsed a page (a product, or a confirmed third-party page)
+  _raceParsed(attempts) {
+    return new Promise(resolve => {
+      let pending = attempts.length;
+      let settled = false;
+      for (const attempt of attempts) {
+        attempt.catch(() => ({ product: null, thirdParty: false })).then(r => {
+          if (settled) return;
+          if (r.product || r.thirdParty) {
+            settled = true;
+            resolve(r);
+          } else if (--pending === 0) {
+            settled = true;
+            resolve({ product: null, thirdParty: false });
+          }
+        });
+      }
+    });
   }
 
   /**
@@ -100,110 +102,6 @@ class WalmartAdapter extends BaseAdapter {
       return { product: null, thirdParty: false };
     } catch {
       if (proxyUrl) _clearCache(proxyUrl);
-      return { product: null, thirdParty: false };
-    }
-  }
-
-  /**
-   * ScraperAPI fetch a product page (5 credits, ~3-8s).
-   * Returns { product, thirdParty } or throws.
-   */
-  async _scraperFetchProduct(productId, url) {
-    try {
-      const data = await walmartProductLookup(productId, { retailerId: this.id });
-      if (!data) return { product: null, thirdParty: false };
-
-      const name = data.product_name || data.name || data.title;
-      if (!name) return { product: null, thirdParty: false };
-
-      // Check seller — only accept Walmart's own offers
-      const dataSeller = (data.seller || data.sold_by || '').toLowerCase();
-      if (dataSeller && !dataSeller.includes('walmart')) {
-        logger.info(`Walmart: WATCHLIST ${productId} — third-party: "${data.seller || data.sold_by}" (scraper)`);
-        return { product: null, thirdParty: true };
-      }
-
-      if (data.offers && Array.isArray(data.offers)) {
-        const hasWalmartOffer = data.offers.some(o => {
-          const s = (o.seller?.name || o.seller || o.sold_by || '').toString().toLowerCase();
-          return !s || s.includes('walmart');
-        });
-        if (!hasWalmartOffer) {
-          return { product: null, thirdParty: true };
-        }
-      }
-
-      let price = null;
-      if (data.offers && Array.isArray(data.offers)) {
-        for (const offer of data.offers) {
-          const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
-          if (!s || s.includes('walmart')) {
-            price = typeof offer.price === 'number' ? offer.price :
-              normalizePrice(offer.price_string || offer.price);
-            break;
-          }
-        }
-      }
-      if (price == null) {
-        price = typeof data.price === 'number' ? data.price :
-          normalizePrice(data.price_string || data.price || data.product_price);
-      }
-
-      let inStock = null;
-      if (data.offers && Array.isArray(data.offers)) {
-        for (const offer of data.offers) {
-          const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
-          if (s && !s.includes('walmart')) continue;
-          const avail = (offer.availability || '').toLowerCase();
-          if (avail.includes('instock') || avail.includes('in stock') || avail.includes('in_stock')) {
-            inStock = true;
-            break;
-          }
-          if (avail.includes('outofstock') || avail.includes('out of stock')) {
-            inStock = false;
-          }
-        }
-      } else {
-        const avail = (data.availability || data.stock_status || '').toLowerCase();
-        if (avail.includes('instock') || avail.includes('in stock')) inStock = true;
-        else if (avail.includes('outofstock') || avail.includes('out of stock')) inStock = false;
-      }
-
-      if (inStock === null) {
-        const old = await state.getProduct(this.id, String(productId));
-        inStock = old ? old.inStock : false;
-      }
-
-      const image = data.image || data.product_image || data.thumbnail || '';
-      const productUrl = data.url || data.product_url || url;
-
-      const product = this.classify({
-        sku: String(productId),
-        name,
-        price: price || 0,
-        currency: 'CAD',
-        url: productUrl,
-        image,
-        inStock,
-        canAddToCart: inStock,
-        shipsToHome: true,
-      });
-
-      if (data.offers && Array.isArray(data.offers)) {
-        for (const offer of data.offers) {
-          const s = (offer.seller?.name || offer.seller || offer.sold_by || '').toString().toLowerCase();
-          if ((!s || s.includes('walmart')) && offer.offerId) {
-            product._offerId = offer.offerId;
-            break;
-          }
-        }
-      }
-      if (!product._offerId && data.offerId) {
-        product._offerId = data.offerId;
-      }
-
-      return { product, thirdParty: false };
-    } catch {
       return { product: null, thirdParty: false };
     }
   }

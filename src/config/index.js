@@ -25,6 +25,7 @@ module.exports = {
     paidChannelId: process.env.PAID_CHANNEL_ID,
     freeChannelId: process.env.FREE_CHANNEL_ID,
     adminChannelId: process.env.ADMIN_CHANNEL_ID,
+    paidWebhookUrl: process.env.PAID_WEBHOOK_URL,
     paidRoleId: process.env.PAID_ROLE_ID,
     adminUserId: process.env.ADMIN_USER_ID,
   },
