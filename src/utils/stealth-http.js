@@ -39,76 +39,6 @@ async function getImpitInstance(proxyUrl, ignoreTlsErrors = false) {
  * Uses impit (Apify) which spoofs JA3/JA4 fingerprints via Rust/BoringSSL
  * to match real Chrome. Bypasses Imperva Incapsula, Akamai, Cloudflare.
  */
-// Cookie jar: proxyUrl -> cookie string (from Set-Cookie headers)
-// Used to carry cookies between requests on the same proxy session
-const cookieJar = new Map();
-
-/**
- * Warmup: visit a URL with impit and store Set-Cookie headers in the cookie jar.
- * Returns the parsed cookie string (for logging/diagnostics).
- */
-async function stealthWarmup(url, opts = {}) {
-  const { proxyUrl = null, timeoutMs = 15000 } = opts;
-
-  try {
-    const impit = await getImpitInstance(proxyUrl);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    const response = await impit.fetch(url, {
-      headers: {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1',
-      },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    // Extract Set-Cookie headers
-    const setCookies = response.headers.getSetCookie?.() || [];
-    if (setCookies.length > 0) {
-      // Parse cookie names and values (ignore attributes like Path, Domain, etc.)
-      const cookies = setCookies.map(sc => sc.split(';')[0].trim()).filter(Boolean);
-      const jarKey = proxyUrl || '__direct__';
-      const existing = cookieJar.get(jarKey) || '';
-      const merged = existing ? `${existing}; ${cookies.join('; ')}` : cookies.join('; ');
-      cookieJar.set(jarKey, merged);
-
-      const names = cookies.map(c => c.split('=')[0]).join(', ');
-      logger.info(`Stealth warmup: ${url} — got ${cookies.length} cookies: ${names}`);
-      return merged;
-    }
-
-    logger.info(`Stealth warmup: ${url} — no Set-Cookie headers (status: ${response.status})`);
-    // Consume the body to avoid connection leaks
-    await response.text().catch(() => {});
-    return null;
-  } catch (err) {
-    logger.warn(`Stealth warmup failed: ${url} — ${err.message}`);
-    return null;
-  }
-}
-
-/**
- * Get stored cookies from warmup for a proxy session.
- */
-function getWarmupCookies(proxyUrl) {
-  return cookieJar.get(proxyUrl || '__direct__') || null;
-}
-
-/**
- * Clear warmup cookies for a proxy session.
- */
-function clearWarmupCookies(proxyUrl) {
-  cookieJar.delete(proxyUrl || '__direct__');
-}
 
 async function stealthGet(url, opts = {}) {
   const {
@@ -118,7 +48,6 @@ async function stealthGet(url, opts = {}) {
     timeoutMs = 20000,
     json = false,
     headers = {},
-    useCookieJar = false,
     ignoreTlsErrors = false,
     rawHeaders = false,
   } = opts;
@@ -131,7 +60,6 @@ async function stealthGet(url, opts = {}) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Build headers — optionally inject cookies from warmup jar.
       // rawHeaders skips the document-navigation defaults (XHR-style requests send their own set).
       const requestHeaders = rawHeaders ? { ...headers } : {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -146,10 +74,6 @@ async function stealthGet(url, opts = {}) {
         ...headers,
       };
 
-      if (useCookieJar && !requestHeaders.Cookie) {
-        const jarCookies = cookieJar.get(proxyUrl || '__direct__');
-        if (jarCookies) requestHeaders.Cookie = jarCookies;
-      }
 
       const response = await impit.fetch(url, {
         headers: requestHeaders,
@@ -202,4 +126,4 @@ function _clearCache(proxyUrl, ignoreTlsErrors = false) {
   impitCache.delete(instanceKey(proxyUrl, ignoreTlsErrors));
 }
 
-module.exports = { stealthGet, stealthWarmup, getWarmupCookies, clearWarmupCookies, _clearCache };
+module.exports = { stealthGet, _clearCache };

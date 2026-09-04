@@ -49,6 +49,9 @@ const mockModules = {
     cacheOfferListingId: async () => {},
     getSellerCache: async () => null,
     cacheSellerInfo: async () => {},
+    // Category filter (delivery.js:259-267) — no per-store override, every category active
+    getStoreCategories: async () => null,
+    getActiveCategories: async () => ['pokemon', 'onepiece', 'dragonball', 'naruto', 'lorcana', 'yugioh', 'mtg'],
   },
   '../utils/browser': {
     scrapeAmazonOfferListingId: async () => ({ olid: null, seller: null }),

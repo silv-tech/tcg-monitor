@@ -195,10 +195,6 @@ function checkBudget() {
   }
 }
 
-function getCreditUsage() {
-  return { ...creditUsage };
-}
-
 function getBudgetStatus() {
   const pct = creditUsage.total / MONTHLY_BUDGET;
   return {
@@ -208,16 +204,6 @@ function getBudgetStatus() {
     warned: budgetWarned,
     paused: budgetPaused,
   };
-}
-
-function resetBudget() {
-  creditUsage.total = 0;
-  creditUsage.byRetailer = {};
-  creditUsage.sessionStart = Date.now();
-  budgetPaused = false;
-  budgetWarned = false;
-  persistBudget();
-  logger.info('ScraperAPI budget counters reset');
 }
 
 /**
@@ -286,69 +272,6 @@ async function amazonSearch(query, opts = {}) {
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') throw new Error(`ScraperAPI Amazon search: timeout for "${query}"`);
-    throw err;
-  }
-}
-
-/**
- * Search Walmart via ScraperAPI structured endpoint.
- * @param {string} query - Search query (e.g., "pokemon tcg")
- * @param {object} opts
- * @param {string} opts.tld - Walmart TLD (default: 'ca' for walmart.ca)
- * @param {string} opts.retailerId - For credit tracking and rate limiting
- * @returns {object|null} Parsed JSON response, or null if rate-limited
- */
-async function walmartSearch(query, opts = {}) {
-  if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
-  await restoreBudget();
-  if (budgetPaused) return null;
-
-  const { retailerId = 'walmart' } = opts;
-
-  // Rate limit
-  const now = Date.now();
-  const lastCall = lastCallByRetailer.get(`${retailerId}:${query}`) || 0;
-  if (now - lastCall < MIN_INTERVAL_MS) {
-    logger.debug(`ScraperAPI: rate-limited Walmart search "${query}" for ${retailerId}`);
-    return null;
-  }
-  lastCallByRetailer.set(`${retailerId}:${query}`, now);
-
-  // Use autoparse with full walmart.ca URL — structured endpoint doesn't support
-  // Canada geo on the Hobby plan, but autoparse with the .ca URL works fine
-  const targetUrl = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
-  const params = new URLSearchParams({
-    api_key: SCRAPER_API_KEY,
-    url: targetUrl,
-    autoparse: 'true',
-  });
-
-  const apiUrl = `${SCRAPER_API_BASE}?${params}`;
-  const cost = 5; // E-commerce domains cost 5 credits
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
-
-  try {
-    const response = await fetch(apiUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      throw new Error(`ScraperAPI Walmart search: HTTP ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-
-    creditUsage.total += cost;
-    creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
-    checkBudget();
-    persistBudget();
-    logger.info(`ScraperAPI: Walmart search OK "${query}" (${cost} credits, session total: ${creditUsage.total})`);
-
-    return data;
-  } catch (err) {
-    clearTimeout(timeout);
-    if (err.name === 'AbortError') throw new Error(`ScraperAPI Walmart search: timeout for "${query}"`);
     throw err;
   }
 }
@@ -459,84 +382,8 @@ async function fetchAmazonOlidAndSeller(asin) {
   }
 }
 
-/**
- * Look up a single Walmart product by ID via ScraperAPI structured endpoint.
- * Used for watchlist / early SKU detection — polls individual product pages.
- * 5 credits per request. Rate-limited to 1 call per 30s per SKU.
- *
- * @param {string} productId - Walmart product/SKU ID (e.g., "6000208831664")
- * @param {object} opts
- * @param {string} opts.tld - Walmart TLD (default: 'ca')
- * @param {string} opts.retailerId - For credit tracking
- * @returns {object|null} Parsed product JSON, or null if rate-limited/not found
- */
-const WATCHLIST_INTERVAL_MS = 10 * 1000; // 10s between lookups per SKU (fallback only — stealth handles most)
-async function walmartProductLookup(productId, opts = {}) {
-  if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
-  await restoreBudget();
-  if (budgetPaused) return null;
-
-  const { retailerId = 'walmart' } = opts;
-
-  // Rate limit per SKU — 30s cooldown for watchlist items
-  const rateKey = `${retailerId}:product:${productId}`;
-  const now = Date.now();
-  const lastCall = lastCallByRetailer.get(rateKey) || 0;
-  if (now - lastCall < WATCHLIST_INTERVAL_MS) {
-    return null; // silently skip — scheduler retries every 5s
-  }
-  lastCallByRetailer.set(rateKey, now);
-
-  // Use autoparse with full product URL — handles Canada properly
-  const targetUrl = `https://www.walmart.ca/ip/${productId}`;
-  const params = new URLSearchParams({
-    api_key: SCRAPER_API_KEY,
-    url: targetUrl,
-    autoparse: 'true',
-  });
-
-  const apiUrl = `${SCRAPER_API_BASE}?${params}`;
-  const cost = 5;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
-
-  try {
-    const response = await fetch(apiUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    // 404 = product page doesn't exist yet — expected for early SKU detection
-    if (response.status === 404) {
-      creditUsage.total += cost;
-      creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
-      checkBudget();
-      persistBudget();
-      logger.debug(`ScraperAPI: Walmart product ${productId} not found (404) — not live yet`);
-      return null;
-    }
-
-    if (!response.ok) {
-      throw new Error(`ScraperAPI Walmart product: HTTP ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-
-    creditUsage.total += cost;
-    creditUsage.byRetailer[retailerId] = (creditUsage.byRetailer[retailerId] || 0) + cost;
-    checkBudget();
-    persistBudget();
-    logger.info(`ScraperAPI: Walmart product ${productId} OK (${cost} credits, session total: ${creditUsage.total})`);
-
-    return data;
-  } catch (err) {
-    clearTimeout(timeout);
-    if (err.name === 'AbortError') throw new Error(`ScraperAPI Walmart product: timeout for ${productId}`);
-    throw err;
-  }
-}
-
 function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, amazonSearch, walmartSearch, walmartProductLookup, fetchAmazonOlidAndSeller, getCreditUsage, getBudgetStatus, resetBudget, isConfigured };
+module.exports = { scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, getBudgetStatus, isConfigured };
