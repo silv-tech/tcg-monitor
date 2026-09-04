@@ -231,7 +231,13 @@ router.get('/stats/proxy', (req, res) => {
 });
 
 // ScraperAPI budget status (#2)
-router.get('/stats/budget', (req, res) => {
+router.get('/stats/budget', async (req, res) => {
+  // The counter restores from Redis lazily, on the first paid call. Without nudging it here
+  // this endpoint reported 0 used whenever nothing had needed ScraperAPI since the last
+  // restart — which reads as "full budget available" when 15,520 credits were in fact spent.
+  // The spend guard itself was never affected; it restores before deciding. This is about the
+  // number a human looks at.
+  try { await require('../utils/scraper-api').restoreBudget(); } catch { /* report what we have */ }
   res.json(getBudgetStatus());
 });
 

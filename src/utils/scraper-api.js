@@ -391,4 +391,4 @@ function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, getBudgetStatus, isConfigured };
+module.exports = { scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, getBudgetStatus, restoreBudget, isConfigured };
