@@ -36,6 +36,7 @@ class BestBuyAdapter extends BaseAdapter {
     this.watchlist = new Set(config.watchlist || []);
     this._knownProducts = new Map(); // sku → classified product
     this._lastDiscoveryAt = 0;
+    this._discoveryInFlight = false; // discovery runs off the poll path; never overlap it
     this._deriveTiming();
   }
 
@@ -49,9 +50,18 @@ class BestBuyAdapter extends BaseAdapter {
     const needsDiscovery = now - this._lastDiscoveryAt >= this.discoveryIntervalMs
       || this._knownProducts.size === 0;
 
-    if (needsDiscovery) {
-      await this._runDiscovery();
+    // Discovery answers in well under a second from a residential IP but takes ~10s from
+    // Railway's datacenter range, and it used to run inline — so every poll paid that 10s even
+    // though the availability check beside it takes ~400ms. It now runs in the background:
+    // the poll returns at availability speed while discovery refreshes the SKU set behind it.
+    // The very first pass still awaits, because there is nothing to check stock on yet.
+    if (needsDiscovery && !this._discoveryInFlight) {
+      this._discoveryInFlight = true;
       this._lastDiscoveryAt = now;
+      const discovery = this._runDiscovery()
+        .catch((err) => logger.warn(`Best Buy: discovery failed: ${err.message}`))
+        .finally(() => { this._discoveryInFlight = false; });
+      if (this._knownProducts.size === 0) await discovery;
     }
 
     // Every poll: re-check stock on everything we know about. One batched call per
@@ -63,9 +73,6 @@ class BestBuyAdapter extends BaseAdapter {
     const updated = await this._checkAvailability(skus, products);
     this.reportFreshness(updated, skus.length);
 
-    if (needsDiscovery) {
-      logger.info(`Best Buy: DISCOVERY — ${this._knownProducts.size} known SKUs. Next in ${Math.round(this.discoveryIntervalMs / 60000)}min.`);
-    }
     return products;
   }
 
@@ -121,6 +128,8 @@ class BestBuyAdapter extends BaseAdapter {
         found++;
       }
     });
+
+    logger.info(`Best Buy: discovery — ${this._knownProducts.size} known SKUs (${found} matched this pass)`);
 
     // Keep watchlisted SKUs alive even when no search query surfaces them
     for (const sku of this.watchlist) {
