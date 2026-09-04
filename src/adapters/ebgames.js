@@ -121,6 +121,8 @@ class EBGamesAdapter extends BaseAdapter {
     if (this._knownProducts.size === 0) {
       // First run seeds the whole catalog synchronously — otherwise the deep crawl's
       // products would land later and diff as hundreds of NEW_SKU events.
+      // If the scheduler timed out a still-running first crawl, don't start a second one.
+      if (this._deepCrawlRunning) return {};
       await this._deepCrawl();
     } else {
       if (!this._deepCrawlRunning && Date.now() - this._lastDeepCrawlAt >= DEEP_CRAWL_INTERVAL) {
