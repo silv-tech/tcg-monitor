@@ -422,16 +422,23 @@ class WalmartAdapter extends BaseAdapter {
   async _stealthSearch(query) {
     const url = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
     const proxyUrl = getProxyUrl('residential');
+    // One lane per query. The queries run in parallel, and on a single shared connection the
+    // residential pool gives them all the same exit IP — measured: 4 requests, 1 IP. That
+    // arrives at PerimeterX as a 4-request burst from one address every cycle, which is what
+    // drove stealth success from 86% down to ~50%. A lane per query means 4 separate
+    // connections and 4 different IPs, so each address sees a quarter of the rate.
+    const lane = `q:${query}`;
 
     try {
       const html = await stealthGet(url, {
         proxyUrl,
+        lane,
         maxRetries: 1,
         timeoutMs: 8000,
       });
 
       if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
-        if (proxyUrl) _clearCache(proxyUrl);
+        if (proxyUrl) _clearCache(proxyUrl, false, lane);
         return null;
       }
 
@@ -584,7 +591,11 @@ class WalmartAdapter extends BaseAdapter {
   _retryInBackground(failedQueries) {
     setImmediate(async () => {
       try {
-        _clearCache(getProxyUrl('residential'));
+        // Drop each failed query's own lane so its retry opens a fresh connection, and so a
+        // fresh exit IP. Clearing the unlaned key would leave the blocked lanes in place.
+        for (const query of failedQueries) {
+          _clearCache(getProxyUrl('residential'), false, `q:${query}`);
+        }
         const retryResults = await Promise.allSettled(
           failedQueries.map(query =>
             this._stealthSearch(query).then(items => ({ query, items }))

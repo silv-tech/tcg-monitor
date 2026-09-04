@@ -14,12 +14,17 @@ async function getImpit() {
 // Cache Impit instances per proxy URL to reuse connections
 const impitCache = new Map();
 
-function instanceKey(proxyUrl, ignoreTlsErrors) {
-  return `${proxyUrl || '__direct__'}${ignoreTlsErrors ? '|itls' : ''}`;
+// `lane` splits one proxy URL across several cached impit instances. Each instance keeps its
+// own connection, and the residential pool hands out a different exit IP per connection —
+// measured: 4 requests through one shared instance all came from 184.65.189.19, while 4
+// separate instances came from 4 distinct IPs. Walmart fires its search queries in parallel,
+// so without lanes they arrive at PerimeterX as a burst from a single address.
+function instanceKey(proxyUrl, ignoreTlsErrors, lane) {
+  return `${proxyUrl || '__direct__'}${ignoreTlsErrors ? '|itls' : ''}${lane ? `|lane:${lane}` : ''}`;
 }
 
-async function getImpitInstance(proxyUrl, ignoreTlsErrors = false) {
-  const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
+async function getImpitInstance(proxyUrl, ignoreTlsErrors = false, lane = null) {
+  const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors, lane);
   if (impitCache.has(cacheKey)) return impitCache.get(cacheKey);
 
   const Impit = await getImpit();
@@ -58,12 +63,14 @@ async function stealthGet(url, opts = {}) {
     // Return {status, headers, body} instead of just the body — needed for conditional
     // requests, where a 304 carries no body and the status is the whole answer.
     withResponse = false,
+    // Spreads parallel requests across separate connections, and therefore separate exit IPs.
+    lane = null,
   } = opts;
-  const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
+  const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors, lane);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const impit = await getImpitInstance(proxyUrl, ignoreTlsErrors);
+      const impit = await getImpitInstance(proxyUrl, ignoreTlsErrors, lane);
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -142,8 +149,8 @@ async function stealthGet(url, opts = {}) {
 /**
  * Clear a cached impit instance — forces a new connection (and new IP with rotating proxies).
  */
-function _clearCache(proxyUrl, ignoreTlsErrors = false) {
-  impitCache.delete(instanceKey(proxyUrl, ignoreTlsErrors));
+function _clearCache(proxyUrl, ignoreTlsErrors = false, lane = null) {
+  impitCache.delete(instanceKey(proxyUrl, ignoreTlsErrors, lane));
 }
 
 module.exports = { stealthGet, _clearCache };
