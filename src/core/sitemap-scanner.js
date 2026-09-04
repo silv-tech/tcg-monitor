@@ -245,7 +245,10 @@ async function scanWalmart() {
         category: 'pokemon', isTCG: true, _earlyDetection: true,
       },
       detail: 'New product found in Walmart sitemap before search indexing',
-      _detectedAt: Date.now(),
+      // Timed from the start of the scan, not from event construction. The sitemap download
+      // and diff are the work that finds the product, so stamping afterwards reported a
+      // fraction of a second for something that genuinely took seconds.
+      _detectedAt: start,
     };
   });
 }
@@ -315,7 +318,9 @@ async function scanPokemonCenter() {
         category: 'pokemon', isTCG: true, _earlyDetection: true,
       },
       detail: 'New product found in Pokemon Center sitemap',
-      _detectedAt: Date.now(),
+      // See the Walmart scanner above — timed from the start of the scan, since the 24.6MB
+      // sitemap download and diff are what actually find the listing.
+      _detectedAt: start,
     };
   });
 }
