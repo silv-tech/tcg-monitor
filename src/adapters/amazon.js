@@ -52,13 +52,30 @@ class AmazonAdapter extends BaseAdapter {
     const proxyUrl = getProxyUrl('residential');
 
     try {
+      // Plain navigation headers only: with stealthGet's default `Cache-Control: no-cache` (a hard-reload
+      // signal) Amazon answers with a 3.7KB "continue shopping" interstitial instead of the product page
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 12000,
+        rawHeaders: true,
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
+        },
       });
 
       if (!html || html.length < 2000) return null;
+      if (html.includes('Click the button below to continue shopping')) {
+        if (proxyUrl) _clearCache(proxyUrl);
+        return null;
+      }
 
       // Bot detection / CAPTCHA pages
       if (html.includes('Robot Check') || html.includes('captcha') ||
