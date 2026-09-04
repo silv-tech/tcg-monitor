@@ -1,6 +1,8 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { searchQueries: SEARCH_QUERIES } = require('../config/products.json');
+const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
+const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
+const { isTCGProduct } = require('../utils/helpers');
 
 // Best Buy's search API is the slow part — 7 queries take ~10s wall even fired in
 // parallel — while the availability API answers for 10 SKUs in one fast call. So the
@@ -23,7 +25,11 @@ class BestBuyAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.searchQueries = config.searchQueries || SEARCH_QUERIES;
-    this.pageSize = 48;
+    // Their API caps a page at 100 (asking for 200 still returns 100). Raising 48 -> 100
+    // is free depth. Going past page 1 is NOT: relevance collapses and page 2+ returns
+    // Monopoly, LEGO and jigsaw puzzles, which only pad the set we check every poll.
+    this.pageSize = 100;
+    this.discoveryPages = config.discoveryPages || 1;
     this.watchlist = new Set(config.watchlist || []);
     this._knownProducts = new Map(); // sku → classified product
     this._lastDiscoveryAt = 0;
@@ -60,17 +66,27 @@ class BestBuyAdapter extends BaseAdapter {
     return products;
   }
 
-  /** Slow path: search for SKUs we have not seen before. */
+  /**
+   * Slow path: search for SKUs we have not seen before.
+   * Paginated — page 2 of a query returned 45 products page 1 never showed, and this
+   * runs on the 5-minute discovery cadence rather than the 8s detection loop, so depth
+   * here costs nothing in alert latency.
+   */
   async _runDiscovery() {
-    const searches = await Promise.allSettled(this.searchQueries.map(query => {
-      const searchUrl = `${this.url}/api/v2/json/search?query=${encodeURIComponent(query)}&lang=en-CA&pageSize=${this.pageSize}`;
+    const jobs = [];
+    for (const query of this.searchQueries) {
+      for (let page = 1; page <= this.discoveryPages; page++) jobs.push({ query, page });
+    }
+
+    const searches = await Promise.allSettled(jobs.map(({ query, page }) => {
+      const searchUrl = `${this.url}/api/v2/json/search?query=${encodeURIComponent(query)}&lang=en-CA&pageSize=${this.pageSize}&page=${page}`;
       return this.fetch(searchUrl, { json: true, timeoutMs: 20000, maxRetries: 2 });
     }));
 
     let found = 0;
     searches.forEach((result, i) => {
       if (result.status === 'rejected') {
-        logger.warn(`Best Buy: search failed for "${this.searchQueries[i]}": ${result.reason.message}`);
+        logger.warn(`Best Buy: search failed for "${jobs[i].query}" page ${jobs[i].page}: ${result.reason.message}`);
         return;
       }
       for (const item of result.value.products || []) {
@@ -78,6 +94,9 @@ class BestBuyAdapter extends BaseAdapter {
         if (!item.isVisible) continue;
         // Sold by Best Buy only — the client does not want marketplace sellers
         if (item.isMarketplace) continue;
+        // Their search happily returns board games and puzzles for "pokemon tcg"; keeping
+        // those would waste an availability check on every poll forever
+        if (!isTCGProduct(item.name)) continue;
 
         const price = item.salePrice || item.regularPrice;
         this._knownProducts.set(item.sku, this.classify({

@@ -5,7 +5,8 @@ const { amazonSearch, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
-const { searchQueries: SEARCH_QUERIES } = require('../config/products.json');
+const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
+const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
 // Game names that we track — Amazon results MUST match one of these.
 // Scoped to Pokemon and One Piece to match every other adapter.
