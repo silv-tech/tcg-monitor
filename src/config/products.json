@@ -1,5 +1,12 @@
 {
   "_comment": "categories[] drives classifyCategory(), which the delivery filter checks against the active-category list. A product whose name matches nothing lands in 'other' and is never alerted — so set names must be listed here, not just the franchise name. Retailers routinely title a listing 'Scarlet & Violet—Prismatic Evolutions Elite Trainer Box' with no 'Pokemon' anywhere in it.",
+  "_searchQueriesComment": "The canonical search set. Every query-driven adapter (Walmart, Amazon, Best Buy) uses exactly this list so their coverage cannot drift apart. EB Games and Costco are structurally different — they browse categories and a sitemap rather than searching — but are scoped to the same two games.",
+  "searchQueries": [
+    "pokemon tcg",
+    "pokemon booster box",
+    "pokemon elite trainer box",
+    "one piece card game"
+  ],
   "keywords": [
     "pokemon", "pokemon tcg", "booster box", "elite trainer box", "etb",
     "booster bundle", "pokemon tin", "pokemon collection",

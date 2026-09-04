@@ -5,6 +5,7 @@ const { amazonSearch, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
+const { searchQueries: SEARCH_QUERIES } = require('../config/products.json');
 
 // Game names that we track — Amazon results MUST match one of these.
 // Scoped to Pokemon and One Piece to match every other adapter.
@@ -47,13 +48,8 @@ class AmazonAdapter extends BaseAdapter {
     this._lastFetchThrottled = false;
     this._deriveTiming();
 
-    // Consolidated queries — removed 5 redundant Pokemon queries
-    // "pokemon tcg sealed" covers ETBs, UPCs, bundles, preorders, collections
-    this.searchQueries = [
-      'pokemon tcg booster box',
-      'pokemon tcg sealed',
-      'one piece card game booster box',
-    ];
+    // Shared query set (src/config/products.json) — identical to Walmart and Best Buy
+    this.searchQueries = config.searchQueries || SEARCH_QUERIES;
   }
 
   _deriveTiming() {

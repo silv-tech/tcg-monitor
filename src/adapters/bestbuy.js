@@ -1,5 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
+const { searchQueries: SEARCH_QUERIES } = require('../config/products.json');
 
 // Best Buy's search API is the slow part — 7 queries take ~10s wall even fired in
 // parallel — while the availability API answers for 10 SKUs in one fast call. So the
@@ -21,14 +22,7 @@ const AVAIL_HEADERS = {
 class BestBuyAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
-    this.searchQueries = config.searchQueries || [
-      'pokemon booster box',
-      'pokemon elite trainer box',
-      'pokemon tcg',
-      'one piece tcg',
-      'dragon ball tcg',
-      'lorcana',
-    ];
+    this.searchQueries = config.searchQueries || SEARCH_QUERIES;
     this.pageSize = 48;
     this.watchlist = new Set(config.watchlist || []);
     this._knownProducts = new Map(); // sku → classified product

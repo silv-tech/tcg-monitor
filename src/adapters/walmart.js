@@ -6,6 +6,7 @@ const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const { hashSku } = require('../utils/helpers');
+const { searchQueries: SEARCH_QUERIES } = require('../config/products.json');
 
 // Persisted-query hash and platform version of the product page's DynamicItemById call.
 // Both rotate with walmart.ca deploys — override via env when the JSON leg starts logging rejections.
@@ -19,15 +20,10 @@ class WalmartAdapter extends BaseAdapter {
     super(config);
     this.domain = 'www.walmart.ca';
     this.watchlist = new Set(config.watchlist || []);
-    // Four broad queries, all run every cycle. Seven queries split into alternating
-    // groups meant each term was only searched every 16s; these four overlap enough to
-    // cover the same catalogue at the same request rate, so every term is seen every 8s.
-    this.searchQueries = config.searchQueries || [
-      'pokemon tcg',
-      'pokemon booster box',
-      'pokemon elite trainer box',
-      'one piece card game',
-    ];
+    // Shared query set (src/config/products.json) so Walmart, Amazon and Best Buy all
+    // search for exactly the same things. All four run every cycle: seven queries split
+    // into alternating groups meant each term was only searched every 16s.
+    this.searchQueries = config.searchQueries || SEARCH_QUERIES;
     this._groupIndex = 0;
     this._polling = false; // overlap guard
     this._walmartOfferIds = new Map(); // product id → Walmart's own offerId (learned from the pinned page)
