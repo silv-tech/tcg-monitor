@@ -236,6 +236,10 @@ router.get('/stats/budget', (req, res) => {
 });
 
 // Circuit breaker status
+router.get('/stats/autotune', (req, res) => {
+  res.json(require('../core/autotune').getState());
+});
+
 router.get('/stats/circuits', (req, res) => {
   res.json(scheduler.getCircuitStatus());
 });

@@ -5,6 +5,7 @@ const { recordPollLatency } = require('./proxy');
 
 const { recordProductCount } = require('../monitoring/health');
 const { pollAdapterOnce } = require('./poll-adapter');
+const autotune = require('./autotune');
 const { recordRestock, recordPrice } = require('./state');
 
 // Circuit breaker thresholds
@@ -102,6 +103,7 @@ class Scheduler {
       ? adapter.timingValue('pollTimeoutMs', defaultTimeout, 30000)
       : defaultTimeout;
 
+    const startedAt = Date.now();
     try {
       // Delegate to extracted poll module (#22)
       await pollAdapterOnce(adapter, circuit, this.onEvents, ADAPTER_TIMEOUT);
@@ -111,8 +113,10 @@ class Scheduler {
         this._closeCircuit(adapter);
       }
       circuit.errors = 0;
+      autotune.recordPoll(adapter.id, { ok: true, ms: Date.now() - startedAt });
     } catch (err) {
       recordPollLatency(adapter.id, 0);
+      autotune.recordPoll(adapter.id, { ok: false, ms: Date.now() - startedAt });
       await state.recordError(adapter.id, err);
 
       circuit.errors++;
@@ -251,6 +255,10 @@ class Scheduler {
 
       stagger += 3000;
     }
+
+    // Self-tuning cadence: watches real poll outcomes and moves each store's interval,
+    // speeding up while healthy and backing off the moment a retailer pushes back.
+    this._autotuneTimer = autotune.start(this);
 
     // Redis health watchdog (#3) — check every 30s, pause polls if Redis is down
     this._redisWatchdog = setInterval(async () => {
