@@ -204,6 +204,15 @@ function noteApplied(retailerId, from, to, opts = {}) {
  * @param {object} scheduler - needs .adapters (Map) and .updateAdapter(id, changes)
  */
 function start(scheduler) {
+  // Kill switch. Autotune is OFF unless AUTOTUNE=on, because once a set of intervals is known
+  // good there is no reason to keep probing — and a controller that keeps moving is a
+  // controller that can move the wrong way. It still RECORDS every poll while disabled, so
+  // /api/stats/autotune stays useful and turning it back on starts from real data rather than
+  // a cold window.
+  if (String(process.env.AUTOTUNE || 'off').toLowerCase() !== 'on') {
+    logger.info('Autotune: DISABLED (set AUTOTUNE=on to enable) — intervals are pinned, still recording poll health');
+    return null;
+  }
   const timer = setInterval(() => {
     for (const [id, adapter] of scheduler.adapters) {
       if (!adapter.enabled) continue;

@@ -1,5 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
+const { stealthGet } = require('../utils/stealth-http');
 
 // Shopify prices by the CALLER'S GEOGRAPHY. The app runs from Railway in Virginia, so these
 // Canadian stores were quoting USD while we labelled the result CAD — measured on live stores:
@@ -27,6 +28,10 @@ class ShopifyAdapter extends BaseAdapter {
     this.collections = config.collections || []; // e.g. ['pokemon', 'trading-cards', 'new-arrivals']
     this.searchKeywords = config.searchKeywords || [];
     this.pageLimit = config.pageLimit || 250; // Shopify max per page
+    // Conditional-request state, keyed by page URL. Both survive across polls: the ETag is what
+    // earns the 304, and the cached page is what lets us skip parsing when we get one.
+    this._etags = new Map();
+    this._pageCache = new Map();
   }
 
   async fetchProducts() {
@@ -53,13 +58,50 @@ class ShopifyAdapter extends BaseAdapter {
     return products;
   }
 
+  /**
+   * Fetch one catalogue page, but only pay for it when it has actually changed.
+   *
+   * Shopify serves an ETag on products.json and honours If-None-Match. These shops were
+   * pulling up to ten pages of up to 2MB on EVERY poll — hobbiesville alone is ~20MB a cycle —
+   * which is what let 31 shops starve the big six once autotune sped them all up. A 304 costs
+   * ~150ms and zero bytes, so an unchanged shop is now nearly free to check.
+   *
+   * @returns {{products: array, changed: boolean}}
+   */
+  async _fetchPage(url) {
+    const etag = this._etags.get(url);
+    const res = await stealthGet(url, {
+      withResponse: true,
+      rawHeaders: true,
+      timeoutMs: 15000,
+      maxRetries: 1,
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip, deflate, br',
+        ...CA_LOCALE_HEADERS,
+        ...(etag ? { 'If-None-Match': etag } : {}),
+      },
+    });
+
+    if (res.status === 304) {
+      // Unchanged — reuse what this page gave us last time, parse nothing, transfer nothing.
+      return { products: this._pageCache.get(url) || [], changed: false };
+    }
+    let data;
+    try { data = JSON.parse(res.body); } catch { return { products: [], changed: false }; }
+    const list = data.products || [];
+    if (res.headers.etag) this._etags.set(url, res.headers.etag);
+    this._pageCache.set(url, list);
+    return { products: list, changed: true };
+  }
+
   async fetchCollection(handle, products) {
     let page = 1;
     let hasMore = true;
 
     while (hasMore) {
       const url = `${this.url}/collections/${handle}/products.json?limit=${this.pageLimit}&page=${page}`;
-      const data = await this.fetch(url, { json: true, timeoutMs: 15000, headers: CA_LOCALE_HEADERS });
+      const data = { products: (await this._fetchPage(url)).products };
 
       if (!data.products || data.products.length === 0) {
         hasMore = false;
@@ -87,7 +129,7 @@ class ShopifyAdapter extends BaseAdapter {
 
     while (hasMore) {
       const url = `${this.url}/products.json?limit=${this.pageLimit}&page=${page}`;
-      const data = await this.fetch(url, { json: true, timeoutMs: 15000, headers: CA_LOCALE_HEADERS });
+      const data = { products: (await this._fetchPage(url)).products };
 
       if (!data.products || data.products.length === 0) {
         hasMore = false;
