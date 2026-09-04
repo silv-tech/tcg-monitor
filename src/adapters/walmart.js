@@ -51,15 +51,16 @@ class WalmartAdapter extends BaseAdapter {
 
     // The ~7KB JSON legs run every cycle; the ~330KB page legs (which can see Walmart's offer before
     // it wins the buy box) every third cycle, or until a first page parse exists to seed the JSON leg
+    // Proxy only. Direct is 0/5 against walmart.ca — PerimeterX answers every unproxied
+    // request with a 412 — so a direct leg cannot win, and the requests it wastes come
+    // straight out of the same PerimeterX budget the search sweep needs.
     this._cycle = (this._cycle || 0) + 1;
     const attempts = [
       this._fetchOfferJson(id, getProxyUrl('residential')).then(r => ({ ...r, via: 'json' })),
-      this._fetchOfferJson(id, null).then(r => ({ ...r, via: 'json-direct' })),
     ];
     if (!this._lastPageProduct.has(id) || this._cycle % 3 === 0) {
       attempts.push(
         this._stealthFetchProduct(url, id, getProxyUrl('residential')).then(r => this._notePageResult(id, { ...r, via: 'proxy' })),
-        this._stealthFetchProduct(url, id, null).then(r => this._notePageResult(id, { ...r, via: 'direct' })),
       );
     }
     const result = await this._raceParsed(attempts);
