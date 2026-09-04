@@ -166,9 +166,34 @@ async function getRestockHistory(retailerId, sku) {
 
 // ─── Cross-retailer price check (#8, #14) ───────────────────────
 // In-memory index rebuilt from Redis on each poll cycle — avoids SCAN on every alert
-const crossRetailerIndex = []; // [{ retailerId, sku, name, price, url, inStock, asin }]
+const crossRetailerIndex = []; // [{ retailerId, sku, name, tokens, price, url, asin }]
 let indexLastBuilt = 0;
-const INDEX_TTL = 60000; // Rebuild index every 60s max
+// Polls keep the index current via setRetailerIndex; the full Redis rebuild is only a safety net
+const INDEX_TTL = 15 * 60000;
+
+function indexEntry(retailerId, p) {
+  return {
+    retailerId,
+    sku: p.sku,
+    name: p.name || '',
+    tokens: tokenize(p.name || ''),
+    price: p.price,
+    url: p.url,
+    asin: retailerId === 'amazon' ? p.sku : null,
+  };
+}
+
+// Replace one retailer's entries straight from its latest poll — no Redis reads
+function setRetailerIndex(retailerId, products) {
+  const kept = crossRetailerIndex.filter(e => e.retailerId !== retailerId);
+  crossRetailerIndex.length = 0;
+  for (const e of kept) crossRetailerIndex.push(e);
+  for (const p of Object.values(products)) {
+    if (!p || !p.inStock || p.price == null || p.price <= 0) continue;
+    crossRetailerIndex.push(indexEntry(retailerId, p));
+  }
+  if (indexLastBuilt === 0) indexLastBuilt = Date.now();
+}
 
 function tokenize(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(t => t.length > 1);
@@ -203,20 +228,12 @@ async function rebuildCrossRetailerIndex() {
   const results = await pipeline.exec();
 
   crossRetailerIndex.length = 0;
-  const MAX_INDEX_SIZE = 2000;
+  const MAX_INDEX_SIZE = 20000;
   for (const [err, data] of results) {
     if (err || !data) continue;
     const p = safeParse(data);
     if (!p || !p.inStock || p.price == null || p.price <= 0) continue;
-    crossRetailerIndex.push({
-      retailerId: p.retailerId,
-      sku: p.sku,
-      name: p.name || '',
-      tokens: tokenize(p.name || ''),
-      price: p.price,
-      url: p.url,
-      asin: p.retailerId === 'amazon' ? p.sku : null,
-    });
+    crossRetailerIndex.push(indexEntry(p.retailerId, p));
     if (crossRetailerIndex.length >= MAX_INDEX_SIZE) break;
   }
   indexLastBuilt = now;
@@ -415,6 +432,7 @@ async function shutdown() {
 module.exports = {
   getRedis,
   startCrossRetailerIndexRefresh,
+  setRetailerIndex,
   getProduct,
   setProduct,
   deleteProduct,

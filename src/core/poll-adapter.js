@@ -92,6 +92,7 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
       pipeline.set(key, JSON.stringify(product), 'EX', 86400 * 7);
     }
     await pipeline.exec();
+    state.setRetailerIndex(adapter.id, newProducts);
   }
 
   // Clean up stale products (with partial-result safety)
