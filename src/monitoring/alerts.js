@@ -50,6 +50,8 @@ async function checkAndAlert(discordClient) {
         if (r.consecutiveErrors > 0) parts.push(`Errors: ${r.consecutiveErrors}`);
         if (r.stale) parts.push('⏰ STALE — no check in expected window');
         if (r.zeroProductPolls >= 3) parts.push(`⚠️ 0 products for ${r.zeroProductPolls} polls`);
+        if (r.servingStaleData) parts.push(`🧊 DETECTION DOWN — only cached data for ${r.zeroFreshPolls} polls`);
+        if (r.parserSuspect) parts.push(`🧩 PARSER SUSPECT — only ${Math.round((r.pricedRatio || 0) * 100)}% of products have a price`);
         if (r.lastError) parts.push(`Last error: ${r.lastError.message}\nat ${new Date(r.lastError.time).toISOString()}`);
         embed.addFields({
           name: r.name,
@@ -153,4 +155,24 @@ async function checkAndAlert(discordClient) {
   }
 }
 
-module.exports = { checkAndAlert };
+/**
+ * One-off admin notice, for conditions that surface between health sweeps —
+ * currently the alert limiter tripping on a retailer.
+ */
+async function sendAdminNotice(discordClient, { title, description, color = 0xff0000 }) {
+  if (!discordClient || !config.discord.adminChannelId) return;
+  const adminPing = config.discord.adminUserId ? `<@${config.discord.adminUserId}>` : '';
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setColor(color)
+    .setDescription(description)
+    .setTimestamp();
+  try {
+    const channel = await discordClient.channels.fetch(config.discord.adminChannelId);
+    await channel.send({ content: adminPing, embeds: [embed] });
+  } catch (err) {
+    logger.error(`Failed to send admin notice "${title}": ${err.message}`);
+  }
+}
+
+module.exports = { checkAndAlert, sendAdminNotice };

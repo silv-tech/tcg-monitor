@@ -292,6 +292,7 @@ class AmazonAdapter extends BaseAdapter {
       }
     }
 
+    this.reportFreshness(updated, checked);
     this._monitorSuccessRate = asins.length > 0 ? Math.round((updated / asins.length) * 100) : 0;
     logger.info(`Amazon: MONITOR — ${updated}/${checked} ASINs updated (free stealth). ${this._monitorSuccessRate}% success.`);
   }

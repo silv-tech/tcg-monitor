@@ -154,6 +154,8 @@ class PokemonCenterAdapter extends BaseAdapter {
       });
     }
 
+    this.reportFreshness(checked, batchSize);
+
     // Nothing new and nothing due: a quiet poll, not a failed one
     if (batchSize === 0) {
       this._consecutiveFailures = 0;

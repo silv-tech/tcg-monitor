@@ -147,6 +147,20 @@ async function main() {
     await delivery.deliver(events);
   });
 
+  // 4b. Tell the admin when a retailer's alert volume trips the limiter — a flood is
+  // usually a parser or cache-state bug, and it is the customer-visible kind.
+  {
+    const alertLimiter = require('./discord/alert-limiter');
+    const { sendAdminNotice } = require('./monitoring/alerts');
+    alertLimiter.setTripHandler((retailerId, reason) => {
+      const client = getClient();
+      sendAdminNotice(client, {
+        title: '🔇 Alert flood suppressed',
+        description: `**${retailerId}** exceeded its alert rate limit and is muted for 10 minutes.\n\n${reason}\n\nAlerts from other retailers are unaffected. This usually means a parser change or stale cached state — check the diff before unmuting.`,
+      }).catch(() => {});
+    });
+  }
+
   // 5. Start scheduler
   await scheduler.start();
   stateModule.startCrossRetailerIndexRefresh();

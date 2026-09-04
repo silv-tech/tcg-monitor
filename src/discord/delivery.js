@@ -3,6 +3,7 @@ const config = require('../config');
 const logger = require('../monitoring/logger');
 const { buildAlertEmbed } = require('./embeds');
 const { filterDuplicates, markSent } = require('./dedup');
+const alertLimiter = require('./alert-limiter');
 const { recordAlertLatency } = require('../core/proxy');
 const state = require('../core/state');
 const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, cacheSellerInfo } = state;
@@ -88,6 +89,15 @@ class DeliveryQueue {
           continue;
         }
       }
+      // Outbound volume cap — a bad diff must never become a flood in a customer's server
+      const verdict = alertLimiter.allow(event);
+      if (!verdict.allowed) {
+        if (verdict.suppressed === 1 || verdict.suppressed % 50 === 0) {
+          logger.warn(`Alert suppressed by limiter (${verdict.suppressed} so far): ${event.type} — ${event.product?.name || 'unknown'}`);
+        }
+        continue;
+      }
+
       if (event.product?._watchlist) {
         // Drop alerts never wait behind the queue — an Amazon enrichment can hold it for 30s
         this.routeEvent(event, Date.now())

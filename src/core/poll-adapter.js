@@ -2,7 +2,7 @@ const logger = require('../monitoring/logger');
 const state = require('./state');
 const { diffProducts, EVENT_TYPES } = require('./events');
 const { recordPollLatency } = require('./proxy');
-const { recordProductCount } = require('../monitoring/health');
+const { recordProductCount, recordFreshness, recordParseQuality } = require('../monitoring/health');
 const { hashSku } = require('../utils/helpers');
 
 /**
@@ -130,6 +130,16 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
     logger.debug(`${adapter.name}: 0 products (rate-limited), skipping health counter (${oldCount} cached)`);
   } else {
     recordProductCount(adapter.id, newCount);
+  }
+
+  // Parse-quality canary — catches a parser that still returns rows but with empty fields
+  recordParseQuality(adapter.id, newProducts);
+
+  // Detection health — adapters that can tell live data from cache report it here
+  if (adapter._lastFreshness) {
+    const { fresh, attempted } = adapter._lastFreshness;
+    recordFreshness(adapter.id, fresh, attempted);
+    adapter._lastFreshness = null;
   }
 
   return { success: true, productCount: newCount, eventCount, pollMs };

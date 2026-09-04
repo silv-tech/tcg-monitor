@@ -23,6 +23,7 @@ class BaseAdapter {
     this.enabled = retailerConfig.enabled;
     this.maxProducts = retailerConfig.maxProducts || 500; // Configurable cap (#17)
     this.timing = retailerConfig.timing || {}; // Per-store cadence overrides (retailers.json / Redis)
+    this._lastFreshness = null; // set via reportFreshness() by adapters that serve cached data
 
     // Circuit breaker: stop wasting proxy bandwidth after consecutive browser failures
     this._browserFailCount = 0;
@@ -37,6 +38,21 @@ class BaseAdapter {
    * Floors are enforced here rather than at the API so a value edited straight into
    * Redis still can't poll a retailer fast enough to get the proxy pool banned.
    */
+  /**
+   * Report how much of this poll was genuinely fresh data rather than cache.
+   *
+   * "Poll returned products" is not the same as "we learned anything". Pokemon Center
+   * happily reported 500 products for a whole day while every availability check failed,
+   * and Amazon reported success while serving an interstitial. Adapters that can tell the
+   * difference say so here, and health treats a run of zero-fresh polls as a failure.
+   *
+   * @param {number} fresh - items with data actually retrieved this poll
+   * @param {number} attempted - items we tried to retrieve; 0 means nothing was due (neutral)
+   */
+  reportFreshness(fresh, attempted) {
+    this._lastFreshness = { fresh, attempted };
+  }
+
   /** Merge new cadence values in and let the adapter re-derive — no redeploy needed. */
   applyTiming(timing) {
     this.timing = { ...this.timing, ...timing };

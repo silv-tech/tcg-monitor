@@ -20,6 +20,12 @@ function getStaleThreshold(retailer) {
 const zeroProductPolls = new Map(); // retailerId → consecutive count
 const ZERO_PRODUCT_THRESHOLD = 6;
 
+// Detection health: an adapter can return a full product list built entirely from cache
+// while every live check fails. Counting those polls as healthy is how Pokemon Center hid
+// a day of total failure behind "found 500 products".
+const zeroFreshPolls = new Map(); // retailerId → consecutive polls that fetched nothing live
+const ZERO_FRESH_THRESHOLD = 3;
+
 async function checkHealth() {
   // Merge base config with Redis overrides so enabled state is accurate
   const base = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
@@ -38,7 +44,12 @@ async function checkHealth() {
     const staleThreshold = getStaleThreshold(retailer);
     const isStale = lastCheck && (now - lastCheck) > staleThreshold;
     const zeroCount = zeroProductPolls.get(retailer.id) || 0;
-    const healthy = status.healthy && !isStale && zeroCount < ZERO_PRODUCT_THRESHOLD;
+    const staleDataCount = zeroFreshPolls.get(retailer.id) || 0;
+    const quality = parseQuality.get(retailer.id) || { emptyPolls: 0, lastRatio: null };
+    const healthy = status.healthy && !isStale
+      && zeroCount < ZERO_PRODUCT_THRESHOLD
+      && staleDataCount < ZERO_FRESH_THRESHOLD
+      && quality.emptyPolls < QUALITY_THRESHOLD;
 
     results.push({
       id: retailer.id,
@@ -49,6 +60,10 @@ async function checkHealth() {
       consecutiveErrors: status.errors,
       lastError: status.lastError,
       zeroProductPolls: zeroCount,
+      zeroFreshPolls: staleDataCount,
+      servingStaleData: staleDataCount >= ZERO_FRESH_THRESHOLD,
+      pricedRatio: quality.lastRatio,
+      parserSuspect: quality.emptyPolls >= QUALITY_THRESHOLD,
     });
   }
 
@@ -91,6 +106,76 @@ function recordProductCount(retailerId, count) {
   }
 }
 
+// Parse-quality canary. A broken parser rarely returns nothing — it returns the right
+// number of products with the fields emptied out (null prices, everything out of stock).
+// Product count alone cannot see that, so we watch the shape of the result instead.
+const parseQuality = new Map(); // retailerId → { emptyPolls, lastRatio }
+const MIN_SAMPLE = 10;          // below this a poll is too small to judge
+const PRICE_RATIO_FLOOR = 0.2;  // healthy adapters sit far above this
+const QUALITY_THRESHOLD = 3;    // consecutive bad polls before we call it broken
+
+/**
+ * @param {object} products - the poll's product map, post-cap
+ */
+function recordParseQuality(retailerId, products) {
+  const values = Object.values(products || {});
+  if (values.length < MIN_SAMPLE) return; // not enough to judge — stay silent
+
+  const withPrice = values.filter(p => p && typeof p.price === 'number' && p.price > 0).length;
+  const ratio = withPrice / values.length;
+  const entry = parseQuality.get(retailerId) || { emptyPolls: 0, lastRatio: null };
+  entry.lastRatio = parseFloat(ratio.toFixed(3));
+
+  if (ratio >= PRICE_RATIO_FLOOR) {
+    if (entry.emptyPolls >= QUALITY_THRESHOLD) {
+      logger.info(`ADAPTER HEALTH: ${retailerId} parse quality recovered (${withPrice}/${values.length} priced)`);
+    }
+    entry.emptyPolls = 0;
+  } else {
+    entry.emptyPolls++;
+    if (entry.emptyPolls === QUALITY_THRESHOLD) {
+      logger.error(`ADAPTER HEALTH: ${retailerId} returned ${values.length} products but only ${withPrice} had a price, ${entry.emptyPolls} polls running — parser is probably broken`);
+    }
+  }
+  parseQuality.set(retailerId, entry);
+}
+
+function getParseQuality() {
+  const out = {};
+  for (const [id, e] of parseQuality) {
+    if (e.emptyPolls > 0) out[id] = { badPolls: e.emptyPolls, pricedRatio: e.lastRatio };
+  }
+  return out;
+}
+
+/**
+ * Called after each poll by adapters that distinguish live data from cache.
+ * attempted === 0 means nothing was due this poll — neutral, not a failure.
+ */
+function recordFreshness(retailerId, fresh, attempted) {
+  if (!attempted || attempted <= 0) return;
+  if (fresh > 0) {
+    if ((zeroFreshPolls.get(retailerId) || 0) >= ZERO_FRESH_THRESHOLD) {
+      logger.info(`ADAPTER HEALTH: ${retailerId} is fetching live data again`);
+    }
+    zeroFreshPolls.set(retailerId, 0);
+    return;
+  }
+  const next = (zeroFreshPolls.get(retailerId) || 0) + 1;
+  zeroFreshPolls.set(retailerId, next);
+  if (next === ZERO_FRESH_THRESHOLD) {
+    logger.error(`ADAPTER HEALTH: ${retailerId} has served only cached data for ${next} consecutive polls (0/${attempted} live) — detection is DOWN even though polls succeed`);
+  }
+}
+
+function getZeroFreshPolls() {
+  const result = {};
+  for (const [id, count] of zeroFreshPolls) {
+    if (count > 0) result[id] = count;
+  }
+  return result;
+}
+
 function getZeroProductPolls() {
   const result = {};
   for (const [id, count] of zeroProductPolls) {
@@ -99,4 +184,9 @@ function getZeroProductPolls() {
   return result;
 }
 
-module.exports = { checkHealth, isSystemHealthy, checkRedisHealth, recordProductCount, getZeroProductPolls };
+module.exports = {
+  checkHealth, isSystemHealthy, checkRedisHealth,
+  recordProductCount, getZeroProductPolls,
+  recordFreshness, getZeroFreshPolls,
+  recordParseQuality, getParseQuality,
+};
