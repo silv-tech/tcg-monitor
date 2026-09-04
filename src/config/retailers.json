@@ -40,7 +40,7 @@
     "name": "Costco Canada",
     "url": "https://www.costco.ca",
     "adapter": "costco",
-    "intervalMs": 8000,
+    "intervalMs": 7000,
     "proxyTier": "isp",
     "enabled": true,
     "color": "#e31837",
@@ -49,7 +49,8 @@
       "2007494"
     ],
     "timing": {
-      "watchlistIntervalMs": 5000
+      "watchlistIntervalMs": 5000,
+      "discoveryIntervalMs": 1800000
     }
   },
   {

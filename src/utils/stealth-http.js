@@ -50,6 +50,11 @@ async function stealthGet(url, opts = {}) {
     headers = {},
     ignoreTlsErrors = false,
     rawHeaders = false,
+    // Some retailer APIs are POST-only (Costco's search gateway rejects GET). The Chrome TLS
+    // fingerprint matters just as much there, so they go through this path rather than plain
+    // node-fetch, which Costco's gateway simply hangs up on.
+    method = 'GET',
+    body = null,
   } = opts;
   const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors);
 
@@ -76,6 +81,8 @@ async function stealthGet(url, opts = {}) {
 
 
       const response = await impit.fetch(url, {
+        method,
+        ...(body != null ? { body } : {}),
         headers: requestHeaders,
         signal: controller.signal,
       });

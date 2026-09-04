@@ -1,4 +1,5 @@
 const BaseAdapter = require('./base');
+const crypto = require('crypto');
 const cheerio = require('cheerio');
 const logger = require('../monitoring/logger');
 const { normalizePrice, isTCGProduct } = require('../utils/helpers');
@@ -6,6 +7,8 @@ const { httpGet } = require('../utils/http');
 const { getNextIspProxy, recordRequest, markProxySuccess, markProxyBlocked } = require('../core/proxy');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const scraperApi = require('../utils/scraper-api');
+const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
+const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
 // Costco publishes two sitemap families. The plain `sitemap_*.xml` set has a Last-Modified of
 // June 2020 and still lists WCS-era `.product.<id>.html` URLs whose IDs now 404 — scanning it
@@ -17,12 +20,45 @@ const SITEMAP_INDEX = 'sitemap_lw_index.xml';
 // first. Everything else in the index is warehouses, categories and static pages.
 const PRODUCT_SITEMAP_RE = /sitemap_lw_(?:p|i)_(?:mod_)?\d+\.xml$/i;
 
-// Costco's search is token-gated (the GRS API 400s without a runtime bearer, and the public
-// Fusion typeahead key points at an empty collection), and its category and search pages are
-// fully client-rendered — zero products in the HTML. The sitemap is the only open discovery
-// channel, so it is polled on the normal cadence rather than every 6 hours.
-const DISCOVERY_INTERVAL_DEFAULT = 8 * 1000;
-const DISCOVERY_INTERVAL_FLOOR = 5 * 1000;
+// Costco's search backend, captured from what their own page sends. It is Google Retail Search
+// behind Apigee: one POST returns matching products AND a parallel inventoryResponse carrying
+// price and stock, in ~1.3s, from a plain HTTP client with no browser and no session.
+//
+// Getting here took capturing the real request — the gateway 400s on anything that is not
+// shaped exactly right, and four fields are easy to get wrong: visitorId is 32 hex chars with
+// NO dashes (a normal UUID is rejected), orderBy must be null rather than "", searchMode must
+// be "page", and deliveryLocations/pageCategories must both be present.
+const SEARCH_URL = 'https://gdx-api.costco.com/catalog/search/api/v1/search';
+const SEARCH_HEADERS = {
+  'accept': '*/*',
+  'accept-language': 'en-CA',
+  'content-type': 'application/json',
+  'origin': 'https://www.costco.ca',
+  'referer': 'https://www.costco.ca/',
+  'client-identifier': '168287ea-1201-45f6-9b45-5bbea49f8ee7',
+  'client_id': 'CABC',
+  'locale': 'en-CA',
+  'searchresultprovider': 'GRS',
+};
+// Greater Toronto fulfilment set, as the site sends for an Ontario visitor. These scope which
+// prices and availability come back; without them the gateway rejects the request.
+const DELIVERY_LOCATIONS = [
+  '1668-bd', '1316-wh', '559-dz', '559-wm', '792-wm', '894_0-cwt', '894_0-edi',
+  '894_0-membership', '894_0-mpt', '894_0-otw', '894_0-spc', '894_1-edi', '894_1-mpt',
+  '946-dz', '946-wm', '9894-wcs', '993-wm',
+];
+const WAREHOUSE_ID = '1316-wh';
+const SHIP_TO_POSTAL = 'M4V 2H7';
+const SHIP_TO_STATE = 'ON';
+// The site sends filterBy:["HIDE_OUT_OF_STOCK"]. We deliberately do NOT — an out-of-stock
+// listing is exactly what we want to see, because catching it before it goes live is the
+// whole point. Dropping the filter took "pokemon tcg" from 4 results to 9.
+const SEARCH_PAGE_SIZE = 24;
+
+// The sitemap is now only a safety net for products no query surfaces. Costco regenerates it
+// once nightly (~22:30 UTC), so it can never be the fast path — search is.
+const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
+const DISCOVERY_INTERVAL_FLOOR = 60 * 1000;
 const MAX_MISSES = 3;
 
 class CostcoAdapter extends BaseAdapter {
@@ -45,6 +81,7 @@ class CostcoAdapter extends BaseAdapter {
       'premium collection', 'ex box', 'ex boxes', 'card game',
       'one piece card', 'one piece tcg',
     ];
+    this.searchQueries = config.searchQueries || SEARCH_QUERIES;
     this.knownProductIds = new Set();
     this.lastSitemapScan = 0;
 
@@ -108,37 +145,116 @@ class CostcoAdapter extends BaseAdapter {
     }
   }
 
+  /** Build the exact request body Costco's own search page sends. */
+  _searchBody(query) {
+    return JSON.stringify({
+      // 32 hex chars, no dashes — a dashed UUID is rejected by the gateway.
+      visitorId: crypto.randomBytes(16).toString('hex'),
+      query,
+      pageSize: SEARCH_PAGE_SIZE,
+      offset: 0,
+      orderBy: null,
+      searchMode: 'page',
+      personalizationEnabled: true,
+      warehouseId: WAREHOUSE_ID,
+      shipToPostal: SHIP_TO_POSTAL,
+      shipToState: SHIP_TO_STATE,
+      deliveryLocations: DELIVERY_LOCATIONS,
+      filterBy: [],
+      pageCategories: [],
+    });
+  }
+
+  /** One search query -> classified products, with price and stock already attached. */
+  async _searchOnce(query) {
+    // Must go through impit: Costco's gateway hangs up on plain node-fetch, but answers a
+    // request carrying Chrome's TLS fingerprint in ~1.3s.
+    const raw = await this.stealthFetch(SEARCH_URL, {
+      method: 'POST',
+      body: this._searchBody(query),
+      headers: SEARCH_HEADERS,
+      rawHeaders: true,
+      timeoutMs: 15000,
+      maxRetries: 1,
+    });
+    const json = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+    const results = json?.searchResult?.results || [];
+    // Price and stock arrive alongside the results rather than inside them.
+    const inventory = new Map();
+    for (const inv of json?.inventoryResponse || []) inventory.set(String(inv.productId), inv);
+
+    const out = [];
+    for (const entry of results) {
+      const p = entry.product;
+      if (!p) continue;
+      const id = String(p.name || '').split('/products/').pop();
+      const title = p.title;
+      if (!id || !title) continue;
+      if (!this.tcgNameKeywords.some((kw) => title.toLowerCase().includes(kw))) continue;
+      if (!isTCGProduct(title)) continue;
+
+      const inv = inventory.get(id) || {};
+      const price = parseFloat(inv.deliveryPrice?.minPrice ?? inv.warehousePrice?.minPrice ?? 0) || 0;
+      const inStock = [inv.deliveryAvailability, inv.warehouseAvailability, inv.mdoAvailability]
+        .some((a) => typeof a === 'string' && a.toUpperCase() === 'IN_STOCK');
+      const attrs = p.attributes || {};
+
+      out.push(this.classify({
+        sku: id,
+        name: title,
+        price,
+        currency: 'CAD',
+        url: p.uri || `${this.url}/p/-/x/${id}`,
+        image: (attrs.primary_image?.text || [])[0] || (p.images || [])[0]?.uri || '',
+        inStock,
+        canAddToCart: inStock,
+        shipsToHome: true,
+        regularPrice: parseFloat(inv.originalPrice?.minPrice ?? price) || price,
+      }));
+    }
+    return out;
+  }
+
   async fetchProducts() {
     const products = {};
 
-    // Phase 1: discovery. Conditional GETs make this ~330ms and zero bytes when Costco has
-    // not regenerated its sitemaps, so it runs on the poll cadence instead of every 6 hours.
+    // Primary path: Costco's own search API, every poll. This is what makes a brand-new
+    // listing visible within one cycle instead of waiting for the nightly sitemap.
+    const searches = await Promise.allSettled(
+      this.searchQueries.map((q) => this._searchOnce(q)),
+    );
+    let okQueries = 0;
+    for (let i = 0; i < searches.length; i++) {
+      if (searches[i].status !== 'fulfilled') {
+        logger.warn(`Costco: search failed for "${this.searchQueries[i]}": ${searches[i].reason.message}`);
+        continue;
+      }
+      okQueries++;
+      for (const product of searches[i].value) products[product.sku] = product;
+    }
+    this.reportFreshness(okQueries, this.searchQueries.length);
+
+    // Safety net: the sitemap still catches anything no query surfaces, and watchlisted IDs
+    // still need their product page because search cannot see an item before it is listed.
     if (Date.now() - this.lastSitemapScan > this.discoveryIntervalMs) {
       await this.scanSitemaps();
       this.lastSitemapScan = Date.now();
     }
 
-    // Phase 2: Check each known product page (parallel batches of 5)
-    const ids = [...this.knownProductIds].filter(
-      (id) => this.watchlist.has(id) || (this._missCounts.get(id) || 0) < MAX_MISSES,
+    const pageIds = [...this.knownProductIds].filter(
+      (id) => !products[id]
+        && (this.watchlist.has(id) || (this._missCounts.get(id) || 0) < MAX_MISSES),
     );
     const BATCH_SIZE = 5;
-    let fresh = 0;
-    for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-      const batch = ids.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map(productId => this.fetchProductPage(productId))
-      );
-      for (let j = 0; j < results.length; j++) {
-        if (results[j].status === 'fulfilled' && results[j].value) {
-          products[results[j].value.sku] = results[j].value;
-          fresh++;
-        } else if (results[j].status === 'rejected') {
-          logger.debug(`Costco: failed to fetch product ${batch[j]}: ${results[j].reason.message}`);
-        }
-      }
+    for (let i = 0; i < pageIds.length; i += BATCH_SIZE) {
+      const batch = pageIds.slice(i, i + BATCH_SIZE);
+      const settled = await Promise.allSettled(batch.map((id) => this.fetchProductPage(id)));
+      settled.forEach((r, j) => {
+        if (r.status === 'fulfilled' && r.value) products[r.value.sku] = r.value;
+        else if (r.status === 'rejected') logger.debug(`Costco: product ${batch[j]} failed: ${r.reason.message}`);
+      });
     }
-    this.reportFreshness(fresh, ids.length);
 
     return products;
   }
@@ -193,12 +309,19 @@ class CostcoAdapter extends BaseAdapter {
         // what makes the current TCG catalogue visible at all.
         let url = raw.toLowerCase();
         try { url = decodeURIComponent(raw).toLowerCase(); } catch { /* keep raw on bad escapes */ }
-        if (this.tcgGameKeywords.some((kw) => url.includes(kw))) {
-          const newMatch = url.match(/\/(\d{5,})\/?(?:\?.*)?$/);
-          const oldMatch = url.match(/\.product\.(\d{5,})\.html/);
-          const id = newMatch?.[1] || oldMatch?.[1];
-          if (id) this.knownProductIds.add(id);
-        }
+        if (!this.tcgGameKeywords.some((kw) => url.includes(kw))) return;
+        // The slug carries the product name, so the TCG check can happen here rather than
+        // after a 2MB page fetch. Without this, Switch games, LEGO sets and Toniebox figures
+        // enter the known set and get re-fetched every poll forever — they return 200, so the
+        // 404 retirement counter never catches them.
+        const slugName = url.replace(/^https?:\/\/[^/]+/, '').replace(/\.product\.\d+\.html$/, '')
+          .replace(/\/\d{5,}\/?$/, '').split('/').pop().replace(/[-_+]/g, ' ');
+        if (!this.tcgNameKeywords.some((kw) => slugName.includes(kw))) return;
+
+        const newMatch = url.match(/\/(\d{5,})\/?(?:\?.*)?$/);
+        const oldMatch = url.match(/\.product\.(\d{5,})\.html/);
+        const id = newMatch?.[1] || oldMatch?.[1];
+        if (id) this.knownProductIds.add(id);
       });
     } catch (err) {
       logger.debug(`Costco: sub-sitemap scan failed for ${sitemapUrl}: ${err.message}`);
