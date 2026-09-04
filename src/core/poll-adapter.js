@@ -42,9 +42,13 @@ async function pollAdapterOnce(adapter, circuit, onEvents, adapterTimeout) {
     const events = diffProducts(oldProducts, newProducts);
 
     if (events.length > 0) {
-      const detectedAt = Date.now();
+      // Stamp the moment the poll STARTED, not the moment the diff finished. The diff runs
+      // after the fetch has already returned, so stamping here measured only diff -> embed
+      // (~0.1s) and advertised that as detection speed, while the fetch that actually found
+      // the change (~1.8s avg) was excluded entirely. The badge read 0.1s for something that
+      // really took seconds.
       for (const event of events) {
-        event._detectedAt = detectedAt;
+        event._detectedAt = pollStart;
       }
 
       // Early keyword detection — check new/restocked products against keyword list

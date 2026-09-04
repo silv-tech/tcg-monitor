@@ -146,6 +146,9 @@ class Scheduler {
     this.polling.add(watchlistKey);
     try {
       for (const productId of adapter.watchlist) {
+        // Timed from before the fetch, so the reported speed includes the request that
+        // actually found the change rather than just the bookkeeping after it.
+        const fetchStart = Date.now();
         const product = await adapter.fetchProductPage(productId);
         if (!product) continue; // 404, blocked, or parse failure
 
@@ -156,9 +159,8 @@ class Scheduler {
           // Already known — check for stock changes (RESTOCK, PRICE_CHANGE)
           const events = diffProducts({ [key]: oldProduct }, { [key]: product });
           if (events.length > 0) {
-            const detectedAt = Date.now();
             for (const event of events) {
-              event._detectedAt = detectedAt;
+              event._detectedAt = fetchStart;
             }
             // Record restock/price history for watchlist events
             for (const event of events) {
@@ -180,9 +182,8 @@ class Scheduler {
           // NEW product from watchlist — fire NEW_SKU event
           const events = diffProducts({}, { [key]: product });
           if (events.length > 0) {
-            const detectedAt = Date.now();
             for (const event of events) {
-              event._detectedAt = detectedAt;
+              event._detectedAt = fetchStart;
             }
             // Record price for new watchlist products
             for (const event of events) {
