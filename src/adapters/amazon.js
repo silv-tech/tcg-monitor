@@ -6,12 +6,10 @@ const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 
-// Game names that we track — Amazon results MUST match one of these
+// Game names that we track — Amazon results MUST match one of these.
+// Scoped to Pokemon and One Piece to match every other adapter.
 const GAME_NAMES = [
-  'pokemon', 'pokémon', 'one piece', 'dragon ball', 'lorcana',
-  'yugioh', 'yu-gi-oh', 'magic the gathering', 'digimon',
-  'naruto', 'star wars unlimited', 'flesh and blood', 'union arena',
-  'weiss schwarz', 'cardfight vanguard',
+  'pokemon', 'pokémon', 'one piece',
 ];
 
 // Accessories — never alert on these even if they mention a game name

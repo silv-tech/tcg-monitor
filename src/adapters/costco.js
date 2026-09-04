@@ -11,19 +11,17 @@ class CostcoAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     // Game-specific keywords (high confidence — any single match is enough)
+    // Scoped to the games the client tracks: Pokemon and One Piece
     this.tcgGameKeywords = [
       'pokemon', 'pokmon', 'pokémon', 'tcg',
       'trading-card', 'trading+card', 'trading%20card',
-      'lorcana', 'magic-the-gathering',
-      'yugioh', 'yu-gi-oh',
+      'one-piece', 'one+piece', 'one%20piece',
     ];
     // Product name validation — after parsing, product name must contain one of these
     this.tcgNameKeywords = [
       'pokemon', 'pokémon', 'tcg', 'trading card', 'booster box', 'booster pack',
       'booster tin', 'booster bundle', 'elite trainer', 'etb', 'collection box',
-      'one piece card', 'lorcana', 'magic: the gathering', 'magic the gathering',
-      'yu-gi-oh', 'yugioh', 'dragon ball card', 'commander kit', 'commander deck',
-      'naruto card', 'deck', 'starter kit',
+      'one piece card', 'one piece tcg',
     ];
     this.knownProductIds = new Set();
     this.lastSitemapScan = 0;

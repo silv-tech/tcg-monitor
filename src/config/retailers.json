@@ -96,13 +96,10 @@
     "enabled": true,
     "color": "#0046be",
     "searchQueries": [
+      "pokemon tcg",
       "pokemon booster box",
       "pokemon elite trainer box",
-      "pokemon tcg",
-      "one piece tcg",
-      "dragon ball tcg",
-      "lorcana tcg",
-      "yugioh booster box"
+      "one piece card game"
     ],
     "timing": {
       "discoveryIntervalMs": 300000
