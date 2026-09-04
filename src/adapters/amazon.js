@@ -4,6 +4,7 @@ const { normalizePrice, isTCGProduct, sleep } = require('../utils/helpers');
 const { amazonSearch, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
+const state = require('../core/state');
 
 // Game names that we track — Amazon results MUST match one of these
 const GAME_NAMES = [
@@ -22,6 +23,12 @@ const ACCESSORY_KEYWORDS = [
   'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box', 'token deck',
   'divider', 'accessories',
 ];
+
+function decodeEntities(str) {
+  return str
+    .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+}
 
 // How often to run the paid ScraperAPI search for NEW listings. This is the whole
 // ScraperAPI bill: 3 queries x 5 credits per run. It does NOT affect restock speed —
@@ -52,34 +59,37 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
-   * Stealth-fetch a single Amazon product page and parse for price/stock.
-   * Product pages have lighter bot detection than search pages.
+   * Check one ASIN through Amazon's All-Offers-Display AJAX endpoint.
+   *
+   * This is the same trick that fixed Walmart: the full /dp/ page is ~1.9 MB and is
+   * currently served as a 3.7 KB "continue shopping" interstitial anyway, while AOD
+   * returns ~30 KB of exactly what we need — title, price, seller, offer listing id —
+   * and is not gated. 15 ASINs every 2 minutes drops from ~20 GB/day to ~0.3 GB/day,
+   * and the offer id it hands back saves the 10-credit enrichment call per alert.
    */
   async _stealthCheckAsin(asin) {
-    const url = `https://www.amazon.ca/dp/${asin}`;
+    const url = `https://www.amazon.ca/gp/product/ajax/aodAjaxMain/?asin=${asin}&pc=dp`;
     const proxyUrl = getProxyUrl('residential');
 
     try {
-      // Plain navigation headers only: with stealthGet's default `Cache-Control: no-cache` (a hard-reload
-      // signal) Amazon answers with a 3.7KB "continue shopping" interstitial instead of the product page
       const html = await stealthGet(url, {
         proxyUrl,
         maxRetries: 1,
         timeoutMs: 12000,
         rawHeaders: true,
         headers: {
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept': 'text/html,*/*;q=0.8',
           'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
           'Accept-Encoding': 'gzip, deflate, br',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Upgrade-Insecure-Requests': '1',
+          'Referer': `https://www.amazon.ca/dp/${asin}`,
+          'Sec-Fetch-Dest': 'empty',
+          'Sec-Fetch-Mode': 'cors',
+          'Sec-Fetch-Site': 'same-origin',
+          'X-Requested-With': 'XMLHttpRequest',
         },
       });
 
-      if (!html || html.length < 2000) return null;
+      if (!html || html.length < 1000) return null;
       if (html.includes('Click the button below to continue shopping')) {
         if (proxyUrl) _clearCache(proxyUrl);
         return null;
@@ -92,7 +102,7 @@ class AmazonAdapter extends BaseAdapter {
         return null;
       }
 
-      return this._parseProductPage(html, asin);
+      return this._parseAod(html, asin);
     } catch {
       if (proxyUrl) _clearCache(proxyUrl);
       return null;
@@ -100,54 +110,43 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
-   * Parse Amazon product page HTML for title, price, stock status, image.
+   * Parse the AOD fragment. No offer block at all means nobody is selling it — that is
+   * a genuine out-of-stock, not a parse failure, so it returns a result rather than null.
    */
-  _parseProductPage(html, asin) {
-    // Title: <span id="productTitle">...</span>
-    let name = null;
-    const titleMatch = html.match(/id="productTitle"[^>]*>\s*([^<]+)/);
-    if (titleMatch) name = titleMatch[1].trim();
-    if (!name || name.length < 10) return null;
+  _parseAod(html, asin) {
+    const titleMatch = html.match(/id="aod-asin-title-text"[^>]*>\s*([^<]+?)\s*</);
+    const name = titleMatch ? decodeEntities(titleMatch[1].trim()) : null;
 
-    // Price — try multiple locations (Amazon uses different layouts)
+    // Buy-box offer id — doubles as the "is anything purchasable" signal
+    const olidMatch = html.match(/name="items\[0\.base\]\[offerListingId\]"\s*value="([^"]+)"/);
+    const olid = olidMatch ? decodeURIComponent(olidMatch[1]) : null;
+
     let price = null;
-    // 1. a-offscreen (most reliable — screen reader price, always present)
-    const offscreenMatch = html.match(/class="a-offscreen">\s*\$?([\d,]+\.\d{2})\s*</);
-    if (offscreenMatch) price = normalizePrice(offscreenMatch[1]);
-    // 2. a-price-whole + a-price-fraction
+    const apexPrice = html.match(/apex-pricetopay-accessibility-label"[^>]*>\s*\$?([\d,]+\.\d{2})/);
+    if (apexPrice) price = normalizePrice(apexPrice[1]);
     if (!price) {
-      const wholeMatch = html.match(/class="a-price-whole">\s*(\d[\d,]*)/);
-      const fracMatch = html.match(/class="a-price-fraction">(\d+)/);
-      if (wholeMatch) {
-        const whole = wholeMatch[1].replace(/,/g, '');
-        price = parseFloat(`${whole}.${fracMatch ? fracMatch[1] : '00'}`);
-      }
-    }
-    // 3. priceblock_ourprice (older layout)
-    if (!price) {
-      const blockMatch = html.match(/id="priceblock_ourprice"[^>]*>\s*\$?([\d,]+\.\d{2})/);
-      if (blockMatch) price = normalizePrice(blockMatch[1]);
+      const whole = html.match(/class="a-price-whole">\s*([\d,]+)/);
+      const frac = html.match(/class="a-price-fraction">(\d+)/);
+      if (whole) price = parseFloat(`${whole[1].replace(/,/g, '')}.${frac ? frac[1] : '00'}`);
     }
 
-    // Stock status — check for add-to-cart button and OOS indicators
-    const hasAddToCart = html.includes('id="add-to-cart-button"') ||
-                         html.includes('id="submit.add-to-cart"') ||
-                         html.includes('name="submit.add-to-cart"');
-    const isOOS = html.includes('Currently unavailable') ||
-                  html.includes('id="outOfStockBuyBox"') ||
-                  html.includes('not available for purchase');
-    const inStock = hasAddToCart && !isOOS;
-
-    // Image: <img id="landingImage" src="...">
-    let image = '';
-    const imgMatch = html.match(/id="landingImage"[^>]*src="([^"]+)"/);
-    if (imgMatch) image = imgMatch[1];
-    if (!image) {
-      const hiresMatch = html.match(/data-old-hires="([^"]+)"/);
-      if (hiresMatch) image = hiresMatch[1];
+    // "Sold by" is a label/value pair; the value is the next a-color-base span after it
+    let seller = null;
+    const soldByIdx = html.indexOf('aod-offer-soldBy');
+    if (soldByIdx !== -1) {
+      const block = html.slice(soldByIdx, soldByIdx + 900);
+      const linked = block.match(/<a[^>]*>\s*([^<]{2,60}?)\s*<\/a>/);
+      const plain = block.match(/a-color-base[^>]*>\s*([^<]{2,60}?)\s*</);
+      seller = decodeEntities((linked ? linked[1] : plain ? plain[1] : '').trim()) || null;
     }
 
-    return { asin, name, price, inStock, image };
+    const imgMatch = html.match(/id="aod-asin-image-id"[^>]*src="([^"]+)"/)
+      || html.match(/src="([^"]+)"[^>]*id="aod-asin-image-id"/);
+
+    const inStock = !!olid && price != null;
+    if (!name && !inStock) return null; // nothing parsed at all — treat as a failed fetch
+
+    return { asin, name, price, inStock, image: imgMatch ? imgMatch[1] : '', olid, seller };
   }
 
   async fetchProducts() {
@@ -175,7 +174,7 @@ class AmazonAdapter extends BaseAdapter {
 
       logger.info(`Amazon: DISCOVERY — ${Object.keys(products).length} products, ${this._knownProducts.size} known ASINs. Next in ${Math.round(this.discoveryIntervalMs / 60000)}min.`);
     } else {
-      // ── MONITOR ── Stealth-check known ASINs via /dp/ pages (FREE, every poll)
+      // ── MONITOR ── Check known ASINs via the AOD offer endpoint (FREE, every poll)
       await this._monitorKnownAsins(products);
     }
 
@@ -259,6 +258,14 @@ class AmazonAdapter extends BaseAdapter {
         if (data) {
           updated++;
           const cached = this._knownProducts.get(asin);
+
+          // AOD hands us the offer listing id and seller for free. Caching them here is
+          // what stops delivery.enrichEvent paying 10 ScraperAPI credits per alert.
+          if (data.olid || data.seller) {
+            state.cacheOfferListingId(asin, data.olid).catch(() => {});
+            if (data.seller) state.cacheSellerInfo(asin, data.seller).catch(() => {});
+          }
+
           // Keep cached identity (name, category, retailer) — update price + stock only
           const product = {
             ...cached,
