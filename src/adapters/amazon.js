@@ -1,7 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice, isTCGProduct, sleep } = require('../utils/helpers');
-const { amazonSearch, isConfigured } = require('../utils/scraper-api');
 const { getProxyUrl } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
@@ -47,6 +46,9 @@ class AmazonAdapter extends BaseAdapter {
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
     this._lastFetchThrottled = false;
+    this._searchWindow = [];         // rolling free-search success
+    this._searchSkip = 0;
+    this._lastAodSweepAt = 0;
     this._deriveTiming();
 
     // Shared query set (src/config/products.json) — identical to Walmart and Best Buy
@@ -55,6 +57,8 @@ class AmazonAdapter extends BaseAdapter {
 
   _deriveTiming() {
     this.discoveryIntervalMs = this.timingValue('discoveryIntervalMs', DISCOVERY_INTERVAL_DEFAULT, DISCOVERY_INTERVAL_FLOOR);
+    // The AOD offer sweep is throttled hard by Amazon, so it runs far less often than search
+    this.aodSweepIntervalMs = this.timingValue('aodSweepIntervalMs', 5 * 60 * 1000, 60 * 1000);
   }
 
   /**
@@ -156,32 +160,38 @@ class AmazonAdapter extends BaseAdapter {
     return { asin, name, price, inStock, image: imgMatch ? imgMatch[1] : '', olid, seller };
   }
 
+  /**
+   * Search runs every poll and is now the detection path: it is free, and it reports a
+   * brand-new listing the same cycle it appears rather than up to 30 minutes later.
+   * The AOD sweep only tops up offer ids and sellers, and only when Amazon is not
+   * throttling it — search alone is enough to fire a restock alert.
+   */
   async fetchProducts() {
     const products = {};
     const now = Date.now();
-    const timeSinceDiscovery = now - this._lastDiscoveryAt;
-    const needsDiscovery = timeSinceDiscovery >= this.discoveryIntervalMs || this._knownProducts.size === 0;
 
-    if (needsDiscovery) {
-      // ── DISCOVERY ── ScraperAPI search for new products (paid, every 10 min)
-      await this._runDiscovery(products);
-      this._lastDiscoveryAt = now;
+    // Amazon throttles by endpoint, as the AOD sweep found out the hard way. If search
+    // starts failing, slow down rather than hammering it into a deeper block.
+    const rate = this._searchSuccessRate();
+    if (rate !== null && rate < 0.5 && ++this._searchSkip % 2 !== 0) {
+      logger.warn(`Amazon: search backing off (${Math.round(rate * 100)}% success) — skipping cycle`);
+      for (const [asin, cached] of this._knownProducts) products[asin] = cached;
+      return products;
+    }
 
-      // Update known products cache
-      for (const [sku, product] of Object.entries(products)) {
-        this._knownProducts.set(sku, product);
+    await this._runDiscovery(products);
+
+    // Prune anything unseen for 24h so a delisted ASIN does not linger forever
+    for (const [asin, data] of this._knownProducts) {
+      if (!(asin in products) && (now - (data.lastSeen || 0)) > 24 * 60 * 60 * 1000) {
+        this._knownProducts.delete(asin);
       }
+    }
 
-      // Prune products not seen in 24h
-      for (const [asin, data] of this._knownProducts) {
-        if (!(asin in products) && (now - (data.lastSeen || 0)) > 24 * 60 * 60 * 1000) {
-          this._knownProducts.delete(asin);
-        }
-      }
-
-      logger.info(`Amazon: DISCOVERY — ${Object.keys(products).length} products, ${this._knownProducts.size} known ASINs. Next in ${Math.round(this.discoveryIntervalMs / 60000)}min.`);
-    } else {
-      // ── MONITOR ── Check known ASINs via the AOD offer endpoint (FREE, every poll)
+    // Back off the enrichment sweep while search is struggling — they share a pool
+    const searchRate = this._searchSuccessRate();
+    if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs && (searchRate ?? 1) >= 0.5) {
+      this._lastAodSweepAt = now;
       await this._monitorKnownAsins(products);
     }
 
@@ -189,51 +199,150 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
-   * Discovery: ScraperAPI search queries to find NEW products.
-   * 14 queries × 5 credits = 70 credits per discovery (every 10 min).
+   * Discovery: free search for new products and their current stock.
    */
   async _runDiscovery(products) {
-    if (!isConfigured()) {
-      logger.warn('Amazon: ScraperAPI not configured, returning cached products');
-      for (const [asin, data] of this._knownProducts) {
-        products[asin] = data;
-      }
-      return;
-    }
-
-    const scraperResults = await Promise.allSettled(
-      this.searchQueries.map(query =>
-        amazonSearch(query, { retailerId: this.id })
-          .then(data => ({ query, data }))
-      )
+    const results = await Promise.allSettled(
+      this.searchQueries.map(query => this._freeSearch(query).then(items => ({ query, items })))
     );
 
-    let queryCount = 0;
-    for (const result of scraperResults) {
-      if (result.status === 'rejected') {
-        logger.warn(`Amazon: discovery failed: ${result.reason.message}`);
-        continue;
+    let hits = 0;
+    let found = 0;
+    for (const result of results) {
+      if (result.status === 'rejected') continue;
+      const { items } = result.value;
+      if (!items || items.length === 0) continue;
+      hits++;
+      found += items.length;
+      for (const item of items) {
+        const product = this._buildFromSearch(item, result.value.query);
+        if (!product) continue;
+        products[product.sku] = product;
+        this._knownProducts.set(product.sku, product);
       }
-      const { query, data } = result.value;
-      if (!data) continue; // rate-limited
-
-      const results = data.results || data.organic_results || data.search_results ||
-        data.items || data.ads || [];
-      if (results.length === 0) continue;
-
-      queryCount++;
-      this._processSearchItems(results, products);
-      logger.info(`Amazon: "${query}" — ${results.length} results (discovery, 5 credits)`);
     }
 
-    // Also include previously known ASINs not in this discovery (may still be live)
+    // Carry forward anything this sweep did not surface — absence from a search page is
+    // not evidence of going out of stock
     for (const [asin, cached] of this._knownProducts) {
-      if (!(asin in products)) {
-        products[asin] = cached;
-      }
+      if (!(asin in products)) products[asin] = cached;
     }
 
-    logger.info(`Amazon: discovery — ${queryCount} queries returned data (${queryCount * 5} credits).`);
+    this._recordSearchResult(hits, this.searchQueries.length);
+    this.reportFreshness(hits, this.searchQueries.length);
+    logger.info(`Amazon: SEARCH — ${hits}/${this.searchQueries.length} queries, ${found} results, ${this._knownProducts.size} known ASINs ($0)`);
+  }
+
+  /**
+   * Free search against amazon.ca. The old path spent 5 ScraperAPI credits per query and
+   * so could only run every 30 minutes, which meant a brand-new listing went unnoticed
+   * for up to half an hour. Plain search returns ASIN, title, price and stock for ~40
+   * products per query and is not gated, so this can run on every poll for nothing.
+   */
+  async _freeSearch(query) {
+    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys`;
+    // A search page is ~1.4MB. Four of them every 10s through the residential proxy would
+    // be ~48GB/day, so the proxy is the fallback, not the default — direct also answers
+    // in ~1.2s versus ~3.5s proxied.
+    const direct = await this._searchOnce(url, null);
+    if (direct) return direct;
+    return this._searchOnce(url, getProxyUrl('residential'));
+  }
+
+  async _searchOnce(url, proxyUrl) {
+    try {
+      const html = await stealthGet(url, {
+        proxyUrl,
+        maxRetries: 1,
+        timeoutMs: 12000,
+        rawHeaders: true,
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-CA,en-US;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Upgrade-Insecure-Requests': '1',
+        },
+      });
+      if (!html || html.length < 50000) return null;
+      if (/api-services-support|Type the characters|continue shopping/.test(html)) {
+        if (proxyUrl) _clearCache(proxyUrl);
+        return null;
+      }
+      return this._parseSearchHtml(html);
+    } catch {
+      if (proxyUrl) _clearCache(proxyUrl);
+      return null;
+    }
+  }
+
+  _parseSearchHtml(html) {
+    const cards = html.split('data-component-type="s-search-result"').slice(1);
+    const out = [];
+    for (const card of cards) {
+      const asin = (card.match(/data-csa-c-item-id="amzn1\.asin\.([A-Z0-9]{10})"/) || [])[1];
+      if (!asin) continue;
+      const name = (card.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
+      if (!name) continue;
+      const priceStr = (card.match(/a-offscreen">\$([\d,]+\.\d{2})/) || [])[1];
+      const price = priceStr ? normalizePrice(priceStr) : null;
+      // A search card only shows a price when the item is buyable
+      const oos = /Currently unavailable|Temporarily out of stock/i.test(card);
+      out.push({
+        asin,
+        name: decodeEntities(name.trim()),
+        price,
+        inStock: !!price && !oos,
+        image: (card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com[^"]+)"/) || [])[1] || '',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Amazon truncates search titles and often drops the franchise word — "TCG: First
+   * Partner Illustration Collection" is a Pokemon product with nothing in the name to
+   * say so, and would classify as "other" and never alert. The query that returned it
+   * is the reliable signal, so it supplies the category when the title cannot.
+   */
+  _buildFromSearch(item, query) {
+    if (!item.name || !item.asin) return null;
+    const lower = item.name.toLowerCase();
+    if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return null;
+    if (!isTCGProduct(item.name)) return null;
+    // A title naming a game we do not track is a genuine miss, not a truncation
+    if (/yu-?gi-?oh|magic the gathering|\bmtg\b|lorcana|digimon|dragon ball/i.test(item.name)) return null;
+
+    const cached = this._knownProducts.get(item.asin) || {};
+    const product = this.classify({
+      ...cached,
+      sku: item.asin,
+      name: item.name,
+      price: item.price ?? cached.price ?? 0,
+      currency: 'CAD',
+      url: `https://www.amazon.ca/dp/${item.asin}`,
+      image: item.image || cached.image || '',
+      inStock: item.inStock,
+      canAddToCart: item.inStock,
+      shipsToHome: true,
+      lastSeen: Date.now(),
+    });
+
+    if (product.category === 'other' && query) {
+      product.category = /one piece/i.test(query) ? 'onepiece' : 'pokemon';
+      product._categoryFromQuery = true;
+    }
+    return product;
+  }
+
+  _recordSearchResult(hits, total) {
+    if (!total) return;
+    this._searchWindow.push(hits / total);
+    if (this._searchWindow.length > 10) this._searchWindow.shift();
+  }
+
+  _searchSuccessRate() {
+    if (this._searchWindow.length < 3) return null;
+    return this._searchWindow.reduce((a, b) => a + b, 0) / this._searchWindow.length;
   }
 
   /**

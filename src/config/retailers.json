@@ -58,12 +58,12 @@
     "name": "Amazon Canada",
     "url": "https://www.amazon.ca",
     "adapter": "amazon",
-    "intervalMs": 30000,
+    "intervalMs": 8000,
     "proxyTier": "residential-us",
     "enabled": true,
     "color": "#ff9900",
     "timing": {
-      "discoveryIntervalMs": 1800000,
+      "aodSweepIntervalMs": 300000,
       "watchlistIntervalMs": 8000
     },
     "watchlist": []
