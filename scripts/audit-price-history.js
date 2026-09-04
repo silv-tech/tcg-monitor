@@ -21,7 +21,10 @@
 
 const Redis = require('ioredis');
 
-const STORES = ['amazon', 'walmart', 'costco', 'bestbuy', 'ebgames', 'pokemoncenter'];
+// Retailers are discovered from the keys themselves rather than hardcoded. The first version
+// listed only the big six and would have silently skipped the ~30 Shopify stores, which is
+// exactly the blind spot an audit exists to close.
+const PRIORITY = ['amazon', 'walmart', 'costco', 'bestbuy', 'ebgames', 'pokemoncenter'];
 const SWING_RATIO = 3;      // max/min beyond this is not a normal retail move
 const OSCILLATION_MIN = 3;  // times a value must recur alternating to look like parser flapping
 const OSCILLATION_MIN_SWING = 0.09; // and the values must differ by at least the price-alert threshold
@@ -65,8 +68,26 @@ async function main() {
   const redis = new Redis(process.env.REDIS_URL);
   let exitCode = 0;
 
-  for (const store of STORES) {
-    const keys = await scanKeys(redis, `tcg:pricehistory:${store}:*`);
+  // Group every price-history key by its retailer id.
+  const allKeys = await scanKeys(redis, 'tcg:pricehistory:*');
+  const byStore = new Map();
+  for (const key of allKeys) {
+    const retailer = key.split(':')[2];
+    if (!retailer) continue;
+    if (!byStore.has(retailer)) byStore.set(retailer, []);
+    byStore.get(retailer).push(key);
+  }
+  // Big six first, then everything else alphabetically.
+  const stores = [...byStore.keys()].sort((a, b) => {
+    const ai = PRIORITY.indexOf(a); const bi = PRIORITY.indexOf(b);
+    if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    return a.localeCompare(b);
+  });
+  console.log(`auditing ${stores.length} retailers, ${allKeys.length} price-history keys
+`);
+
+  for (const store of stores) {
+    const keys = byStore.get(store);
     let withHistory = 0;
     let suspicious = 0;
     const samples = [];
