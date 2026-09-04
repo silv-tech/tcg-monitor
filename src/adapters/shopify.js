@@ -53,6 +53,8 @@ class ShopifyAdapter extends BaseAdapter {
         break;
       }
 
+      this._detectPriceUnit(data.products);
+
       for (const item of data.products) {
         this.parseShopifyProduct(item, products);
       }
@@ -79,6 +81,10 @@ class ShopifyAdapter extends BaseAdapter {
         break;
       }
 
+      // Judge the store's price unit on the UNFILTERED page — the keyword filter can leave
+      // too few prices to read the distribution from.
+      this._detectPriceUnit(data.products);
+
       for (const item of data.products) {
         // Filter by keywords if configured
         if (this.searchKeywords.length > 0) {
@@ -95,6 +101,31 @@ class ShopifyAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Decide once per poll whether this store quotes cents, from the whole batch rather than
+   * one price. Sticky: a confident verdict is kept so a small or unusual page cannot flip it
+   * mid-run and rewrite every price by 100x.
+   */
+  _detectPriceUnit(allProducts) {
+    if (this._priceUnitLocked) return;
+    const values = [];
+    for (const item of allProducts || []) {
+      for (const v of item.variants || []) {
+        const n = Number(v.price);
+        if (!isNaN(n) && n > 0) values.push(n);
+      }
+    }
+    if (values.length < 25) return; // too thin to judge — leave the previous verdict alone
+    const roundHundreds = values.filter((n) => n % 100 === 0).length;
+    const ratio = roundHundreds / values.length;
+    const cents = ratio >= 0.99;
+    if (this._pricesAreCents !== cents) {
+      logger.info(`${this.name}: prices detected as ${cents ? 'CENTS (dividing by 100)' : 'DOLLARS'} — ${roundHundreds}/${values.length} exact multiples of 100`);
+    }
+    this._pricesAreCents = cents;
+    this._priceUnitLocked = true;
+  }
+
   parseShopifyProduct(item, products) {
     // Each Shopify product can have multiple variants
     for (const variant of item.variants) {
@@ -106,10 +137,20 @@ class ShopifyAdapter extends BaseAdapter {
         ? variant.price
         : normalizePrice(variant.price);
 
-      // Some Shopify stores return prices in cents (e.g. 199900 = $1999.00)
-      // Heuristic: only divide if price > 5000 — no TCG product costs $5000 CAD (P1-5)
-      // This prevents legitimate $500-$800 sealed cases from being divided to $5-$8
-      if (price != null && price > 5000) {
+      // Some Shopify stores quote prices in cents. Deciding that PER PRICE is wrong in both
+      // directions, and the old "divide anything over 5000" rule was measurably wrong on live
+      // stores: hobbiesville quotes cents, so its $13.00 deck box (raw "1300.00") was reported
+      // as $1,300, while kanzengames quotes dollars, so a genuine $10,000 listing would have
+      // been divided down to $100.
+      //
+      // The unit is a property of the STORE, not of one price, and the distribution says so
+      // unambiguously — measured over a full catalogue page:
+      //   hobbiesville  696/696  prices are exact multiples of 100  -> cents
+      //   zardocards   1192/1192 ->  cents
+      //   kanzengames    30/638  ->  dollars
+      //   vancitytcg      0/1460 ->  dollars
+      // A dollars store always has some price ending in .95/.99; a cents store cannot.
+      if (price != null && this._pricesAreCents) {
         price = price / 100;
       }
 

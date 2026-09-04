@@ -37,13 +37,24 @@ function detectEvents(oldProduct, newProduct) {
     });
   }
 
+  // A move of almost exactly 100x is a currency-unit change, not a price change. Some Shopify
+  // stores quote cents, and when a store's unit is re-detected (or the store itself switches),
+  // every cached price shifts by 100 at once — which would otherwise read as a 99% crash on the
+  // entire catalogue and fire a price-drop alert for every product in it.
+  const unitShift = oldProduct.price > 0 && newProduct.price > 0
+    && (() => {
+      const ratio = Math.max(oldProduct.price, newProduct.price) / Math.min(oldProduct.price, newProduct.price);
+      return Math.abs(ratio - 100) < 0.5;
+    })();
+
   // Price drop (only if both have valid prices and the drop clears the minimum swing)
   if (
     oldProduct.price != null &&
     newProduct.price != null &&
     oldProduct.price !== newProduct.price &&
     oldProduct.price > 0 &&
-    newProduct.price > 0
+    newProduct.price > 0 &&
+    !unitShift
   ) {
     const pctChange = ((newProduct.price - oldProduct.price) / oldProduct.price) * 100;
     if (pctChange <= -MIN_PRICE_CHANGE_PCT) events.push({
