@@ -283,7 +283,15 @@ class AmazonAdapter extends BaseAdapter {
       if (!asin) continue;
       const name = (card.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
       if (!name) continue;
-      const priceStr = (card.match(/a-offscreen">\$([\d,]+\.\d{2})/) || [])[1];
+      // Scope the price to the card's OWN price block. A card's slice routinely contains
+      // prices belonging to other ASINs — sponsored placements and related-item strips render
+      // inside the result grid — so taking the first a-offscreen in the slice read a
+      // neighbour's price. It was worst on cards with no price of their own (a genuinely
+      // unavailable item), where the parser would reach past the product entirely and invent
+      // one: B0GW2DK37Q has no price on the card, and successive polls attributed $15.99,
+      // $147.00, $39.95 and $24.69 to it, each from whichever neighbour happened to be next.
+      // Verified against a live page: where a real price exists this agrees 27/27.
+      const priceStr = (card.match(/data-cy="price-recipe"[\s\S]{0,1200}?a-offscreen">\$([\d,]+\.\d{2})/) || [])[1];
       const price = priceStr ? normalizePrice(priceStr) : null;
       // A search card only shows a price when the item is buyable
       const oos = /Currently unavailable|Temporarily out of stock/i.test(card);

@@ -465,12 +465,16 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     if (!outOfStock && !hasAddToCart) return null;
 
-    const priceMatch = html.match(/\$\s*([\d,]+\.?\d*)/);
-    const price = priceMatch ? normalizePrice(priceMatch[1]) : null;
-
+    // Deliberately NO price from this fallback path. It used to take the first "$" anywhere in
+    // the page, which is as likely to be a shipping threshold, a promo banner or a related
+    // product as the item's own price — the same defect that had Amazon attributing a
+    // neighbour's price to an unpriced listing and firing false restocks off it. This runs
+    // only when the structured __NEXT_DATA__ parse has already failed, so there is no reliable
+    // anchor left, and a wrong price is worse than none: it pollutes price history and can
+    // trigger a spurious price-drop alert. Availability is still worth reporting.
     return {
       inStock: outOfStock ? false : true,
-      price,
+      price: null,
       image: '',
     };
   }

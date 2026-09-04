@@ -55,8 +55,14 @@ function buildRestockHistoryValue(history) {
   for (let i = 1; i < history.length; i++) {
     totalGap += history[i] - history[i - 1];
   }
-  const avgDays = Math.round(totalGap / (history.length - 1) / 86400000);
-  return `Last: ${formatDaysAgo(last)} · Avg: every ~${avgDays}d`;
+  const avgMs = totalGap / (history.length - 1);
+  // Sub-day gaps rounded to "~0d", which tells the reader nothing. Restocks on a hot product
+  // are often hours apart, so fall back to hours (and then minutes) rather than printing zero.
+  let avg;
+  if (avgMs >= 86400000) avg = `${Math.round(avgMs / 86400000)}d`;
+  else if (avgMs >= 3600000) avg = `${Math.round(avgMs / 3600000)}h`;
+  else avg = `${Math.max(1, Math.round(avgMs / 60000))}m`;
+  return `Last: ${formatDaysAgo(last)} · Avg: every ~${avg}`;
 }
 
 function buildCrossRetailerValue(matches) {

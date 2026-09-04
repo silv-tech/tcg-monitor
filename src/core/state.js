@@ -282,8 +282,16 @@ async function findCrossRetailerMatches(product) {
     }
   }
 
-  matches.sort((a, b) => b.similarity - a.similarity);
-  return matches.slice(0, 3);
+  // One entry per retailer. Without this the same store could occupy every slot — a real
+  // alert showed "rivalcards - $54.95 | rivalcards - $59.95 | chimeragaming - $34.00", which
+  // wastes two of the three slots and reads like a bug to anyone looking at it. Keep each
+  // retailer's best match: highest similarity, and on a tie the cheaper listing.
+  matches.sort((a, b) => (b.similarity - a.similarity) || (a.price - b.price));
+  const bestPerRetailer = new Map();
+  for (const m of matches) {
+    if (!bestPerRetailer.has(m.retailer)) bestPerRetailer.set(m.retailer, m);
+  }
+  return [...bestPerRetailer.values()].slice(0, 3);
 }
 
 // ─── Price history (#12) ──────────────────────────��───────────────
