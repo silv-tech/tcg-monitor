@@ -32,22 +32,26 @@ const ADAPTER_MAP = {
 /**
  * Floor for the small Shopify card shops.
  *
- * These 31 shops were set to 8000ms while chasing "every store under 10 seconds". Each
- * individual store then saw only one request every 8 seconds — trivially low — yet all of
- * them returned 429 at once. That is the tell: Shopify throttles per CALLER IP across its
- * whole edge, not per store. So the only quantity that matters is our AGGREGATE rate, and
- * 31 shops at 8s put ~8 requests/sec on one Railway IP.
+ * These shops were rate-limited into a total outage on 2026-09-05 — every one of them tripped
+ * its circuit breaker and stopped polling for hours. The first diagnosis blamed the 8s
+ * interval and raised this to 45s, on the reasoning that Shopify must be throttling per
+ * caller IP since each store "only" saw one request per 8 seconds.
  *
- * The result was not a slightly-throttled monitor, it was a dead one: every shop tripped the
- * circuit breaker and stopped polling entirely, so they detected nothing at all from 08:47
- * onward. A 45s shop that works beats an 8s shop that has been cut off.
+ * That reasoning was wrong. These shops carry 11,000-19,000 products, so a poll was TEN paged
+ * requests, not one: ~1.25 req/sec against a single store and ~39 req/sec in aggregate. The
+ * interval was never the problem; fetching the entire catalogue every 8 seconds was.
  *
- * This is a FLOOR applied after Redis overrides, deliberately: the 8000ms values live in
+ * The adapter now reads only the newest page on a normal poll (see FULL_SWEEP_MS in
+ * shopify.js — /products.json is ordered by published_at descending, so every new listing is
+ * on page 1), which cuts a poll to a single request. That is ~0.125 req/sec per store, an
+ * order of magnitude below the cadence that caused the outage, so the shops can run at the
+ * same speed as the big six again.
+ *
+ * The floor stays as a backstop, applied AFTER Redis overrides — the live intervals live in
  * Redis, which silently wins over retailers.json, so a fix that only edited the file on disk
- * would have changed nothing. The big six are untouched — they are separate hosts with
- * separate limits, and they are what the product is sold on.
+ * would change nothing.
  */
-const SHOP_MIN_INTERVAL_MS = 45000;
+const SHOP_MIN_INTERVAL_MS = 8000;
 
 function clampShopInterval(retailer) {
   if (retailer.adapter !== 'shopify') return retailer;

@@ -16,6 +16,11 @@ const CA_LOCALE_HEADERS = {
 };
 const { normalizePrice } = require('../utils/helpers');
 
+// How often a shop reads its WHOLE catalogue rather than just the newest page. New listings
+// are caught on every poll regardless; this cadence only bounds how quickly a stock or price
+// change deep in the catalogue is noticed.
+const FULL_SWEEP_MS = 5 * 60 * 1000;
+
 /**
  * Universal Shopify adapter — works for ANY Shopify store.
  * Shopify exposes /products.json and /collections/{handle}.json publicly.
@@ -34,11 +39,83 @@ class ShopifyAdapter extends BaseAdapter {
     this._pageCache = new Map();
   }
 
+  /**
+   * Is this poll a cheap "what's new" check, or a full catalogue sweep?
+   *
+   * These shops carry 11,000-19,000 products, so a full sweep is ten paged requests. Doing
+   * that every 8 seconds was ~1.25 req/sec against a SINGLE store and ~39 req/sec in
+   * aggregate, which is what got every shop rate-limited and then circuit-broken.
+   *
+   * It was also unnecessary. Measured against four live shops, /products.json is ordered by
+   * published_at DESCENDING (401games: 15:22, 15:20, 15:19, 15:16, 15:09 ... strictly
+   * ordered, while created_at is not). Every newly published product therefore appears on
+   * page 1. We were fetching ten pages to find listings that were always in the first one.
+   *
+   * So: page 1 on every poll for new-listing speed, a full sweep on a slow cadence for
+   * stock and price accuracy across the whole catalogue. Sweeps are offset per shop so all
+   * 31 do not sweep on the same tick.
+   */
+  _isFullSweepDue(now = Date.now()) {
+    if (!this._sweepOffset) {
+      // Deterministic per-shop offset from the id, so sweeps spread across the window
+      // instead of clustering — same reasoning as the scheduler's phase spread.
+      let h = 0;
+      for (const ch of String(this.id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      this._sweepOffset = h % FULL_SWEEP_MS;
+    }
+    if (!this._lastFullSweep) return true; // first poll after boot must be complete
+    return (now + this._sweepOffset) - this._lastFullSweep >= FULL_SWEEP_MS;
+  }
+
   async fetchProducts() {
     const products = {};
     // Reset per poll. If every page comes back 304 we can tell the scheduler that nothing
     // moved, and it can skip the diff and the Redis round-trips entirely.
     this._anyPageChanged = false;
+
+    // A fast poll reads only the newest page, so it is a PARTIAL view of the catalogue.
+    // Say so explicitly rather than leaving the poll layer to infer it from counts — the
+    // existing heuristic (new < 30% of cached) is right for a 19,000-product shop but would
+    // wrongly conclude "complete" for a 300-product one and mark real stock out of stock.
+    const fullSweep = this._isFullSweepDue();
+    this._partialPoll = !fullSweep;
+
+    if (!fullSweep) {
+      try {
+        // Read page 1 the same way this shop is normally read, so the fast path never widens
+        // or narrows what the shop tracks. A collection-configured shop is pre-filtered by
+        // the retailer and deliberately does NOT apply the keyword filter; a catalogue-wide
+        // shop does. Getting this wrong would let Magic singles through on a Pokemon monitor.
+        if (this.collections.length > 0) {
+          for (const handle of this.collections) {
+            const { products: page } = await this._fetchPage(
+              `${this.url}/collections/${handle}/products.json?limit=${this.pageLimit}&page=1`,
+            );
+            this._detectPriceUnit(page);
+            for (const item of page) this.parseShopifyProduct(item, products);
+          }
+        } else {
+          const { products: page } = await this._fetchPage(
+            `${this.url}/products.json?limit=${this.pageLimit}&page=1`,
+          );
+          this._detectPriceUnit(page);
+          for (const item of page) {
+            if (this.searchKeywords.length > 0) {
+              const text = `${item.title} ${item.product_type} ${item.tags?.join(' ')}`.toLowerCase();
+              if (!this.searchKeywords.some(kw => text.includes(kw.toLowerCase()))) continue;
+            }
+            this.parseShopifyProduct(item, products);
+          }
+        }
+        return products;
+      } catch (err) {
+        if (isRateLimited(err)) throw err; // a throttled poll is a failed poll, not an empty one
+        logger.warn(`${this.name}: fast poll failed, falling back to full sweep: ${err.message}`);
+        this._partialPoll = false;
+      }
+    }
+
+    this._lastFullSweep = Date.now();
 
     // A throttled shop and an empty shop used to look identical from here: both returned {}.
     // That is what let a burst of 429s raise "PARSER SUSPECT — 0% of products have a price"
