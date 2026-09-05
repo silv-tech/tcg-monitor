@@ -13,14 +13,29 @@ const assert = require('node:assert');
 
 const BIG_SIX = ['walmart', 'amazon', 'costco', 'bestbuy', 'ebgames', 'pokemoncenter'];
 
-describe('big six: intervals are not clamped by the shop floor', () => {
-  // Mirrors clampShopInterval in src/index.js exactly.
-  const SHOP_MIN_INTERVAL_MS = 8000;
+describe('big six: shop cadence tiering cannot touch them', () => {
+  // Mirrors clampShopInterval in src/index.js. The tier system deliberately OVERRIDES the
+  // configured interval rather than taking a floor, so the adapter guard is the only thing
+  // standing between the big six and a 9s/30s/90s rewrite.
+  const TIERS = {
+    active: { intervalMs: 9000, ids: new Set(['pokejeux', 'hobbiesville', '401games', 'facetoface']) },
+    quiet: { intervalMs: 90000, ids: new Set(['cardlegendstcg', 'poketherapy', 'spshop']) },
+    medium: { intervalMs: 30000 },
+  };
   const clamp = (r) => {
     if (r.adapter !== 'shopify') return r;
-    if (!(r.intervalMs < SHOP_MIN_INTERVAL_MS)) return r;
-    return { ...r, intervalMs: SHOP_MIN_INTERVAL_MS, _clampedFrom: r.intervalMs };
+    const tier = TIERS.active.ids.has(r.id) ? 'active' : TIERS.quiet.ids.has(r.id) ? 'quiet' : 'medium';
+    const intervalMs = TIERS[tier].intervalMs;
+    if (intervalMs === r.intervalMs) return r;
+    return { ...r, intervalMs, _tier: tier, _clampedFrom: r.intervalMs };
   };
+
+  test('a shop IS retiered — proving the guard below is meaningful', () => {
+    const shop = { id: 'pokejeux', adapter: 'shopify', intervalMs: 8000 };
+    assert.strictEqual(clamp(shop).intervalMs, 9000);
+    const quiet = { id: 'cardlegendstcg', adapter: 'shopify', intervalMs: 8000 };
+    assert.strictEqual(clamp(quiet).intervalMs, 90000);
+  });
 
   test('every big-six adapter passes through untouched', () => {
     const live = [
@@ -39,10 +54,18 @@ describe('big six: intervals are not clamped by the shop floor', () => {
     }
   });
 
-  test('a big-six store BELOW the shop floor is still left alone', () => {
-    // Costco at 5000ms is under the 8000ms shop floor. It must not be dragged up.
+  test('a big-six store faster than every shop tier is still left alone', () => {
+    // Costco at 5000ms is faster than even the active tier. It must not be dragged up.
     const costco = { id: 'costco', adapter: 'costco', intervalMs: 5000 };
     assert.strictEqual(clamp(costco).intervalMs, 5000);
+    assert.strictEqual(clamp(costco)._tier, undefined);
+  });
+
+  test('a big-six id colliding with a tier list would still be safe', () => {
+    // The adapter check runs FIRST, so tiering can never reach a non-Shopify store even if
+    // someone later adds a shop whose id matches a big-six one.
+    const fake = { id: 'pokejeux', adapter: 'pokemoncenter', intervalMs: 8000 };
+    assert.strictEqual(clamp(fake).intervalMs, 8000, 'adapter type gates tiering, not the id');
   });
 
   test('the real config still has all six under their 10s target', () => {

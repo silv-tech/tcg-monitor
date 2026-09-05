@@ -31,14 +31,13 @@ const ADAPTER_MAP = {
 };
 
 /**
- * Floor for the small Shopify card shops, set to match the MEASURED budget rather than a
- * number we would prefer.
+ * Shop cadence, allocated from a fixed budget by measured listing activity.
  *
- * These shops were rate-limited into a total outage on 2026-09-05 — every one tripped its
- * circuit breaker and stopped polling for hours. Two wrong diagnoses came first, and both are
- * worth remembering because they are the easy mistakes to repeat:
+ * The 31 Shopify shops were rate-limited into a total outage on 2026-09-05 — every one tripped
+ * its circuit breaker and stopped polling for hours. Two wrong diagnoses came first, and both
+ * are worth remembering because they are the easy mistakes to repeat:
  *
- *   1. "The 8s interval is too fast" — raised this to 45s. Wrong: the interval was never the
+ *   1. "The 8s interval is too fast" — raised it to 45s. Wrong: the interval was never the
  *      problem. These shops carry 11,000-19,000 products, so a poll was TEN paged requests,
  *      ~1.25 req/sec against a single store and ~39 req/sec in aggregate.
  *   2. "Shopify limits per store" — wrong too. Each store saw very little traffic; Shopify
@@ -48,28 +47,62 @@ const ADAPTER_MAP = {
  * /products.json is ordered by published_at descending, so every new listing is on page 1),
  * and every Shopify request passes through one shared rate budget.
  *
- * Measured on this Railway IP by moving SHOPIFY_RATE and watching the circuit breakers:
- * 2.5 req/sec kept all 37 circuits closed; 5 req/sec reopened all 31 shop circuits within
- * minutes. 2.5 is the value proven to hold.
+ * That budget is a hard ceiling, measured on this Railway IP by moving SHOPIFY_RATE and
+ * watching the circuit breakers: 2.5 req/sec kept all 37 circuits closed; 5 req/sec reopened
+ * all 31 shop circuits within minutes.
  *
- * A fast poll costs one request and three shops fetch two collections, so a cycle is 34
- * requests. At 16s that is 2.26 req/sec, inside the budget. Polling faster does NOT make
- * detection faster — at 14s demand was 2.57 req/sec and the excess simply queued inside each
- * poll, giving a 6,749ms median wait and ~20.7s detection instead of the intended ~14.2s.
+ * Polling faster than the budget can serve does NOT make detection faster — it queues inside
+ * the poll. At a flat 14s, demand was 2.57 req/sec and the median poll spent 6,749ms waiting,
+ * giving ~20.7s detection instead of the intended ~14.2s.
  *
- * This is why the shops cannot join the big six under 10 seconds: 31 stores behind one
- * datacenter IP is a shared-rate problem, not a tuning one. Going faster needs either fewer
- * shops per IP or shop traffic on the residential proxy.
+ * So the budget is fixed, and the only way to make the shops that matter faster is to stop
+ * spending it on the ones that do not — a flat interval polled a store that had not listed
+ * anything in 352 days exactly as often as one listing 250 items a day.
  *
- * Applied AFTER Redis overrides — the live intervals live in Redis, which silently wins over
- * retailers.json, so a fix that only edited the file on disk would change nothing.
+ * Measured 2026-09-05 from published_at on page 1 of all 31 shops — new listings in 24h:
+ *   ACTIVE  pokejeux 250, infinitycards 250, zardocards 182, 401games 171, hobbiesville 102,
+ *           remicardtrader 72, tistaminis 23, shopville 20, kanzengames 19, danireon 17,
+ *           facetoface 15, gameshack 14, fusiongaming 12, rivalcards 11
+ *   QUIET   cardlegendstcg (last listing 352 DAYS ago), poketherapy 88d, catchacard 47d,
+ *           hastycards 29d, spshop 28d, cardcycle 8d, tonkatomtcg
+ *   MEDIUM  everything else
+ *
+ * 9s / 30s / 90s costs 2.28 req/sec against the 2.5 budget, counting the three
+ * collection-configured shops at two requests per poll. That buys ~9.3s detection on the 14
+ * shops that actually drop product — under the 10s target, the same class as the big six —
+ * and spends 90s intervals on shops where nothing has happened in a month.
+ *
+ * These tiers are a snapshot and will go stale. They should become self-measuring, driven by
+ * observed listing rate, which is the same change autotune needs: allocate a shared budget by
+ * where the value is, rather than tuning each store in isolation.
  */
-const SHOP_MIN_INTERVAL_MS = 16000;
+const SHOP_TIERS = {
+  active: {
+    intervalMs: 9000,
+    ids: new Set(['pokejeux', 'infinitycards', 'zardocards', '401games', 'hobbiesville',
+      'remicardtrader', 'tistaminis', 'shopville', 'kanzengames', 'danireon', 'facetoface',
+      'gameshack', 'fusiongaming', 'rivalcards']),
+  },
+  quiet: {
+    intervalMs: 90000,
+    ids: new Set(['tonkatomtcg', 'cardlegendstcg', 'catchacard', 'spshop', 'cardcycle',
+      'poketherapy', 'hastycards']),
+  },
+  medium: { intervalMs: 30000, ids: null },
+};
 
 function clampShopInterval(retailer) {
   if (retailer.adapter !== 'shopify') return retailer;
-  if (!(retailer.intervalMs < SHOP_MIN_INTERVAL_MS)) return retailer;
-  return { ...retailer, intervalMs: SHOP_MIN_INTERVAL_MS, _clampedFrom: retailer.intervalMs };
+
+  // Deliberately overrides Redis rather than taking a floor from it. The live intervals in
+  // Redis are a flat 8000ms left over from before the budget existed; honouring them would
+  // put demand at ~4 req/sec and queue every poll behind the budget again.
+  const tier = SHOP_TIERS.active.ids.has(retailer.id) ? 'active'
+    : SHOP_TIERS.quiet.ids.has(retailer.id) ? 'quiet'
+      : 'medium';
+  const intervalMs = SHOP_TIERS[tier].intervalMs;
+  if (intervalMs === retailer.intervalMs) return retailer;
+  return { ...retailer, intervalMs, _tier: tier, _clampedFrom: retailer.intervalMs };
 }
 
 async function main() {
@@ -191,10 +224,12 @@ async function main() {
 
   const clamped = retailers.filter(r => r._clampedFrom);
   if (clamped.length > 0) {
-    logger.warn(
-      `Shop floor: ${clamped.length} Shopify shop(s) raised from ${clamped[0]._clampedFrom}ms to `
-      + `${SHOP_MIN_INTERVAL_MS}ms. Shopify rate-limits per caller IP across all stores, and the `
-      + 'faster cadence tripped every shop\'s circuit breaker. The big six are unaffected.',
+    logger.info(
+      `Shop cadence: ${clamped.length} shop(s) set by measured listing activity — `
+      + Object.entries(SHOP_TIERS)
+        .map(([t, v]) => `${t} ${v.intervalMs}ms x${clamped.filter(r => r._tier === t).length}`)
+        .join(', ')
+      + '. Bounded by the shared Shopify budget; the big six are unaffected.',
     );
   }
 
