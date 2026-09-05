@@ -52,7 +52,24 @@ const ADAPTER_MAP = {
  * Redis, which silently wins over retailers.json, so a fix that only edited the file on disk
  * would change nothing.
  */
-const SHOP_MIN_INTERVAL_MS = 8000;
+/**
+ * Set to match the measured Shopify budget, not to a number we would prefer.
+ *
+ * Measured on this Railway IP: 2.5 req/sec kept all 37 circuits closed and every shop
+ * healthy; 5 req/sec reopened all 31 shop circuits within minutes. The sustainable ceiling
+ * is between those, and 2.5 is the value proven to hold.
+ *
+ * A fast poll costs one request, so 31 shops sharing ~2.36 req/sec (after sweeps take their
+ * share) get one poll each per ~13 seconds. Polling faster than the budget can serve does
+ * not make detection faster — it just queues requests inside the poll, which is exactly what
+ * produced 5-16 second poll times. Matching the interval to the budget keeps each poll at
+ * its natural ~150ms instead.
+ *
+ * This is why the shops cannot join the big six under 10 seconds: 31 stores behind one
+ * datacenter IP is a shared-rate problem, not a tuning one. Going faster needs either fewer
+ * shops on this IP or shop traffic on the residential proxy.
+ */
+const SHOP_MIN_INTERVAL_MS = 14000;
 
 function clampShopInterval(retailer) {
   if (retailer.adapter !== 'shopify') return retailer;

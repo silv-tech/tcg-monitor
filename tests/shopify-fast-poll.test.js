@@ -18,6 +18,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert');
 
 const ShopifyAdapter = require('../src/adapters/shopify');
+const { FULL_SWEEP_MS } = ShopifyAdapter;
 
 function makeAdapter(overrides = {}) {
   return new ShopifyAdapter({
@@ -61,9 +62,9 @@ describe('shopify fast poll: sweep scheduling', () => {
     const now = Date.now();
     const a = makeAdapter({ id: 'hobbiesville' });
     a._isFullSweepDue(now);
-    const dueAt = a._lastFullSweep + (5 * 60 * 1000);
+    const dueAt = a._lastFullSweep + FULL_SWEEP_MS;
     assert.ok(dueAt >= now, 'not already due');
-    assert.ok(dueAt <= now + (5 * 60 * 1000), 'due within one window');
+    assert.ok(dueAt <= now + FULL_SWEEP_MS, 'due within one window');
     assert.strictEqual(a._isFullSweepDue(dueAt), true, 'sweeps once the offset elapses');
   });
 
@@ -74,7 +75,7 @@ describe('shopify fast poll: sweep scheduling', () => {
     const dueTimes = ids.map((id) => {
       const a = makeAdapter({ id });
       a._isFullSweepDue(now);
-      return a._lastFullSweep + (5 * 60 * 1000) - now;
+      return a._lastFullSweep + FULL_SWEEP_MS - now;
     });
     assert.strictEqual(new Set(dueTimes).size, ids.length, 'no two shops sweep at the same moment');
     assert.ok(Math.max(...dueTimes) - Math.min(...dueTimes) > 60000, 'genuinely spread out');
@@ -90,7 +91,7 @@ describe('shopify fast poll: sweep scheduling', () => {
   test('a sweep comes due again once the window has passed', () => {
     const a = makeAdapter();
     a._sweepOffset = 0;
-    a._lastFullSweep = Date.now() - (5 * 60 * 1000) - 1000;
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000;
     assert.strictEqual(a._isFullSweepDue(), true);
   });
 
@@ -136,7 +137,7 @@ describe('shopify fast poll: reads only page 1', () => {
   test('a full sweep pages through and is NOT marked partial', async () => {
     const a = makeAdapter();
     a._sweepOffset = 0;
-    a._lastFullSweep = Date.now() - (5 * 60 * 1000) - 1000; // force a sweep
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000; // force a sweep
     let page = 0;
     a._fetchPage = async () => {
       page += 1;

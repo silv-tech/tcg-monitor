@@ -19,7 +19,12 @@ const { normalizePrice } = require('../utils/helpers');
 // How often a shop reads its WHOLE catalogue rather than just the newest page. New listings
 // are caught on every poll regardless; this cadence only bounds how quickly a stock or price
 // change deep in the catalogue is noticed.
-const FULL_SWEEP_MS = 5 * 60 * 1000;
+// 15 minutes, not 5: sweeps draw from the same budget as the fast polls, and every request
+// a sweep spends is one a new-listing check cannot. Measured, sweeps at 5 minutes consumed
+// roughly a fifth of the whole Shopify budget and pushed fast-poll waits to 5-16 seconds.
+// New listings are still caught on every poll; this only bounds how quickly a stock or price
+// change deep in a catalogue is noticed.
+const FULL_SWEEP_MS = 15 * 60 * 1000;
 
 const rateBudget = require('../utils/rate-budget');
 const SHOPIFY_BUDGET = 'shopify';
@@ -375,3 +380,4 @@ class ShopifyAdapter extends BaseAdapter {
 }
 
 module.exports = ShopifyAdapter;
+module.exports.FULL_SWEEP_MS = FULL_SWEEP_MS;
