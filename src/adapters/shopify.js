@@ -462,6 +462,10 @@ class ShopifyAdapter extends BaseAdapter {
       // Add Shopify-specific metadata
       product._variantId = variant.id;
       product._productId = item.id;
+      // The moment the shop actually put this listing live. This is the only honest anchor
+      // for "how fast did we alert": measuring from our own fetch just reports how long our
+      // own request took, which is why the alert footer read ~1s even on a 30s poll cycle.
+      product.publishedAt = Date.parse(item.published_at || item.created_at) || null;
       product._tags = item.tags || [];
       product._vendor = item.vendor;
       product.stockCount = variant.inventory_quantity ?? null;

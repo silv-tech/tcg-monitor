@@ -90,6 +90,46 @@ function formatFreshness(lastCheckedAt) {
   return `${Math.round(agoMs / 3600000)}h ago`;
 }
 
+/**
+ * How long from the listing going live to this alert being sent.
+ *
+ * Three different things can be measured here and only one of them is the promise we make to
+ * a customer:
+ *
+ *   1. published_at -> now. TRUE end-to-end latency. Shopify gives us this, so for those 31
+ *      stores the number is exact: a listing that went up at 16:00:00 and alerts at 16:00:09
+ *      reads 9.0s, which is what "under 10 seconds" has to mean.
+ *   2. previous poll -> now. For retailers that publish no timestamp we cannot know when the
+ *      listing appeared, only that it was not there last time we looked. The true latency is
+ *      somewhere inside that window, so we report its upper bound with a "≤".
+ *   3. fetch start -> now. What this used to show. It is just our own request duration —
+ *      ~1s regardless of a 30s poll cycle — and it made the alerts look far faster than the
+ *      product actually was.
+ *
+ * A RESTOCK is not a new listing, so published_at does not apply: the product was already
+ * live and what we detected was an availability change. Those fall through to the window.
+ */
+function alertSpeed(event) {
+  const now = Date.now();
+  const publishedAt = event.product && event.product.publishedAt;
+
+  if (event.type === EVENT_TYPES.NEW_SKU && publishedAt) {
+    const ms = now - publishedAt;
+    // A shop can publish with a backdated timestamp, and a first-ever poll surfaces a whole
+    // catalogue of old listings. Neither is a detection latency, so don't dress it up as one.
+    if (ms >= 0 && ms < 10 * 60 * 1000) return `${(ms / 1000).toFixed(1)}s`;
+    return null;
+  }
+
+  if (event._prevPollAt) {
+    const ms = now - event._prevPollAt;
+    if (ms >= 0 && ms < 10 * 60 * 1000) return `≤${(ms / 1000).toFixed(1)}s`;
+  }
+
+  // Nothing trustworthy to report. Saying nothing beats quoting our own request duration.
+  return null;
+}
+
 // ─── Main builder ────────────────────────────────────────────────
 
 function buildAlertEmbed(event, tier) {
@@ -265,12 +305,22 @@ function buildAlertEmbed(event, tier) {
 
   // ── Footer ──
   const tierLabel = tier === 'scan' ? 'Manual Scan' : tier === 'paid' ? 'Premium' : 'Free';
+  // eslint-disable-next-line no-use-before-define -- alertSpeed is hoisted
+
   let footerText = `Nocturne Monitors  ·  ${tierLabel}`;
   // Detection speed + freshness — paid only
-  if (!isFree && event._detectedAt) {
-    const speedMs = Date.now() - event._detectedAt;
-    const speedSec = (speedMs / 1000).toFixed(1);
-    footerText += `  ·  \u26A1 ${speedSec}s`;
+  if (!isFree) {
+    // What this number MEANS matters. It was Date.now() - _detectedAt, and _detectedAt is set
+    // when our fetch STARTS, so it reported how long our own request took (~1s) even when the
+    // poll interval was 30s and the listing had already been live for half a minute. That
+    // reads as a promise we are not keeping.
+    //
+    // The honest figure runs from when the listing went live to when this alert is sent.
+    // Shopify exposes published_at, so for those stores it is exact. Retailers that publish no
+    // timestamp cannot be measured that way, so we report the upper bound of the window it
+    // could have appeared in rather than claiming a precision we do not have.
+    const speed = alertSpeed(event);
+    if (speed) footerText += `  ·  ⚡ ${speed}`;
   }
   if (!isFree) {
     const freshness = formatFreshness(event._lastCheckedAt);
