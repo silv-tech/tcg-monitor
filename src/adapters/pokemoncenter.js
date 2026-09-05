@@ -243,7 +243,11 @@ class PokemonCenterAdapter extends BaseAdapter {
         logger.warn(`Pokemon Center: ${detail} — watchlist EMPTY and rotation budget spent, `
           + 'so no restock can be detected. Add SKUs to the watchlist or raise dailyRotationChecks.');
       } else {
-        logger.info(`Pokemon Center: ${detail}`);
+        // Diagnostic: selecting zero targets with a populated sitemap and budget left should
+        // be impossible, so print the inputs rather than guessing at it from the outside.
+        logger.info(`Pokemon Center: ${detail} [sitemap=${this.sitemapProducts.size} `
+          + `rotBudget=${this._rotationBudgetLeft()} spent=${this._rotationSpentToday} `
+          + `checksPerPoll=${this.checksPerPoll} paidGate=${Math.max(0, this.paidCheckIntervalMs - (Date.now() - this._lastPaidCheckAt))}ms]`);
       }
       return products;
     }
