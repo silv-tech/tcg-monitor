@@ -115,17 +115,20 @@ const promotedIds = new Set(
   String(process.env.SHOP_FAST_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
 );
 
+// Tiers hold only shops that still exist. Twenty were removed on 2026-09-05, which emptied the
+// quiet tier entirely — every store in it (cardlegendstcg at 352 days since a listing,
+// poketherapy, catchacard, spshop, cardcycle, hastycards, tonkatomtcg) was one of the dead ones.
+// It is kept rather than deleted because it is the control surface for backing a specific shop
+// off without slowing the rest, which is a better first move than a global slowdown.
 const SHOP_TIERS = {
   active: {
     intervalMs: tierMs('SHOP_ACTIVE_MS', 9000),
     ids: new Set(['pokejeux', 'infinitycards', 'zardocards', '401games', 'hobbiesville',
-      'remicardtrader', 'tistaminis', 'shopville', 'kanzengames', 'danireon', 'facetoface',
-      'gameshack', 'fusiongaming', 'rivalcards']),
+      'remicardtrader', 'kanzengames', 'gameshack']),
   },
   quiet: {
     intervalMs: tierMs('SHOP_QUIET_MS', 9000),
-    ids: new Set(['tonkatomtcg', 'cardlegendstcg', 'catchacard', 'spshop', 'cardcycle',
-      'poketherapy', 'hastycards']),
+    ids: new Set(),
   },
   medium: { intervalMs: tierMs('SHOP_MEDIUM_MS', 9000), ids: null },
 };

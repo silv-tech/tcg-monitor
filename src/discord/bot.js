@@ -257,7 +257,7 @@ async function registerCommands() {
       .setDescription('Set a category on/off for a specific store (overrides global)')
       .addStringOption(opt =>
         opt.setName('retailer')
-          .setDescription('Retailer ID (e.g. 401games, walmart, facetoface)')
+          .setDescription('Retailer ID (e.g. 401games, walmart, hobbiesville)')
           .setRequired(true))
       .addStringOption(opt =>
         opt.setName('category')
@@ -285,7 +285,7 @@ async function registerCommands() {
       .setDescription('Remove per-store category overrides (fall back to global settings)')
       .addStringOption(opt =>
         opt.setName('retailer')
-          .setDescription('Retailer ID (e.g. 401games, walmart, facetoface)')
+          .setDescription('Retailer ID (e.g. 401games, walmart, hobbiesville)')
           .setRequired(true)),
   ].map(cmd => cmd.toJSON());
 

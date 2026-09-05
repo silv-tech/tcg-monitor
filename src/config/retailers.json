@@ -127,28 +127,6 @@
   },
   {
     "_phase": 2,
-    "id": "facetoface",
-    "name": "Face to Face Games",
-    "url": "https://www.facetofacegames.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#2d5a27",
-    "collections": [
-      "pokemon-sealed",
-      "pokemon-new-releases-and-preorders"
-    ],
-    "searchKeywords": [
-      "pokemon",
-      "booster box",
-      "etb",
-      "one piece",
-      "dragon ball"
-    ]
-  },
-  {
-    "_phase": 2,
     "id": "hobbiesville",
     "name": "Hobbiesville",
     "url": "https://hobbiesville.com",
@@ -205,29 +183,6 @@
   },
   {
     "_phase": 2,
-    "id": "untouchables",
-    "name": "Untouchables",
-    "url": "https://untouchables.ca",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#0984e3",
-    "collections": [
-      "pokemon-tcg",
-      "pokemon-showcase"
-    ],
-    "searchKeywords": [
-      "pokemon",
-      "booster box",
-      "elite trainer box",
-      "one piece",
-      "dragon ball",
-      "lorcana"
-    ]
-  },
-  {
-    "_phase": 2,
     "id": "deckoutgaming",
     "name": "Deck Out Gaming",
     "url": "https://deckoutgaming.ca",
@@ -236,17 +191,6 @@
     "proxyTier": "isp",
     "enabled": false,
     "color": "#1e3a5f"
-  },
-  {
-    "_phase": 2,
-    "id": "danireon",
-    "name": "Danireon Cards",
-    "url": "https://www.danireon.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#333333"
   },
   {
     "_phase": 2,
@@ -261,39 +205,6 @@
   },
   {
     "_phase": 2,
-    "id": "tcgfy",
-    "name": "TCGfy",
-    "url": "https://tcgfy.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#4a90d9"
-  },
-  {
-    "_phase": 2,
-    "id": "hobbystoptcg",
-    "name": "Hobby Stop TCG",
-    "url": "https://www.hobbystoptcg.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#2e86ab"
-  },
-  {
-    "_phase": 2,
-    "id": "cardlegendstcg",
-    "name": "Card Legends TCG",
-    "url": "https://www.cardlegendstcg.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#c0392b"
-  },
-  {
-    "_phase": 2,
     "id": "gameshack",
     "name": "GameShack",
     "url": "https://www.gameshack.ca",
@@ -302,50 +213,6 @@
     "proxyTier": "isp",
     "enabled": false,
     "color": "#27ae60"
-  },
-  {
-    "_phase": 2,
-    "id": "fusiongaming",
-    "name": "Fusion Gaming",
-    "url": "https://www.fusiongamingonline.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#8e44ad"
-  },
-  {
-    "_phase": 2,
-    "id": "pokechalet",
-    "name": "PokeChalet",
-    "url": "https://pokechalet.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#2c3e50"
-  },
-  {
-    "_phase": 2,
-    "id": "catchacard",
-    "name": "Catcha Card",
-    "url": "https://catchacard.ca",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#e74c3c"
-  },
-  {
-    "_phase": 2,
-    "id": "spshop",
-    "name": "SP Shop",
-    "url": "https://www.spshop.ca",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#3498db"
   },
   {
     "_phase": 2,
@@ -360,28 +227,6 @@
   },
   {
     "_phase": 2,
-    "id": "cardcycle",
-    "name": "Card Cycle",
-    "url": "https://cardcycle.ca",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#1abc9c"
-  },
-  {
-    "_phase": 2,
-    "id": "vancitycj",
-    "name": "Vancity CJ",
-    "url": "https://vancitycj.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#d35400"
-  },
-  {
-    "_phase": 2,
     "id": "infinitycards",
     "name": "Infinity Cards",
     "url": "https://infinitycards.ca",
@@ -390,39 +235,6 @@
     "proxyTier": "isp",
     "enabled": false,
     "color": "#2980b9"
-  },
-  {
-    "_phase": 2,
-    "id": "poketherapy",
-    "name": "Poke Therapy",
-    "url": "https://poketherapy.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#16a085"
-  },
-  {
-    "_phase": 2,
-    "id": "shopville",
-    "name": "Shopville",
-    "url": "https://myshopville.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#f39c12"
-  },
-  {
-    "_phase": 2,
-    "id": "tistaminis",
-    "name": "Tista Minis",
-    "url": "https://tistaminis.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#34495e"
   },
   {
     "_phase": 2,
@@ -445,61 +257,6 @@
     "proxyTier": "isp",
     "enabled": false,
     "color": "#c0392b"
-  },
-  {
-    "_phase": 2,
-    "id": "rivalcards",
-    "name": "Rival Cards",
-    "url": "https://rivalcards.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#7f8c8d"
-  },
-  {
-    "_phase": 2,
-    "id": "hastycards",
-    "name": "Hasty Cards",
-    "url": "https://www.hastycards.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#f1c40f"
-  },
-  {
-    "_phase": 2,
-    "id": "emmettstoystop",
-    "name": "Emmetts ToyStop",
-    "url": "https://emmettstoystop.com",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#e84393"
-  },
-  {
-    "_phase": 2,
-    "id": "tonkatomtcg",
-    "name": "TonkaTom TCG",
-    "url": "https://tonkatomstcgstation.ca",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#6c5ce7"
-  },
-  {
-    "_phase": 2,
-    "id": "vancitytcg",
-    "name": "Vancity TCG",
-    "url": "https://www.vancitytcg.ca",
-    "adapter": "shopify",
-    "intervalMs": 16000,
-    "proxyTier": "isp",
-    "enabled": false,
-    "color": "#00b894"
   },
   {
     "_phase": 2,

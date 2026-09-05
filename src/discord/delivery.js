@@ -370,11 +370,11 @@ class DeliveryQueue {
     const FREE_EVENTS = new Set(['RESTOCK', 'NEW_SKU', 'PREORDER_LIVE']);
     if (!FREE_EVENTS.has(event.type)) return;
 
-    // Free tier: big 5 + 10 popular stores (20+ specialty stores remain paid-only)
+    // Free tier: the big six plus the most active shops. Trimmed when 20 stores were removed —
+    // it previously named facetoface, untouchables, pokechalet, catchacard and fusiongaming,
+    // which no longer exist.
     const FREE_RETAILERS = new Set([
-      'amazon', 'walmart', 'bestbuy', 'costco', 'pokemoncenter',
-      '401games', 'facetoface', 'hobbiesville', 'chimeragaming', 'untouchables',
-      'pokechalet', 'catchacard', 'kanzengames', 'deckoutgaming', 'fusiongaming',
+      'amazon', 'walmart', 'bestbuy', 'costco', 'pokemoncenter', '401games', 'hobbiesville', 'chimeragaming', 'kanzengames', 'deckoutgaming',
     ]);
     if (!FREE_RETAILERS.has(retailerId)) return;
 
