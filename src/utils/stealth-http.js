@@ -54,8 +54,14 @@ function exitLabel(proxyUrl) {
   } catch { return 'unknown'; }
 }
 
-function recordEgress(proxyUrl, bytes) {
-  const key = exitLabel(proxyUrl);
+function targetOf(url) {
+  try { return new URL(url).host; } catch { return '?'; }
+}
+
+// Keyed by exit AND destination, so a metered exit can be attributed to the retailer that
+// actually spent it rather than guessed at from the code.
+function recordEgress(proxyUrl, bytes, url) {
+  const key = exitLabel(proxyUrl) + ' -> ' + targetOf(url);
   let e = egress.get(key);
   if (!e) { e = { requests: 0, bytes: 0, since: Date.now() }; egress.set(key, e); }
   e.requests += 1;
@@ -297,17 +303,17 @@ async function stealthGet(url, opts = {}) {
         const headers = {};
         if (response.headers?.forEach) response.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
         const body = response.status === 304 ? '' : await response.text();
-        recordEgress(proxyUrl, Buffer.byteLength(body || '', 'utf8'));
+        recordEgress(proxyUrl, Buffer.byteLength(body || '', 'utf8'), url);
         return { status: response.status, headers, body };
       }
 
       if (json) {
         const parsed = await response.json();
-        recordEgress(proxyUrl, Buffer.byteLength(JSON.stringify(parsed) || '', 'utf8'));
+        recordEgress(proxyUrl, Buffer.byteLength(JSON.stringify(parsed) || '', 'utf8'), url);
         return parsed;
       }
       const text = await response.text();
-      recordEgress(proxyUrl, Buffer.byteLength(text || '', 'utf8'));
+      recordEgress(proxyUrl, Buffer.byteLength(text || '', 'utf8'), url);
       return text;
     } catch (err) {
       if (err.message?.includes('Blocked after')) throw err;
