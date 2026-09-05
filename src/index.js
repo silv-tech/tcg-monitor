@@ -60,7 +60,7 @@ const ADAPTER_MAP = {
  * is between those, and 2.5 is the value proven to hold.
  *
  * A fast poll costs one request, so 31 shops sharing ~2.36 req/sec (after sweeps take their
- * share) get one poll each per ~13 seconds. Polling faster than the budget can serve does
+ * share) get one poll each per ~13 seconds, and three of them fetch two collections. Polling faster than the budget can serve does
  * not make detection faster — it just queues requests inside the poll, which is exactly what
  * produced 5-16 second poll times. Matching the interval to the budget keeps each poll at
  * its natural ~150ms instead.
@@ -69,7 +69,7 @@ const ADAPTER_MAP = {
  * datacenter IP is a shared-rate problem, not a tuning one. Going faster needs either fewer
  * shops on this IP or shop traffic on the residential proxy.
  */
-const SHOP_MIN_INTERVAL_MS = 14000;
+const SHOP_MIN_INTERVAL_MS = 16000;
 
 function clampShopInterval(retailer) {
   if (retailer.adapter !== 'shopify') return retailer;
