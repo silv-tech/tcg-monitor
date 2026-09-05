@@ -6,6 +6,7 @@ const { recordPollLatency } = require('./proxy');
 const { recordProductCount } = require('../monitoring/health');
 const { pollAdapterOnce } = require('./poll-adapter');
 const autotune = require('./autotune');
+const speedGuard = require('../monitoring/speed-guard');
 const { recordRestock, recordPrice } = require('./state');
 
 // Circuit breaker thresholds
@@ -261,9 +262,12 @@ class Scheduler {
       stagger += 3000;
     }
 
-    // Self-tuning cadence: watches real poll outcomes and moves each store's interval,
-    // speeding up while healthy and backing off the moment a retailer pushes back.
+    // Self-tuning cadence (off unless AUTOTUNE=on — see autotune.js).
     this._autotuneTimer = autotune.start(this);
+
+    // Reports, never changes. The big six drifted back over 10s twice in one day and both
+    // times a human caught it; this makes that loud instead of silent.
+    this._speedGuardTimer = speedGuard.start(this);
 
     // Redis health watchdog (#3) — check every 30s, pause polls if Redis is down
     this._redisWatchdog = setInterval(async () => {
