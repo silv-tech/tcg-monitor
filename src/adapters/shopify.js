@@ -21,6 +21,9 @@ const { normalizePrice } = require('../utils/helpers');
 // change deep in the catalogue is noticed.
 const FULL_SWEEP_MS = 5 * 60 * 1000;
 
+const rateBudget = require('../utils/rate-budget');
+const SHOPIFY_BUDGET = 'shopify';
+
 /**
  * Universal Shopify adapter — works for ANY Shopify store.
  * Shopify exposes /products.json and /collections/{handle}.json publicly.
@@ -172,6 +175,17 @@ class ShopifyAdapter extends BaseAdapter {
    * @returns {{products: array, changed: boolean}}
    */
   async _fetchPage(url) {
+    // Every Shopify request in the process passes through one shared budget. Per-store
+    // cadence has repeatedly looked fine while the aggregate did not — that is what
+    // rate-limited all 31 shops into a circuit-broken outage — and this is the only place
+    // that sees the total.
+    const granted = await rateBudget.acquire(SHOPIFY_BUDGET, 8000);
+    if (!granted) {
+      // Out of budget rather than blocked. Report it as throttling so the poll is skipped
+      // cleanly instead of counting as an error and tripping the circuit breaker.
+      throw new Error(`Rate limited (budget): ${url}`);
+    }
+
     const etag = this._etags.get(url);
     const res = await stealthGet(url, {
       withResponse: true,

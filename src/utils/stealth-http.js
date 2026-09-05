@@ -86,6 +86,11 @@ function isRateLimited(err) {
   return /^(Rate limited|Cooling down)/.test(err?.message || '');
 }
 
+/** True when we declined to send the request ourselves, rather than the retailer refusing it. */
+function isBudgetSkip(err) {
+  return /^Rate limited \(budget\)/.test(err?.message || '');
+}
+
 // `lane` splits one proxy URL across several cached impit instances. Each instance keeps its
 // own connection, and the residential pool hands out a different exit IP per connection —
 // measured: 4 requests through one shared instance all came from 184.65.189.19, while 4
@@ -240,7 +245,7 @@ function _clearCache(proxyUrl, ignoreTlsErrors = false, lane = null) {
 function _resetCooldowns() { hostCooldowns.clear(); hostStrikes.clear(); }
 
 module.exports = {
-  stealthGet, _clearCache, isRateLimited, cooldownRemaining, _resetCooldowns,
+  stealthGet, _clearCache, isRateLimited, isBudgetSkip, cooldownRemaining, _resetCooldowns,
   // exported for tests
   setCooldown, clearStrikes, BACKOFF_LADDER_MS,
 };

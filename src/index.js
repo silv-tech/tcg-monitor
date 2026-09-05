@@ -6,6 +6,7 @@ const { createBot, getClient, shutdown: shutdownBot } = require('./discord/bot')
 const { createAdminServer } = require('./admin/server');
 const { checkAndAlert } = require('./monitoring/alerts');
 const { shutdown: shutdownState } = require('./core/state');
+const rateBudget = require('./utils/rate-budget');
 
 // Adapter imports
 const EBGamesAdapter = require('./adapters/ebgames');
@@ -162,6 +163,20 @@ async function main() {
     logger.warn(`Config drift — ${drift.length} value(s) overridden in Redis, retailers.json is NOT the source of truth:`);
     for (const d of drift) logger.warn(`  ${d}`);
   }
+  // One budget for every Shopify request the process makes.
+  //
+  // 31 shops at 8s is ~4 req/sec on its own, and catalogue sweeps pushed peaks to ~7 — enough
+  // to keep this IP rate-limited even after a poll was cut from ten requests to one. Nothing
+  // in the system was watching the total, because every limit was per-store.
+  //
+  // 2.5 req/sec is deliberately below where the shops were still being refused. With a fast
+  // poll costing one request, that is a full pass over 31 shops roughly every 12 seconds,
+  // and sweeps draw from the same budget instead of spiking on top of it.
+  const shopCount = retailers.filter(r => r.adapter === 'shopify' && r.enabled).length;
+  if (shopCount > 0) {
+    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 2.5), 5);
+  }
+
   const clamped = retailers.filter(r => r._clampedFrom);
   if (clamped.length > 0) {
     logger.warn(
