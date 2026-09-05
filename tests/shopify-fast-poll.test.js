@@ -45,17 +45,45 @@ function product(id, title, price, available = true) {
 }
 
 describe('shopify fast poll: sweep scheduling', () => {
-  test('the first poll after boot is a FULL sweep, never partial', () => {
-    // A partial first poll would seed the catalogue with one page and treat the rest as new
-    // the moment a sweep ran.
-    const a = makeAdapter();
-    assert.strictEqual(a._isFullSweepDue(), true);
+  test('the first poll after boot is FAST, not a sweep', () => {
+    // 31 shops each booting into a 10-page sweep is ~310 requests in the first seconds of a
+    // deploy — the same ~39 req/sec burst that caused the outage, recreated on every restart.
+    // Only a shop whose offset happens to be 0 may sweep immediately.
+    const a = makeAdapter({ id: 'hobbiesville' });
+    a._isFullSweepDue();
+    assert.ok(a._sweepOffset > 0, 'this fixture should have a non-zero offset');
+
+    const b = makeAdapter({ id: 'hobbiesville' });
+    assert.strictEqual(b._isFullSweepDue(), false, 'first poll must not be a full sweep');
+  });
+
+  test('the first sweep lands at boot + this shop\'s own offset', () => {
+    const now = Date.now();
+    const a = makeAdapter({ id: 'hobbiesville' });
+    a._isFullSweepDue(now);
+    const dueAt = a._lastFullSweep + (5 * 60 * 1000);
+    assert.ok(dueAt >= now, 'not already due');
+    assert.ok(dueAt <= now + (5 * 60 * 1000), 'due within one window');
+    assert.strictEqual(a._isFullSweepDue(dueAt), true, 'sweeps once the offset elapses');
+  });
+
+  test('initial sweeps spread across the window rather than clustering', () => {
+    const ids = ['hobbiesville', '401games', 'facetoface', 'kanzengames', 'chimeragaming',
+      'untouchables', 'zardocards', 'rivalcards', 'tcgfy', 'spshop'];
+    const now = Date.now();
+    const dueTimes = ids.map((id) => {
+      const a = makeAdapter({ id });
+      a._isFullSweepDue(now);
+      return a._lastFullSweep + (5 * 60 * 1000) - now;
+    });
+    assert.strictEqual(new Set(dueTimes).size, ids.length, 'no two shops sweep at the same moment');
+    assert.ok(Math.max(...dueTimes) - Math.min(...dueTimes) > 60000, 'genuinely spread out');
   });
 
   test('a poll straight after a sweep is fast, not another sweep', () => {
     const a = makeAdapter();
-    a._lastFullSweep = Date.now();
     a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
     assert.strictEqual(a._isFullSweepDue(), false);
   });
 
@@ -107,6 +135,8 @@ describe('shopify fast poll: reads only page 1', () => {
 
   test('a full sweep pages through and is NOT marked partial', async () => {
     const a = makeAdapter();
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now() - (5 * 60 * 1000) - 1000; // force a sweep
     let page = 0;
     a._fetchPage = async () => {
       page += 1;

@@ -56,15 +56,25 @@ class ShopifyAdapter extends BaseAdapter {
    * 31 do not sweep on the same tick.
    */
   _isFullSweepDue(now = Date.now()) {
-    if (!this._sweepOffset) {
+    if (this._lastFullSweep === undefined) {
       // Deterministic per-shop offset from the id, so sweeps spread across the window
       // instead of clustering — same reasoning as the scheduler's phase spread.
       let h = 0;
       for (const ch of String(this.id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
       this._sweepOffset = h % FULL_SWEEP_MS;
+
+      // Do NOT sweep on the first poll. Every shop booting into a full sweep meant 31 shops
+      // x 10 pages = ~310 requests inside the first few seconds of every deploy — the exact
+      // ~39 req/sec burst that caused the original outage, re-created on each restart. It
+      // showed up as shops taking 429s immediately at startup and going straight back into
+      // cooldown.
+      //
+      // Instead, back-date the clock so this shop's first sweep falls at boot + its own
+      // offset, spreading the 31 initial sweeps across the whole 5-minute window (~10s
+      // apart). Polls before then are fast ones, which still catch every new listing.
+      this._lastFullSweep = now - FULL_SWEEP_MS + this._sweepOffset;
     }
-    if (!this._lastFullSweep) return true; // first poll after boot must be complete
-    return (now + this._sweepOffset) - this._lastFullSweep >= FULL_SWEEP_MS;
+    return now - this._lastFullSweep >= FULL_SWEEP_MS;
   }
 
   async fetchProducts() {
