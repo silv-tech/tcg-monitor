@@ -439,6 +439,62 @@ async function setStoreCategories(retailerId, categories) {
   await getRedis().set(`${STORE_CATEGORIES_PREFIX}${retailerId}`, JSON.stringify(categories));
 }
 
+/**
+ * Delete everything Redis holds for a retailer.
+ *
+ * Removing a retailer from retailers.json stops it being polled but leaves its data behind:
+ * product records, the seen-SKU set, price and restock history, status and last-check keys.
+ * Those expire eventually (7 / 30 / 90 days) and nothing reads them, but "removed" should
+ * mean removed rather than "will fade out over three months".
+ *
+ * Product keys are hashed by (retailerId, sku) so they cannot be matched by pattern — they are
+ * found via the retailer's own index, with a SCAN as a fallback for anything the index missed.
+ */
+async function purgeRetailer(retailerId) {
+  const redis = getRedis();
+  const deleted = { products: 0, keys: 0 };
+
+  // Products, via the index (hashed keys cannot be globbed)
+  const products = await getAllProducts(retailerId);
+  const skus = Object.keys(products);
+  if (skus.length > 0) {
+    const pipe = redis.pipeline();
+    for (const sku of skus) pipe.del(`${PREFIX}product:${hashSku(retailerId, sku)}`);
+    await pipe.exec();
+    deleted.products = skus.length;
+  }
+
+  // Per-retailer singletons and the id-prefixed history keys
+  const single = [
+    `${PREFIX}lastcheck:${retailerId}`,
+    `${PREFIX}status:${retailerId}`,
+    `${PREFIX}seen:${retailerId}`,
+    `${PREFIX}index:${retailerId}`,
+    `${STORE_CATEGORIES_PREFIX}${retailerId}`,
+  ];
+  for (const pattern of [`${PREFIX}pricehistory:${retailerId}:*`, `${PREFIX}restock:${retailerId}:*`,
+    `${PREFIX}product:${retailerId}:*`]) {
+    let cursor = '0';
+    do {
+      const [next, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 1000);
+      cursor = next;
+      single.push(...batch);
+    } while (cursor !== '0');
+  }
+  if (single.length > 0) {
+    const pipe = redis.pipeline();
+    for (const k of single) pipe.del(k);
+    const res = await pipe.exec();
+    deleted.keys = res.filter(([err, n]) => !err && n > 0).length;
+  }
+
+  // And the override entry, so a re-added retailer starts from its config rather than
+  // whatever state it was left in.
+  await deleteRetailerOverride(retailerId);
+
+  return deleted;
+}
+
 async function clearStoreCategories(retailerId) {
   await getRedis().del(`${STORE_CATEGORIES_PREFIX}${retailerId}`);
 }
@@ -510,6 +566,7 @@ module.exports = {
   getAllCategories,
   getStoreCategories,
   setStoreCategories,
+  purgeRetailer,
   clearStoreCategories,
   getAllStoreOverrides,
   getWatchlistOverrides,

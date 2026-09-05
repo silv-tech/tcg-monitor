@@ -145,6 +145,29 @@ router.post('/retailers', (req, res) => {
   res.status(201).json(newRetailer);
 });
 
+/**
+ * Wipe everything Redis holds for a retailer.
+ *
+ * Removing a retailer from retailers.json stops it being polled but leaves its data behind —
+ * products, seen-SKU set, price and restock history, status. Those expire on their own after
+ * 7 to 90 days and nothing reads them, but "removed" should mean removed today rather than
+ * gradually over three months.
+ *
+ * Deliberately its own endpoint rather than folded into DELETE, so it can be run for
+ * retailers that were already taken out of the config.
+ */
+router.post('/retailers/:id/purge', async (req, res) => {
+  const id = req.params.id;
+  if (!/^[a-z0-9_-]+$/.test(id)) return res.status(400).json({ error: 'invalid retailer id' });
+  try {
+    const deleted = await state.purgeRetailer(id);
+    logger.info(`Purged Redis data for ${id}: ${deleted.products} products, ${deleted.keys} other keys`);
+    res.json({ ok: true, id, ...deleted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Remove retailer
 router.delete('/retailers/:id', (req, res) => {
   const retailers = JSON.parse(fs.readFileSync(retailersPath, 'utf-8'));
