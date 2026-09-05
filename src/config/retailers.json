@@ -112,7 +112,7 @@
     "url": "https://store.401games.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#1a1a2e",
     "collections": [],
@@ -132,7 +132,7 @@
     "url": "https://www.facetofacegames.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#2d5a27",
     "collections": [
@@ -154,7 +154,7 @@
     "url": "https://hobbiesville.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": true,
     "color": "#ff6600",
     "maxProducts": 2500,
@@ -188,11 +188,10 @@
     "url": "https://www.chimeragamingonline.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#d63031",
     "collections": [
-      "pokemon-sealed",
       "pokemon-new-releases"
     ],
     "searchKeywords": [
@@ -211,7 +210,7 @@
     "url": "https://untouchables.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#0984e3",
     "collections": [
@@ -234,7 +233,7 @@
     "url": "https://deckoutgaming.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#1e3a5f"
   },
@@ -245,7 +244,7 @@
     "url": "https://www.danireon.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#333333"
   },
@@ -256,7 +255,7 @@
     "url": "https://www.pokejeux.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#e63946"
   },
@@ -267,7 +266,7 @@
     "url": "https://tcgfy.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#4a90d9"
   },
@@ -278,7 +277,7 @@
     "url": "https://www.hobbystoptcg.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#2e86ab"
   },
@@ -289,7 +288,7 @@
     "url": "https://www.cardlegendstcg.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#c0392b"
   },
@@ -300,7 +299,7 @@
     "url": "https://www.gameshack.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#27ae60"
   },
@@ -311,7 +310,7 @@
     "url": "https://www.fusiongamingonline.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#8e44ad"
   },
@@ -322,7 +321,7 @@
     "url": "https://pokechalet.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#2c3e50"
   },
@@ -333,7 +332,7 @@
     "url": "https://catchacard.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#e74c3c"
   },
@@ -344,7 +343,7 @@
     "url": "https://www.spshop.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#3498db"
   },
@@ -355,7 +354,7 @@
     "url": "https://remicardtrader.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#9b59b6"
   },
@@ -366,7 +365,7 @@
     "url": "https://cardcycle.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#1abc9c"
   },
@@ -377,7 +376,7 @@
     "url": "https://vancitycj.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#d35400"
   },
@@ -388,7 +387,7 @@
     "url": "https://infinitycards.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#2980b9"
   },
@@ -399,7 +398,7 @@
     "url": "https://poketherapy.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#16a085"
   },
@@ -410,7 +409,7 @@
     "url": "https://myshopville.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#f39c12"
   },
@@ -421,7 +420,7 @@
     "url": "https://tistaminis.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#34495e"
   },
@@ -432,7 +431,7 @@
     "url": "https://doescards.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#e67e22"
   },
@@ -443,7 +442,7 @@
     "url": "https://zardocards.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#c0392b"
   },
@@ -454,7 +453,7 @@
     "url": "https://rivalcards.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#7f8c8d"
   },
@@ -465,7 +464,7 @@
     "url": "https://www.hastycards.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#f1c40f"
   },
@@ -476,7 +475,7 @@
     "url": "https://emmettstoystop.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#e84393"
   },
@@ -487,7 +486,7 @@
     "url": "https://tonkatomstcgstation.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#6c5ce7"
   },
@@ -498,7 +497,7 @@
     "url": "https://www.vancitytcg.ca",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": false,
     "color": "#00b894"
   },
@@ -509,7 +508,7 @@
     "url": "https://kanzengames.com",
     "adapter": "shopify",
     "intervalMs": 16000,
-    "proxyTier": "none",
+    "proxyTier": "isp",
     "enabled": true,
     "color": "#1a1a2e",
     "maxProducts": 4000,

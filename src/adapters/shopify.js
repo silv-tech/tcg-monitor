@@ -1,6 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { stealthGet, isRateLimited } = require('../utils/stealth-http');
+const { markProxyBlocked, markProxySuccess } = require('../core/proxy');
 
 // Shopify prices by the CALLER'S GEOGRAPHY. The app runs from Railway in Virginia, so these
 // Canadian stores were quoting USD while we labelled the result CAD — measured on live stores:
@@ -28,6 +29,15 @@ const FULL_SWEEP_MS = 15 * 60 * 1000;
 
 const rateBudget = require('../utils/rate-budget');
 const SHOPIFY_BUDGET = 'shopify';
+
+// What one exit IP may spend. 2.5 req/sec is the rate measured as safe on the direct Railway
+// IP, so it is the honest per-IP figure to assume for a proxy too until measured otherwise.
+// The win is not a higher per-IP rate — it is having ten of them instead of one.
+const PER_IP_BUDGET = { ratePerSec: 2.5, burst: 5 };
+
+function hostOfProxy(proxyUrl) {
+  try { return new URL(proxyUrl).hostname; } catch { return proxyUrl; }
+}
 
 /**
  * How many products a FAST poll asks for. The full sweep still uses the full page size.
@@ -254,11 +264,22 @@ class ShopifyAdapter extends BaseAdapter {
     // cadence has repeatedly looked fine while the aggregate did not — that is what
     // rate-limited all 31 shops into a circuit-broken outage — and this is the only place
     // that sees the total.
+    // Route through this shop's assigned ISP proxy when it has one. Shopify rate-limits the
+    // CALLER, so 31 shops behind a single Railway IP all compete for one allowance — which is
+    // what caused every outage. Behind ten ISP IPs they compete in groups of ~3 instead.
+    const { url: proxyUrl, proxyObj } = this.proxyTier === 'isp'
+      ? this.getProxy()
+      : { url: null, proxyObj: null };
+
+    // Budget keyed by EXIT IP, not globally. A shop behind proxy A is not spending proxy B's
+    // allowance, and one shared bucket would throttle them as if it were.
+    const budgetKey = proxyUrl ? `shopify:${hostOfProxy(proxyUrl)}` : SHOPIFY_BUDGET;
+
     // A fast poll is the thing detection latency is measured on; a sweep is background work
     // that can wait. Without this the sweep's ten back-to-back requests sat in front of every
     // new-listing check and cost ~2-3s per poll.
     const priority = this._partialPoll ? 0 : 1;
-    const granted = await rateBudget.acquire(SHOPIFY_BUDGET, 8000, priority);
+    const granted = await rateBudget.acquire(budgetKey, 8000, priority, PER_IP_BUDGET);
     if (!granted) {
       // Out of budget rather than blocked. Report it as throttling so the poll is skipped
       // cleanly instead of counting as an error and tripping the circuit breaker.
@@ -266,18 +287,31 @@ class ShopifyAdapter extends BaseAdapter {
     }
 
     const etag = this._etags.get(url);
-    const res = await stealthGet(url, {
-      withResponse: true,
-      rawHeaders: true,
-      timeoutMs: 15000,
-      maxRetries: 1,
-      headers: {
-        'Accept': 'application/json',
-        'Accept-Encoding': 'gzip, deflate, br',
-        ...CA_LOCALE_HEADERS,
-        ...(etag ? { 'If-None-Match': etag } : {}),
-      },
-    });
+    let res;
+    try {
+      res = await stealthGet(url, {
+        proxyUrl,
+        // One connection per shop, so two shops sharing an exit IP do not share a socket.
+        lane: proxyUrl ? this.id : null,
+        withResponse: true,
+        rawHeaders: true,
+        timeoutMs: 15000,
+        maxRetries: 1,
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Encoding': 'gzip, deflate, br',
+          ...CA_LOCALE_HEADERS,
+          ...(etag ? { 'If-None-Match': etag } : {}),
+        },
+      });
+    } catch (err) {
+      // Tell the pool when a proxy is the problem, so it can be rotated out rather than
+      // handed to the next shop that asks. A 429 is the SHOP throttling us, not the proxy
+      // failing, so it must not mark the IP unhealthy.
+      if (proxyObj && !isRateLimited(err) && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
+      throw err;
+    }
+    if (proxyObj) markProxySuccess(proxyObj);
 
     if (res.status === 304) {
       // Unchanged — reuse what this page gave us last time, parse nothing, transfer nothing.

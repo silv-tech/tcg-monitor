@@ -132,9 +132,17 @@ function get(name) {
 /**
  * Acquire from a named budget. Unknown budget = no limit, so callers stay simple.
  * Lower priority runs first: latency-critical work should pass 0, background work 1.
+ *
+ * @param {object} [autoCreate] {ratePerSec, burst} — create the bucket on first use instead
+ *   of returning unlimited. Rate limits are enforced per CALLER IP, so the natural budget key
+ *   is the exit IP: a shop behind proxy A and a shop behind proxy B are not competing for the
+ *   same allowance, and a single global bucket would throttle them as though they were.
  */
-async function acquire(name, maxWaitMs = 10000, priority = 0) {
-  const bucket = buckets.get(name);
+async function acquire(name, maxWaitMs = 10000, priority = 0, autoCreate = null) {
+  let bucket = buckets.get(name);
+  if (!bucket && autoCreate) {
+    bucket = configure(name, autoCreate.ratePerSec, autoCreate.burst);
+  }
   if (!bucket) return true;
   return bucket.acquire(maxWaitMs, priority);
 }
