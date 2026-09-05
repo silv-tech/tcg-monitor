@@ -2,6 +2,7 @@ const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice, isTCGProduct, sleep } = require('../utils/helpers');
 const { getProxyUrl } = require('../core/proxy');
+
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
@@ -32,6 +33,22 @@ function decodeEntities(str) {
 // How often to run the paid ScraperAPI search for NEW listings. This is the whole
 // ScraperAPI bill: 3 queries x 5 credits per run. It does NOT affect restock speed —
 // _monitorKnownAsins re-checks every known ASIN on every poll, free, regardless.
+/**
+ * How many search queries go out per poll, and how long to stay quiet when Amazon refuses.
+ *
+ * Firing all four queries every 6 seconds is 0.67 req/sec sustained against one endpoint.
+ * Measured 2026-09-05: Amazon tolerated that for roughly fourteen hours and then 503'd the IP.
+ * Rotating one query per poll is the same coverage at a quarter of the load — every query is
+ * refreshed every 24s — and it arrives smoothly instead of in bursts of four, which is the
+ * same change that fixed the Shopify shops the same day.
+ *
+ * The old backoff skipped every OTHER cycle, which is not backing off: it still sent four
+ * blocked requests every twelve seconds forever. A block under light load decayed on its own
+ * in ~23 minutes; the continuously re-poked one had not decayed after two hours.
+ */
+const QUERIES_PER_POLL = Number(process.env.AMAZON_QUERIES_PER_POLL) || 1;
+const SEARCH_BACKOFF_MS = [60000, 180000, 300000, 600000, 900000];
+
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 const AOD_COOLDOWN_MS = 10 * 60 * 1000;
@@ -48,6 +65,9 @@ class AmazonAdapter extends BaseAdapter {
     this._lastFetchThrottled = false;
     this._searchWindow = [];         // rolling free-search success
     this._searchSkip = 0;
+    this._queryCursor = 0;
+    this._searchStrikes = 0;
+    this._searchBlockedUntil = 0;
     this._lastAodSweepAt = 0;
     this._deriveTiming();
 
@@ -170,11 +190,18 @@ class AmazonAdapter extends BaseAdapter {
     const products = {};
     const now = Date.now();
 
-    // Amazon throttles by endpoint, as the AOD sweep found out the hard way. If search
-    // starts failing, slow down rather than hammering it into a deeper block.
-    const rate = this._searchSuccessRate();
-    if (rate !== null && rate < 0.5 && ++this._searchSkip % 2 !== 0) {
-      logger.warn(`Amazon: search backing off (${Math.round(rate * 100)}% success) — skipping cycle`);
+    // Amazon throttles by endpoint, as the AOD sweep found out the hard way. If search starts
+    // failing, go properly quiet rather than hammering it into a deeper block.
+    //
+    // Skipping every OTHER cycle was not backing off at all: at a 6s interval it still sent
+    // four blocked requests every twelve seconds, indefinitely. Measured 2026-09-05 — Amazon
+    // blocked this IP at 02:54 and recovered on its own within 23 minutes under light load,
+    // then blocked again at ~16:13 and was STILL blocked 2 hours later because the "backoff"
+    // never stopped knocking. Going quiet is what lets a block lift; the shops taught the same
+    // lesson the same day.
+    if (now < this._searchBlockedUntil) {
+      const left = Math.round((this._searchBlockedUntil - now) / 1000);
+      logger.warn(`Amazon: search quiet for another ${left}s (letting the block decay)`);
       for (const [asin, cached] of this._knownProducts) products[asin] = cached;
       return products;
     }
@@ -202,8 +229,24 @@ class AmazonAdapter extends BaseAdapter {
    * Discovery: free search for new products and their current stock.
    */
   async _runDiscovery(products) {
+    // Rotate through the queries instead of firing all of them every poll.
+    //
+    // Four searches every 6 seconds is 0.67 req/sec sustained against one endpoint, and it is
+    // what got this IP blocked: Amazon tolerated it for ~14 hours and then cut us off. One
+    // query per poll is the same coverage at a quarter of the load — every query is refreshed
+    // every 24s — and it arrives smoothly rather than in bursts of four, which is the same
+    // thing that fixed the shops.
+    //
+    // Carrying forward _knownProducts (below) means the queries not run this cycle still
+    // report their products; only the discovery of a brand-new listing waits for its turn.
+    const batch = [];
+    for (let i = 0; i < QUERIES_PER_POLL && i < this.searchQueries.length; i++) {
+      batch.push(this.searchQueries[this._queryCursor % this.searchQueries.length]);
+      this._queryCursor = (this._queryCursor + 1) % this.searchQueries.length;
+    }
+
     const results = await Promise.allSettled(
-      this.searchQueries.map(query => this._freeSearch(query).then(items => ({ query, items })))
+      batch.map(query => this._freeSearch(query).then(items => ({ query, items })))
     );
 
     let hits = 0;
@@ -228,9 +271,23 @@ class AmazonAdapter extends BaseAdapter {
       if (!(asin in products)) products[asin] = cached;
     }
 
-    this._recordSearchResult(hits, this.searchQueries.length);
-    this.reportFreshness(hits, this.searchQueries.length);
-    logger.info(`Amazon: SEARCH — ${hits}/${this.searchQueries.length} queries, ${found} results, ${this._knownProducts.size} known ASINs ($0)`);
+    this._recordSearchResult(hits, batch.length);
+    this.reportFreshness(hits, batch.length);
+
+    // Every query in this batch failed — Amazon is refusing us. Climb the quiet ladder so the
+    // block can actually decay. Any success resets it.
+    if (hits === 0) {
+      const rung = Math.min(this._searchStrikes, SEARCH_BACKOFF_MS.length - 1);
+      this._searchStrikes += 1;
+      this._searchBlockedUntil = Date.now() + SEARCH_BACKOFF_MS[rung];
+      logger.warn(`Amazon: search blocked (strike ${this._searchStrikes}) — quiet for ${SEARCH_BACKOFF_MS[rung] / 1000}s`);
+    } else if (this._searchStrikes > 0) {
+      logger.info(`Amazon: search recovered after ${this._searchStrikes} strike(s)`);
+      this._searchStrikes = 0;
+      this._searchBlockedUntil = 0;
+    }
+
+    logger.info(`Amazon: SEARCH — ${hits}/${batch.length} queries (${batch.join(', ')}), ${found} results, ${this._knownProducts.size} known ASINs ($0)`);
   }
 
   /**
