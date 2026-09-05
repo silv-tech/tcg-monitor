@@ -4,6 +4,7 @@ const path = require('path');
 const state = require('../core/state');
 const { checkHealth } = require('../monitoring/health');
 const { getStats: getProxyStats, reloadProxies, getProxyPoolStats } = require('../core/proxy');
+const { getEgressStats } = require('../utils/stealth-http');
 const scheduler = require('../core/scheduler');
 const logger = require('../monitoring/logger');
 
@@ -228,6 +229,24 @@ router.delete('/products/keywords/:keyword', async (req, res) => {
 // Proxy stats
 router.get('/stats/proxy', (req, res) => {
   res.json(getProxyStats());
+});
+
+/**
+ * Bandwidth per exit, including the adapters that bypass BaseAdapter.fetch.
+ *
+ * Walmart, Amazon and Pokemon Center call stealthGet directly, so they never appeared in
+ * /stats/proxy at all — Walmart alone sends roughly 57,000 residential search requests a day
+ * and none of it was visible. Residential bandwidth is metered and capped, so it needs to be
+ * measurable, not inferred.
+ */
+router.get('/stats/egress', (req, res) => {
+  const stats = getEgressStats();
+  const metered = Object.entries(stats).filter(([, v]) => v.metered);
+  res.json({
+    exits: stats,
+    meteredGbPerDay: Number(metered.reduce((sum, [, v]) => sum + v.gbPerDay, 0).toFixed(3)),
+    meteredReqPerDay: metered.reduce((sum, [, v]) => sum + v.reqPerDay, 0),
+  });
 });
 
 // ScraperAPI budget status (#2)

@@ -32,6 +32,53 @@ const hostCooldowns = new Map(); // host -> epoch ms until which requests fail f
 const hostStrikes = new Map();   // host -> consecutive 429s, for escalating backoff
 
 /**
+ * Per-exit byte accounting.
+ *
+ * Residential proxy bandwidth is metered and capped, and it was completely invisible: Walmart,
+ * Amazon and Pokemon Center all call stealthGet directly rather than going through
+ * BaseAdapter.fetch, so recordRequest never ran for them and they never appeared in the proxy
+ * stats. Walmart alone sends four residential search requests every six seconds, around 57,000
+ * a day, and nobody could see it.
+ *
+ * You cannot spend a capped resource carefully without measuring it, so every request through
+ * this module is now counted against the exit it used.
+ */
+const egress = new Map(); // exit label -> { requests, bytes, since }
+
+function exitLabel(proxyUrl) {
+  if (!proxyUrl) return 'direct';
+  try {
+    const h = new URL(proxyUrl).hostname;
+    // ISP proxies are bare IPs and unmetered; residential pools are hostnames and are not.
+    return /^\d+\.\d+\.\d+\.\d+$/.test(h) ? `isp:${h}` : `residential:${h}`;
+  } catch { return 'unknown'; }
+}
+
+function recordEgress(proxyUrl, bytes) {
+  const key = exitLabel(proxyUrl);
+  let e = egress.get(key);
+  if (!e) { e = { requests: 0, bytes: 0, since: Date.now() }; egress.set(key, e); }
+  e.requests += 1;
+  e.bytes += bytes || 0;
+}
+
+/** Byte and request totals per exit, with a projected daily rate. */
+function getEgressStats() {
+  const out = {};
+  for (const [k, v] of egress) {
+    const hours = Math.max((Date.now() - v.since) / 3600000, 1 / 60);
+    out[k] = {
+      requests: v.requests,
+      gb: Number((v.bytes / 1073741824).toFixed(4)),
+      gbPerDay: Number(((v.bytes / 1073741824) / hours * 24).toFixed(3)),
+      reqPerDay: Math.round(v.requests / hours * 24),
+      metered: k.startsWith('residential:'),
+    };
+  }
+  return out;
+}
+
+/**
  * Escalating backoff, because honouring Retry-After alone is not enough.
  *
  * Shopify answers with Retry-After: 5, so a literal reading takes us quiet for five seconds
@@ -250,13 +297,18 @@ async function stealthGet(url, opts = {}) {
         const headers = {};
         if (response.headers?.forEach) response.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
         const body = response.status === 304 ? '' : await response.text();
+        recordEgress(proxyUrl, Buffer.byteLength(body || '', 'utf8'));
         return { status: response.status, headers, body };
       }
 
       if (json) {
-        return await response.json();
+        const parsed = await response.json();
+        recordEgress(proxyUrl, Buffer.byteLength(JSON.stringify(parsed) || '', 'utf8'));
+        return parsed;
       }
-      return await response.text();
+      const text = await response.text();
+      recordEgress(proxyUrl, Buffer.byteLength(text || '', 'utf8'));
+      return text;
     } catch (err) {
       if (err.message?.includes('Blocked after')) throw err;
 
@@ -281,7 +333,7 @@ function _clearCache(proxyUrl, ignoreTlsErrors = false, lane = null) {
 function _resetCooldowns() { hostCooldowns.clear(); hostStrikes.clear(); }
 
 module.exports = {
-  stealthGet, _clearCache, isRateLimited, isBudgetSkip, isSelfSkip, cooldownRemaining, _resetCooldowns,
+  stealthGet, _clearCache, isRateLimited, isBudgetSkip, isSelfSkip, getEgressStats, cooldownRemaining, _resetCooldowns,
   // exported for tests
   setCooldown, clearStrikes, BACKOFF_LADDER_MS,
 };
