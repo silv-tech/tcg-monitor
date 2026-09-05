@@ -47,8 +47,25 @@ const hostStrikes = new Map();   // host -> consecutive 429s, for escalating bac
 const BACKOFF_LADDER_MS = [30000, 60000, 120000, 300000, 900000];
 const MAX_COOLDOWN_MS = 900000; // 15 min
 
+/**
+ * Cooldown key: host AND path, not host alone.
+ *
+ * Keying on the host was a regression that took Walmart's search offline. Its watchlist polls
+ * a GraphQL endpoint on www.walmart.ca; when that endpoint returned 429, a host-wide cooldown
+ * silenced the SEARCH endpoint too — a completely different API that was not being throttled.
+ * The symptom was "Walmart: search — 0/4 stealth, 0 products, 1ms" and "found 0 products in
+ * 0ms": zero milliseconds because the request was never sent. With the escalating ladder that
+ * is up to 15 minutes of a big-six store going blind, caused by our own backoff.
+ *
+ * These retailers throttle per endpoint — the Amazon adapter already says so in its own
+ * comments — so the cooldown has to be per endpoint as well. Shops are unaffected in practice:
+ * a shop's fast poll and its full sweep both hit /products.json, so they still share one key.
+ */
 function hostOf(url) {
-  try { return new URL(url).host; } catch { return url; }
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname}`;
+  } catch { return url; }
 }
 
 function cooldownRemaining(url) {
