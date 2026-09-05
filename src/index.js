@@ -29,6 +29,32 @@ const ADAPTER_MAP = {
   bestbuy: BestBuyAdapter,
 };
 
+/**
+ * Floor for the small Shopify card shops.
+ *
+ * These 31 shops were set to 8000ms while chasing "every store under 10 seconds". Each
+ * individual store then saw only one request every 8 seconds — trivially low — yet all of
+ * them returned 429 at once. That is the tell: Shopify throttles per CALLER IP across its
+ * whole edge, not per store. So the only quantity that matters is our AGGREGATE rate, and
+ * 31 shops at 8s put ~8 requests/sec on one Railway IP.
+ *
+ * The result was not a slightly-throttled monitor, it was a dead one: every shop tripped the
+ * circuit breaker and stopped polling entirely, so they detected nothing at all from 08:47
+ * onward. A 45s shop that works beats an 8s shop that has been cut off.
+ *
+ * This is a FLOOR applied after Redis overrides, deliberately: the 8000ms values live in
+ * Redis, which silently wins over retailers.json, so a fix that only edited the file on disk
+ * would have changed nothing. The big six are untouched — they are separate hosts with
+ * separate limits, and they are what the product is sold on.
+ */
+const SHOP_MIN_INTERVAL_MS = 45000;
+
+function clampShopInterval(retailer) {
+  if (retailer.adapter !== 'shopify') return retailer;
+  if (!(retailer.intervalMs < SHOP_MIN_INTERVAL_MS)) return retailer;
+  return { ...retailer, intervalMs: SHOP_MIN_INTERVAL_MS, _clampedFrom: retailer.intervalMs };
+}
+
 async function main() {
   logger.info('Nocturne Monitors starting...');
 
@@ -115,7 +141,8 @@ async function main() {
   // 3. Register adapters from config (merge Redis overrides so enabled/interval state persists)
   const baseRetailers = require('./config/retailers.json');
   const overrides = await stateModule.getRetailerOverrides();
-  const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
+  const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }))
+    .map(clampShopInterval);
 
   // Redis overrides silently win over retailers.json, so the file on disk can disagree with
   // what is actually running. Say so at boot rather than letting the next reader be misled.
@@ -131,6 +158,15 @@ async function main() {
     logger.warn(`Config drift — ${drift.length} value(s) overridden in Redis, retailers.json is NOT the source of truth:`);
     for (const d of drift) logger.warn(`  ${d}`);
   }
+  const clamped = retailers.filter(r => r._clampedFrom);
+  if (clamped.length > 0) {
+    logger.warn(
+      `Shop floor: ${clamped.length} Shopify shop(s) raised from ${clamped[0]._clampedFrom}ms to `
+      + `${SHOP_MIN_INTERVAL_MS}ms. Shopify rate-limits per caller IP across all stores, and the `
+      + 'faster cadence tripped every shop\'s circuit breaker. The big six are unaffected.',
+    );
+  }
+
   const live = retailers.filter(r => r.enabled);
   logger.info(`Effective config: ${live.length}/${retailers.length} retailers enabled — ${live.map(r => `${r.id}@${Math.round(r.intervalMs / 1000)}s`).join(', ')}`);
   for (const retailer of retailers) {
