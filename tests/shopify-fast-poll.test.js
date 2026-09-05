@@ -296,11 +296,6 @@ describe('shopify fast poll: asks for a small page, not the whole one', () => {
     assert.match(url, /collections\/pokemon-sealed\/products\.json\?limit=250/);
   });
 
-  test('the sweep window bounds how stale a deep product can get', () => {
-    // 15 minutes of accumulated changes is what arrived as a burst and tripped the flood
-    // suppressor. 5 cuts both the staleness and the batch size by three.
-    assert.strictEqual(FULL_SWEEP_MS, 5 * 60 * 1000);
-  });
 });
 
 describe('shopify fast poll: collection shops fetch in parallel', () => {

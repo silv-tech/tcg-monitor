@@ -20,16 +20,15 @@ const { normalizePrice } = require('../utils/helpers');
 // How often a shop reads its WHOLE catalogue rather than just the newest page. New listings
 // are caught on every poll regardless; this cadence only bounds how quickly a stock or price
 // change deep in the catalogue is noticed.
-// Back to 5 minutes. This was raised to 15 when sweeps were competing with fast polls for a
-// single overloaded budget, but that contention is gone: shops now run on 8 ISP exits with a
-// per-IP budget, and sweeps yield to fast polls in the queue.
+// 15 minutes. Tried 5 to cut staleness; it put twelve shops into 429s and tripped six circuit
+// breakers within eight minutes, so the arithmetic that said "1.55 req/s, plenty of headroom"
+// was wrong about what these shops actually tolerate. A sweep is 6-10 requests in quick
+// succession per shop, and tripling how often that burst happens is not the same load profile
+// as the same request count spread evenly — which is the lesson from the very first outage,
+// re-learned.
 //
-// The cadence is the ceiling on how STALE a product deep in a catalogue can be, and staleness
-// is what produced the alert floods — every change accumulated over the window fired the
-// instant the sweep landed. Measured load at 5 minutes: 1.55 req/s total, ~0.35 req/s on the
-// busiest exit against a 2.5 ceiling. There is no reason to make customers wait 15 minutes
-// for a restock alert to buy headroom we are not using.
-const FULL_SWEEP_MS = 5 * 60 * 1000;
+// Env-tunable so this can be moved without a deploy next time.
+const FULL_SWEEP_MS = Number(process.env.SHOP_SWEEP_MS) || 15 * 60 * 1000;
 
 const rateBudget = require('../utils/rate-budget');
 const SHOPIFY_BUDGET = 'shopify';
