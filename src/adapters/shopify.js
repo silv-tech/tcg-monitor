@@ -247,7 +247,11 @@ class ShopifyAdapter extends BaseAdapter {
     // cadence has repeatedly looked fine while the aggregate did not — that is what
     // rate-limited all 31 shops into a circuit-broken outage — and this is the only place
     // that sees the total.
-    const granted = await rateBudget.acquire(SHOPIFY_BUDGET, 8000);
+    // A fast poll is the thing detection latency is measured on; a sweep is background work
+    // that can wait. Without this the sweep's ten back-to-back requests sat in front of every
+    // new-listing check and cost ~2-3s per poll.
+    const priority = this._partialPoll ? 0 : 1;
+    const granted = await rateBudget.acquire(SHOPIFY_BUDGET, 8000, priority);
     if (!granted) {
       // Out of budget rather than blocked. Report it as throttling so the poll is skipped
       // cleanly instead of counting as an error and tripping the circuit breaker.

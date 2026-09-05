@@ -114,3 +114,52 @@ describe('rate budget: wiring', () => {
     assert.ok(!isBudgetSkip(new Error('Rate limited (429): https://shop.example/products.json')));
   });
 });
+
+describe('rate budget: priority', () => {
+  test('a latency-critical waiter jumps ahead of background work', async () => {
+    // The exact failure: a sweep's ten back-to-back requests drained the bucket and every
+    // new-listing check queued behind them, costing ~2-3s per poll.
+    const b = new TokenBucket('t', 50, 1);
+    await b.acquire(500); // drain
+
+    const order = [];
+    const sweep = Array.from({ length: 5 }, (_, i) =>
+      b.acquire(5000, 1).then((ok) => { if (ok) order.push(`sweep${i}`); }));
+    // Arrives AFTER all five sweep requests are already queued.
+    await new Promise((r) => setTimeout(r, 5));
+    const fast = b.acquire(5000, 0).then((ok) => { if (ok) order.push('fast'); });
+
+    await Promise.all([...sweep, fast]);
+    assert.strictEqual(order[0], 'fast', `fast poll should be served first, got ${order.join(',')}`);
+  });
+
+  test('equal priorities keep their arrival order', async () => {
+    const b = new TokenBucket('t', 50, 1);
+    await b.acquire(500);
+    const order = [];
+    await Promise.all([1, 2, 3, 4].map(async (i) => {
+      if (await b.acquire(5000, 0)) order.push(i);
+    }));
+    assert.deepStrictEqual(order, [1, 2, 3, 4]);
+  });
+
+  test('background work still completes — priority delays it, never starves it', async () => {
+    const b = new TokenBucket('t', 50, 1);
+    await b.acquire(500);
+    const results = await Promise.all([
+      b.acquire(5000, 1), b.acquire(5000, 0), b.acquire(5000, 1),
+    ]);
+    assert.ok(results.every(Boolean), 'every waiter is eventually served');
+  });
+
+  test('priority defaults to latency-critical, so an un-annotated caller is never demoted', async () => {
+    const b = new TokenBucket('t', 50, 1);
+    await b.acquire(500);
+    const order = [];
+    const bg = b.acquire(5000, 1).then(() => order.push('bg'));
+    await new Promise((r) => setTimeout(r, 5));
+    const dflt = b.acquire(5000).then(() => order.push('default'));
+    await Promise.all([bg, dflt]);
+    assert.strictEqual(order[0], 'default');
+  });
+});

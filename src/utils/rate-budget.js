@@ -13,8 +13,12 @@
  * where the requests actually leave.
  *
  * A token bucket rather than a fixed delay, so a quiet period earns a little burst capacity
- * and a busy one is smoothly paced instead of stalled. Waiters are served FIFO, so no shop
- * can be starved by busier neighbours.
+ * and a busy one is smoothly paced instead of stalled.
+ *
+ * Waiters are served by priority, then FIFO within a priority. A fixed budget is not enough on
+ * its own: a catalogue sweep is ten requests back to back, which drains the bucket for ~4
+ * seconds, and under a plain FIFO queue that made every latency-critical poll wait behind it
+ * even though total demand was inside the budget. Sweeps are background work and can yield.
  */
 
 const logger = require('../monitoring/logger');
@@ -29,6 +33,7 @@ class TokenBucket {
     this.tokens = burst;
     this.last = Date.now();
     this.queue = [];
+    this.seq = 0;
     this.granted = 0;
     this.waited = 0;
   }
@@ -43,9 +48,10 @@ class TokenBucket {
   /**
    * Wait until a token is available.
    * @param {number} maxWaitMs give up after this long, so a poll can never hang
+   * @param {number} priority lower runs first; equal priorities stay FIFO
    * @returns {Promise<boolean>} true if a token was granted
    */
-  acquire(maxWaitMs) {
+  acquire(maxWaitMs, priority = 0) {
     const now = Date.now();
     this._refill(now);
 
@@ -56,14 +62,22 @@ class TokenBucket {
     }
 
     return new Promise((resolve) => {
-      const waiter = { resolve, deadline: now + maxWaitMs, timer: null };
+      const waiter = { resolve, priority, seq: this.seq++, timer: null };
       waiter.timer = setTimeout(() => {
         const i = this.queue.indexOf(waiter);
         if (i >= 0) this.queue.splice(i, 1);
         resolve(false);
       }, maxWaitMs);
       if (waiter.timer.unref) waiter.timer.unref();
-      this.queue.push(waiter);
+
+      // Insert by priority, then arrival. A catalogue sweep is ten requests back to back; at
+      // 2.5 req/sec that drains the bucket for ~4 seconds, and a plain FIFO queue made every
+      // latency-critical poll wait behind it. Measured: shop polls sat at a 2.4-3.1s median
+      // wait even though total demand (2.28 req/sec) was inside the budget. Sweeps are
+      // background work and can yield; a new-listing check cannot.
+      let i = this.queue.length;
+      while (i > 0 && this.queue[i - 1].priority > priority) i--;
+      this.queue.splice(i, 0, waiter);
       this.waited += 1;
       this._schedule();
     });
@@ -115,11 +129,14 @@ function get(name) {
   return buckets.get(name) || null;
 }
 
-/** Acquire from a named budget. Unknown budget = no limit, so callers stay simple. */
-async function acquire(name, maxWaitMs = 10000) {
+/**
+ * Acquire from a named budget. Unknown budget = no limit, so callers stay simple.
+ * Lower priority runs first: latency-critical work should pass 0, background work 1.
+ */
+async function acquire(name, maxWaitMs = 10000, priority = 0) {
   const bucket = buckets.get(name);
   if (!bucket) return true;
-  return bucket.acquire(maxWaitMs);
+  return bucket.acquire(maxWaitMs, priority);
 }
 
 function stats() {
