@@ -115,3 +115,56 @@ describe('rate limit: a throttled shop is not an empty shop', () => {
     assert.strictEqual(Object.keys(products).length, 1);
   });
 });
+
+describe('rate limit: escalating backoff', () => {
+  const {
+    setCooldown, clearStrikes, cooldownRemaining, _resetCooldowns, BACKOFF_LADDER_MS,
+  } = require('../src/utils/stealth-http');
+
+  const URL_A = 'https://escalate-a.example/products.json';
+
+  test('consecutive 429s climb the ladder', () => {
+    _resetCooldowns();
+    const seen = [];
+    for (let i = 0; i < BACKOFF_LADDER_MS.length; i++) {
+      seen.push(setCooldown(URL_A, 5000).ms);
+    }
+    assert.deepStrictEqual(seen, BACKOFF_LADDER_MS, 'each strike doubles the quiet period');
+  });
+
+  test('the ladder caps rather than growing without bound', () => {
+    _resetCooldowns();
+    let last = 0;
+    for (let i = 0; i < 20; i++) last = setCooldown(URL_A, 5000).ms;
+    assert.strictEqual(last, BACKOFF_LADDER_MS[BACKOFF_LADDER_MS.length - 1]);
+  });
+
+  test('a 5s Retry-After no longer produces a 5s cooldown', () => {
+    // The exact defect: Retry-After:5 let the next 45s poll walk straight back in.
+    _resetCooldowns();
+    const { ms } = setCooldown(URL_A, 5000);
+    assert.ok(ms >= 30000, `expected >=30s of quiet, got ${ms}ms`);
+  });
+
+  test('a host asking for LONGER than the ladder is still honoured', () => {
+    _resetCooldowns();
+    const { ms } = setCooldown('https://patient.example/x.json', 600000);
+    assert.strictEqual(ms, 600000);
+  });
+
+  test('cooldown is per host — one throttled shop does not mute the others', () => {
+    _resetCooldowns();
+    setCooldown('https://shop-one.example/products.json', 5000);
+    assert.ok(cooldownRemaining('https://shop-one.example/products.json') > 0);
+    assert.strictEqual(cooldownRemaining('https://shop-two.example/products.json'), 0);
+  });
+
+  test('a success clears the ladder so a recovered shop starts fresh', () => {
+    _resetCooldowns();
+    setCooldown(URL_A, 5000);
+    setCooldown(URL_A, 5000);
+    clearStrikes(URL_A);
+    assert.strictEqual(cooldownRemaining(URL_A), 0, 'cooldown lifted');
+    assert.strictEqual(setCooldown(URL_A, 5000).ms, BACKOFF_LADDER_MS[0], 'back to rung one');
+  });
+});
