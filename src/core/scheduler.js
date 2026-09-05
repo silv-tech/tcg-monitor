@@ -7,6 +7,7 @@ const { recordProductCount } = require('../monitoring/health');
 const { pollAdapterOnce } = require('./poll-adapter');
 const autotune = require('./autotune');
 const speedGuard = require('../monitoring/speed-guard');
+const { isSelfSkip } = require('../utils/stealth-http');
 const { recordRestock, recordPrice } = require('./state');
 
 // Circuit breaker thresholds
@@ -121,6 +122,17 @@ class Scheduler {
       }
     } catch (err) {
       recordPollLatency(adapter.id, 0);
+
+      // A poll we deliberately declined to send is not evidence the retailer is unhealthy.
+      // Counting it as one created a loop that kept shops down long after the retailer had
+      // stopped complaining: 429 -> we set a cooldown -> the next poll is refused BY US ->
+      // counted as an error -> five of those trip the breaker -> the breaker's recovery
+      // probes land inside the same cooldown -> the circuit never closes.
+      if (isSelfSkip(err)) {
+        logger.debug(`${adapter.name}: poll skipped — ${err.message}`);
+        return;
+      }
+
       autotune.recordPoll(adapter.id, { ok: false, ms: Date.now() - startedAt });
       await state.recordError(adapter.id, err);
 

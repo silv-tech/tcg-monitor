@@ -91,6 +91,25 @@ function isBudgetSkip(err) {
   return /^Rate limited \(budget\)/.test(err?.message || '');
 }
 
+/**
+ * True when WE chose not to send the request — either the shared budget was spent or the host
+ * is inside a cooldown we imposed after an earlier 429.
+ *
+ * This has to be distinguishable from a retailer actually refusing us, because the circuit
+ * breaker counts poll errors. On 2026-09-05 it was not, and the result was a loop that kept
+ * shops down long after the retailer had stopped complaining:
+ *
+ *   429 -> cooldown set -> next poll refused BY US -> counted as a poll error -> five of those
+ *   trip the breaker -> the breaker's recovery probes also land inside the cooldown -> more
+ *   errors -> the circuit never closes.
+ *
+ * A request we never sent tells us nothing about the retailer's health, so it must not count
+ * against it. A real 429 still does.
+ */
+function isSelfSkip(err) {
+  return /^(Cooling down|Rate limited \(budget\))/.test(err?.message || '');
+}
+
 // `lane` splits one proxy URL across several cached impit instances. Each instance keeps its
 // own connection, and the residential pool hands out a different exit IP per connection —
 // measured: 4 requests through one shared instance all came from 184.65.189.19, while 4
@@ -245,7 +264,7 @@ function _clearCache(proxyUrl, ignoreTlsErrors = false, lane = null) {
 function _resetCooldowns() { hostCooldowns.clear(); hostStrikes.clear(); }
 
 module.exports = {
-  stealthGet, _clearCache, isRateLimited, isBudgetSkip, cooldownRemaining, _resetCooldowns,
+  stealthGet, _clearCache, isRateLimited, isBudgetSkip, isSelfSkip, cooldownRemaining, _resetCooldowns,
   // exported for tests
   setCooldown, clearStrikes, BACKOFF_LADDER_MS,
 };
