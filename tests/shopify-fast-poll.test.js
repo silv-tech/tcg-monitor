@@ -327,3 +327,67 @@ describe('shopify fast poll: collection shops fetch in parallel', () => {
     await assert.rejects(() => a.fetchProducts(), /rate limited/i);
   });
 });
+
+describe('shopify: a partly-failed sweep must not fake out-of-stock', () => {
+  /**
+   * The facetoface alert flood, 2026-09-05 19:55.
+   *
+   * A shop with two collections lost one to a 429. The other returned 81 of its 131 products,
+   * so the empty-result guard did not fire and poll-adapter's count heuristic ("new < 30% of
+   * old") read 81-of-131 as a COMPLETE read. Stale cleanup then marked the missing
+   * collection's ~50 products out of stock, and the next successful sweep reported all of them
+   * coming back: 13 RESTOCK alerts in 0s for products that never left the shelf.
+   */
+  test('one failed collection marks the sweep partial', async () => {
+    const a = makeAdapter({ collections: ['pokemon-sealed', 'pokemon-new-releases'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000; // force a sweep
+
+    a.fetchCollection = async (handle, products) => {
+      if (handle === 'pokemon-sealed') throw new Error('Rate limited (429): sealed');
+      products['kept-1'] = { sku: 'kept-1', inStock: true };
+    };
+
+    const products = await a.fetchProducts();
+    assert.strictEqual(Object.keys(products).length, 1, 'the collection that worked still counts');
+    assert.strictEqual(a._partialPoll, true, 'a partly-read sweep is partial, not complete');
+  });
+
+  test('the count heuristic alone would NOT have caught it', () => {
+    // 81 of 131 is the real shape of the failure. This documents why an explicit flag is
+    // needed rather than relying on the ratio.
+    const oldCount = 131, newCount = 81;
+    assert.strictEqual(newCount < oldCount * 0.3, false, 'reads as a complete poll');
+  });
+
+  test('a fully successful sweep stays complete, so real delistings are still cleaned up', async () => {
+    const a = makeAdapter({ collections: ['c1', 'c2'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000;
+    a.fetchCollection = async (handle, products) => { products[handle] = { sku: handle }; };
+    await a.fetchProducts();
+    assert.strictEqual(a._partialPoll, false, 'nothing failed, so nothing is hidden');
+  });
+
+  test('a non-throttle failure also marks it partial', async () => {
+    // A socket error leaves the catalogue just as incomplete as a 429 does.
+    const a = makeAdapter({ collections: ['c1', 'c2'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000;
+    a.fetchCollection = async (handle, products) => {
+      if (handle === 'c1') throw new Error('socket hang up');
+      products.ok = { sku: 'ok' };
+    };
+    await a.fetchProducts();
+    assert.strictEqual(a._partialPoll, true);
+  });
+
+  test('everything failing still throws rather than reporting an empty shop', async () => {
+    const a = makeAdapter({ collections: ['c1', 'c2'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000;
+    a.fetchCollection = async () => { throw new Error('Rate limited (429): x'); };
+    a.fetchAllProducts = async () => { throw new Error('Rate limited (429): y'); };
+    await assert.rejects(() => a.fetchProducts(), /rate limited/i);
+  });
+});

@@ -220,12 +220,22 @@ class ShopifyAdapter extends BaseAdapter {
     // and, on recovery, an alert flood. Track WHY we came back empty.
     let throttled = false;
 
+    // Any collection that fails leaves the catalogue INCOMPLETE, which matters more than it
+    // looks. A shop with two collections that loses one still returns plenty of products, so
+    // the empty-result guard below does not fire and the count heuristic in poll-adapter
+    // ("new < 30% of old") reads 81-of-131 as a complete read. Stale cleanup then marks the
+    // missing collection's ~50 products OUT OF STOCK, and the next successful sweep reports
+    // them all coming back — a burst of false RESTOCK alerts. That is what tripped the flood
+    // suppressor on facetoface: 13 alerts in 0s for products that never went out of stock.
+    let incomplete = false;
+
     // Method 1: Fetch from specific collections
     for (const collection of this.collections) {
       try {
         await this.fetchCollection(collection, products);
       } catch (err) {
         if (isRateLimited(err)) throttled = true;
+        incomplete = true;
         logger.warn(`${this.name}: collection "${collection}" failed: ${err.message}`);
       }
     }
@@ -236,6 +246,7 @@ class ShopifyAdapter extends BaseAdapter {
         await this.fetchAllProducts(products);
       } catch (err) {
         if (isRateLimited(err)) throttled = true;
+        incomplete = true;
         logger.warn(`${this.name}: /products.json failed: ${err.message}`);
       }
     }
@@ -244,6 +255,14 @@ class ShopifyAdapter extends BaseAdapter {
     // Throwing keeps it out of the diff, the health ratio and the event stream alike.
     if (throttled && Object.keys(products).length === 0) {
       throw new Error(`${this.name}: rate limited — skipping poll rather than reporting an empty catalogue`);
+    }
+
+    // Partly-read sweep. Declaring it partial makes poll-adapter overlay what we DID read on
+    // the cached catalogue instead of treating the gap as products that disappeared, which is
+    // the difference between a quiet poll and a burst of false restocks.
+    if (incomplete) {
+      this._partialPoll = true;
+      logger.warn(`${this.name}: sweep incomplete — treating as partial so stale cleanup is skipped`);
     }
 
     return products;
