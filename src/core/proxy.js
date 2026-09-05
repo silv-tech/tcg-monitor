@@ -106,6 +106,38 @@ function protectedIndices() {
   return out;
 }
 
+/**
+ * Give every unassigned retailer an explicit, evenly-spread slice of the shared pool.
+ *
+ * Seeding the round-robin from a hash of the id spreads retailers, but only on average: with
+ * 11 shops over 8 usable exits it put 4 on one IP and left 2 idle. That imbalance is what
+ * decides the safe polling rate — the busiest exit is the constraint, so 4-on-one meant 0.44
+ * req/sec at a 9s interval where an even 2-on-one is 0.22, the load already proven clean.
+ *
+ * Called once at boot with the full set of shop ids, so the assignment can be balanced across
+ * the group instead of each retailer choosing independently and hoping.
+ */
+function assignSharedPools(retailerIds) {
+  const pool = sharedPool();
+  if (pool.length === 0 || retailerIds.length === 0) return {};
+
+  const assigned = {};
+  const sorted = [...retailerIds].sort(); // deterministic across restarts
+  sorted.forEach((id, i) => {
+    if (ispPool.retailerPools[id]) return; // never override an explicit assignment
+    const proxy = pool[i % pool.length];
+    ispPool.retailerPools[id] = [proxy.index];
+    assigned[id] = proxy.index;
+  });
+
+  const perIp = {};
+  for (const idx of Object.values(assigned)) perIp[idx] = (perIp[idx] || 0) + 1;
+  const busiest = Math.max(0, ...Object.values(perIp));
+  logger.info(`ISP pool: spread ${Object.keys(assigned).length} retailers across `
+    + `${Object.keys(perIp).length} exits, busiest holds ${busiest}`);
+  return assigned;
+}
+
 /** Proxies available to any retailer without its own assignment. */
 function sharedPool() {
   const blocked = protectedIndices();
@@ -373,6 +405,7 @@ loadIspProxies();
 module.exports = {
   getProxyUrl,
   getNextIspProxy,
+  assignSharedPools,
   recordRequest,
   recordPollLatency,
   recordAlertLatency,

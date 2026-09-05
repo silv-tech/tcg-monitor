@@ -223,7 +223,7 @@ async function main() {
   }
 
   // 2c. Verify residential proxies if configured
-  const { testProxy } = require('./core/proxy');
+  const { testProxy, assignSharedPools } = require('./core/proxy');
   if (config.proxy.residentialUrl) {
     await testProxy(config.proxy.residentialUrl, 'Residential CA proxy');
   }
@@ -286,6 +286,12 @@ async function main() {
     }
     scheduler.register(new AdapterClass(retailer));
   }
+
+  // Spread the shop tier evenly across the shared ISP exits. Done here, once, with the full
+  // set known — a per-retailer hash only balances on average, and the busiest exit is what
+  // decides how fast we can safely poll.
+  const shopIds = retailers.filter(r => r.adapter === 'shopify' && r.enabled).map(r => r.id);
+  if (shopIds.length > 0) assignSharedPools(shopIds);
 
   // 4. Wire events to delivery
   scheduler.setEventHandler(async (events) => {

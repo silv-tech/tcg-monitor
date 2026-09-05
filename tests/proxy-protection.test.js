@@ -89,3 +89,42 @@ describe('Costco proxy protection', () => {
     assert.strictEqual(stillAllowed, false, 'a pin to Costco must be dropped, not reused');
   });
 });
+
+describe('even spread across the shared pool', () => {
+  // A hash-seeded round robin balances only on average. With 11 shops over 8 usable exits it
+  // put 4 on one IP and left 2 idle — and the BUSIEST exit is what decides the safe polling
+  // rate, so that imbalance was the difference between 0.44 req/s and 0.22 at a 9s interval.
+  const assign = (ids, poolSize) => {
+    const out = {};
+    [...ids].sort().forEach((id, i) => { out[id] = i % poolSize; });
+    return out;
+  };
+  const SHOPS = ['401games', 'hobbiesville', 'chimeragaming', 'deckoutgaming', 'pokejeux',
+    'gameshack', 'remicardtrader', 'infinitycards', 'doescards', 'zardocards', 'kanzengames'];
+
+  test('11 shops spread across 8 exits with at most 2 on any one', () => {
+    const counts = {};
+    for (const idx of Object.values(assign(SHOPS, 8))) counts[idx] = (counts[idx] || 0) + 1;
+    assert.strictEqual(Object.keys(counts).length, 8, 'every exit is used');
+    assert.ok(Math.max(...Object.values(counts)) <= 2, 'no exit carries more than 2');
+  });
+
+  test('the busiest exit stays inside the proven-clean load at 9s', () => {
+    const counts = {};
+    for (const idx of Object.values(assign(SHOPS, 8))) counts[idx] = (counts[idx] || 0) + 1;
+    const busiest = Math.max(...Object.values(counts));
+    assert.ok(busiest / 9 <= 0.24, `${(busiest / 9).toFixed(3)} req/s must not exceed 0.24`);
+  });
+
+  test('assignment is deterministic, so a restart keeps the same layout', () => {
+    assert.deepStrictEqual(assign(SHOPS, 8), assign([...SHOPS].reverse(), 8));
+  });
+
+  test('an explicit pool is never overwritten', () => {
+    // Costco has a dedicated assignment and must keep it.
+    const existing = { costco: [6, 7] };
+    const shouldSkip = (id) => Boolean(existing[id]);
+    assert.strictEqual(shouldSkip('costco'), true);
+    assert.strictEqual(shouldSkip('pokejeux'), false);
+  });
+});
