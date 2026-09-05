@@ -76,19 +76,28 @@ const ADAPTER_MAP = {
  * observed listing rate, which is the same change autotune needs: allocate a shared budget by
  * where the value is, rather than tuning each store in isolation.
  */
+// Env-tunable so the cadence can be probed and, more importantly, REVERTED without a deploy.
+// Finding this configuration meant several rounds of changing a number, watching the circuit
+// breakers, and backing out; each of those cost a deploy plus five minutes of observation.
+// Anything that can put all 31 shops back into an outage should be a one-command undo.
+const tierMs = (envVar, fallback) => {
+  const v = Number(process.env[envVar]);
+  return Number.isFinite(v) && v >= 1000 ? v : fallback;
+};
+
 const SHOP_TIERS = {
   active: {
-    intervalMs: 9000,
+    intervalMs: tierMs('SHOP_ACTIVE_MS', 9000),
     ids: new Set(['pokejeux', 'infinitycards', 'zardocards', '401games', 'hobbiesville',
       'remicardtrader', 'tistaminis', 'shopville', 'kanzengames', 'danireon', 'facetoface',
       'gameshack', 'fusiongaming', 'rivalcards']),
   },
   quiet: {
-    intervalMs: 90000,
+    intervalMs: tierMs('SHOP_QUIET_MS', 90000),
     ids: new Set(['tonkatomtcg', 'cardlegendstcg', 'catchacard', 'spshop', 'cardcycle',
       'poketherapy', 'hastycards']),
   },
-  medium: { intervalMs: 30000, ids: null },
+  medium: { intervalMs: tierMs('SHOP_MEDIUM_MS', 30000), ids: null },
 };
 
 function clampShopInterval(retailer) {
