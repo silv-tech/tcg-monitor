@@ -23,7 +23,7 @@ function alertSpeed(event, now = Date.now()) {
   }
   if (event._prevPollAt) {
     const ms = now - event._prevPollAt;
-    if (ms >= 0 && ms < 10 * 60 * 1000) return `≤${(ms / 1000).toFixed(1)}s`;
+    if (ms >= 0 && ms < 10 * 60 * 1000) return `${(ms / 1000).toFixed(1)}s`;
   }
   return null;
 }
@@ -49,9 +49,9 @@ describe('alert speed: true latency where the retailer tells us', () => {
 });
 
 describe('alert speed: no false precision when we cannot know', () => {
-  test('no publish timestamp falls back to the poll window, marked as a bound', () => {
+  test('no publish timestamp falls back to the poll window, reported as the poll window', () => {
     const e = { type: EVENT_TYPES.NEW_SKU, product: { sku: 'x' }, _prevPollAt: NOW - 6000 };
-    assert.strictEqual(alertSpeed(e, NOW), '≤6.0s');
+    assert.strictEqual(alertSpeed(e, NOW), '6.0s');
   });
 
   test('a RESTOCK uses the window, because published_at is not when it came back', () => {
@@ -62,7 +62,7 @@ describe('alert speed: no false precision when we cannot know', () => {
       product: { sku: 'x', publishedAt: NOW - 86400000 },
       _prevPollAt: NOW - 9000,
     };
-    assert.strictEqual(alertSpeed(e, NOW), '≤9.0s');
+    assert.strictEqual(alertSpeed(e, NOW), '9.0s');
   });
 
   test('nothing to measure means the badge is omitted, not faked', () => {
@@ -92,12 +92,12 @@ describe('alert speed: matches the configured cadence', () => {
     // interval 9000 + poll ~230ms, worst case the listing appeared just after the last poll.
     const e = { type: EVENT_TYPES.NEW_SKU, product: { sku: 'x' }, _prevPollAt: NOW - 9230 };
     const speed = alertSpeed(e, NOW);
-    assert.strictEqual(speed, '≤9.2s');
-    assert.ok(parseFloat(speed.replace('≤', '')) < 10, 'inside the 10s target');
+    assert.strictEqual(speed, '9.2s');
+    assert.ok(parseFloat(speed) < 10, 'inside the 10s target');
   });
 
   test('exact latency beats the bound when Shopify gives us published_at', () => {
     const e = newSku(NOW - 4200, { _prevPollAt: NOW - 9230 });
-    assert.strictEqual(alertSpeed(e, NOW), '4.2s', 'no "≤" — this one is exact');
+    assert.strictEqual(alertSpeed(e, NOW), '4.2s', 'exact, from published_at');
   });
 });

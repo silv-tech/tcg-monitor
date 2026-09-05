@@ -123,7 +123,7 @@ function alertSpeed(event) {
 
   if (event._prevPollAt) {
     const ms = now - event._prevPollAt;
-    if (ms >= 0 && ms < 10 * 60 * 1000) return `≤${(ms / 1000).toFixed(1)}s`;
+    if (ms >= 0 && ms < 10 * 60 * 1000) return `${(ms / 1000).toFixed(1)}s`;
   }
 
   // Nothing trustworthy to report. Saying nothing beats quoting our own request duration.
