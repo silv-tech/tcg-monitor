@@ -31,43 +31,38 @@ const ADAPTER_MAP = {
 };
 
 /**
- * Floor for the small Shopify card shops.
+ * Floor for the small Shopify card shops, set to match the MEASURED budget rather than a
+ * number we would prefer.
  *
- * These shops were rate-limited into a total outage on 2026-09-05 — every one of them tripped
- * its circuit breaker and stopped polling for hours. The first diagnosis blamed the 8s
- * interval and raised this to 45s, on the reasoning that Shopify must be throttling per
- * caller IP since each store "only" saw one request per 8 seconds.
+ * These shops were rate-limited into a total outage on 2026-09-05 — every one tripped its
+ * circuit breaker and stopped polling for hours. Two wrong diagnoses came first, and both are
+ * worth remembering because they are the easy mistakes to repeat:
  *
- * That reasoning was wrong. These shops carry 11,000-19,000 products, so a poll was TEN paged
- * requests, not one: ~1.25 req/sec against a single store and ~39 req/sec in aggregate. The
- * interval was never the problem; fetching the entire catalogue every 8 seconds was.
+ *   1. "The 8s interval is too fast" — raised this to 45s. Wrong: the interval was never the
+ *      problem. These shops carry 11,000-19,000 products, so a poll was TEN paged requests,
+ *      ~1.25 req/sec against a single store and ~39 req/sec in aggregate.
+ *   2. "Shopify limits per store" — wrong too. Each store saw very little traffic; Shopify
+ *      limits the CALLER, so only the aggregate ever mattered.
  *
- * The adapter now reads only the newest page on a normal poll (see FULL_SWEEP_MS in
- * shopify.js — /products.json is ordered by published_at descending, so every new listing is
- * on page 1), which cuts a poll to a single request. That is ~0.125 req/sec per store, an
- * order of magnitude below the cadence that caused the outage, so the shops can run at the
- * same speed as the big six again.
+ * The adapter now reads only the newest page on a normal poll (FULL_SWEEP_MS in shopify.js —
+ * /products.json is ordered by published_at descending, so every new listing is on page 1),
+ * and every Shopify request passes through one shared rate budget.
  *
- * The floor stays as a backstop, applied AFTER Redis overrides — the live intervals live in
- * Redis, which silently wins over retailers.json, so a fix that only edited the file on disk
- * would change nothing.
- */
-/**
- * Set to match the measured Shopify budget, not to a number we would prefer.
+ * Measured on this Railway IP by moving SHOPIFY_RATE and watching the circuit breakers:
+ * 2.5 req/sec kept all 37 circuits closed; 5 req/sec reopened all 31 shop circuits within
+ * minutes. 2.5 is the value proven to hold.
  *
- * Measured on this Railway IP: 2.5 req/sec kept all 37 circuits closed and every shop
- * healthy; 5 req/sec reopened all 31 shop circuits within minutes. The sustainable ceiling
- * is between those, and 2.5 is the value proven to hold.
- *
- * A fast poll costs one request, so 31 shops sharing ~2.36 req/sec (after sweeps take their
- * share) get one poll each per ~13 seconds, and three of them fetch two collections. Polling faster than the budget can serve does
- * not make detection faster — it just queues requests inside the poll, which is exactly what
- * produced 5-16 second poll times. Matching the interval to the budget keeps each poll at
- * its natural ~150ms instead.
+ * A fast poll costs one request and three shops fetch two collections, so a cycle is 34
+ * requests. At 16s that is 2.26 req/sec, inside the budget. Polling faster does NOT make
+ * detection faster — at 14s demand was 2.57 req/sec and the excess simply queued inside each
+ * poll, giving a 6,749ms median wait and ~20.7s detection instead of the intended ~14.2s.
  *
  * This is why the shops cannot join the big six under 10 seconds: 31 stores behind one
  * datacenter IP is a shared-rate problem, not a tuning one. Going faster needs either fewer
- * shops on this IP or shop traffic on the residential proxy.
+ * shops per IP or shop traffic on the residential proxy.
+ *
+ * Applied AFTER Redis overrides — the live intervals live in Redis, which silently wins over
+ * retailers.json, so a fix that only edited the file on disk would change nothing.
  */
 const SHOP_MIN_INTERVAL_MS = 16000;
 
