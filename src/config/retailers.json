@@ -81,14 +81,32 @@
     "color": "#ffcb05",
     "timing": {
       "checksPerPoll": 3,
-      "watchlistIntervalMs": 1800000,
+      "watchlistIntervalMs": 3600000,
       "sitemapIntervalMs": 8000,
-      "paidCheckIntervalMs": 300000
+      "paidCheckIntervalMs": 300000,
+      "dailyRotationChecks": 440
     },
     "parseCanary": false,
     "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked",
     "maxProducts": 1400,
-    "_maxProductsNote": "PC sitemap carries ~1195 TCG products; the default 500 cap hid ~695 of them"
+    "_maxProductsNote": "PC sitemap carries ~1195 TCG products; the default 500 cap hid ~695 of them",
+    "watchlist": [
+      "10-10035-115",
+      "10-10422-109",
+      "10-10416-109",
+      "10-10047-108",
+      "10-10186-110",
+      "10-10315-108",
+      "10-10035-109",
+      "bundle1173",
+      "100-10356",
+      "190-85920",
+      "10-10372-109",
+      "10-10186-109",
+      "10-10025-101",
+      "10-10191-101",
+      "10-10191-109"
+    ]
   },
   {
     "_phase": 2,
