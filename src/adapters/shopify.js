@@ -168,10 +168,17 @@ class ShopifyAdapter extends BaseAdapter {
         // the retailer and deliberately does NOT apply the keyword filter; a catalogue-wide
         // shop does. Getting this wrong would let Magic singles through on a Pokemon monitor.
         if (this.collections.length > 0) {
-          for (const handle of this.collections) {
-            const { products: page } = await this._fetchPage(
-              `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=1`,
-            );
+          // In parallel, not in series. These shops pay one request per collection, and
+          // fetching them one after another put Untouchables at 10.2s and Chimera Gaming at
+          // 10.3s while every single-request shop sat comfortably under 9.6s — the only two
+          // shops missing the target, purely because their requests were queued end to end.
+          // The budget still paces them; this only stops the second waiting on the first.
+          const pages = await Promise.all(this.collections.map(handle => this._fetchPage(
+            `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=1`,
+          )));
+          // Parse after the fetches so ordering stays deterministic regardless of which
+          // collection returns first.
+          for (const { products: page } of pages) {
             this._detectPriceUnit(page);
             for (const item of page) this.parseShopifyProduct(item, products);
           }

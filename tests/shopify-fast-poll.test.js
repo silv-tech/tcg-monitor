@@ -276,3 +276,54 @@ describe('shopify fast poll: asks for a small page, not the whole one', () => {
     assert.match(url, /collections\/pokemon-sealed\/products\.json\?limit=50/);
   });
 });
+
+describe('shopify fast poll: collection shops fetch in parallel', () => {
+  test('both collections are in flight at once, not end to end', async () => {
+    // Sequential fetching was the ONLY reason Untouchables (10.2s) and Chimera Gaming (10.3s)
+    // missed the 10s target while every single-request shop sat under 9.6s.
+    const a = makeAdapter({ collections: ['pokemon-sealed', 'pokemon-new-releases'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    a._fetchPage = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight -= 1;
+      return { products: [], changed: true };
+    };
+
+    const t = Date.now();
+    await a.fetchProducts();
+    const elapsed = Date.now() - t;
+
+    assert.strictEqual(maxInFlight, 2, 'both collections should be in flight together');
+    assert.ok(elapsed < 55, `expected ~30ms not ~60ms, got ${elapsed}ms`);
+  });
+
+  test('every collection still contributes its products', async () => {
+    const a = makeAdapter({ collections: ['c1', 'c2'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
+    let n = 0;
+    a._fetchPage = async () => {
+      n += 1;
+      return { products: [product(n, `Booster Box ${n}`, '49.99')], changed: true };
+    };
+    const products = await a.fetchProducts();
+    assert.strictEqual(Object.keys(products).length, 2, 'no collection is dropped');
+  });
+
+  test('one failing collection still fails the poll rather than half-reporting', async () => {
+    const a = makeAdapter({ collections: ['c1', 'c2'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
+    a._fetchPage = async (url) => {
+      if (url.includes('c2')) throw new Error('Rate limited (429): c2');
+      return { products: [product(1, 'Booster Box', '49.99')], changed: true };
+    };
+    await assert.rejects(() => a.fetchProducts(), /rate limited/i);
+  });
+});
