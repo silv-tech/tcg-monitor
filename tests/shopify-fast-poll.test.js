@@ -240,3 +240,39 @@ describe('shopify fast poll: a partial read never loses stock', () => {
     assert.deepStrictEqual(Object.keys(merged), ['s1']);
   });
 });
+
+describe('shopify fast poll: asks for a small page, not the whole one', () => {
+  // The budget caps how many REQUESTS we make, not how big they are. A 250-product page is
+  // 874KB-2,045KB, and pulling that every 9s put shop poll times at ~2s, which is what kept
+  // active shops at 10.5-11.3s detection instead of 9.3s. 50 costs ~an eighth of the bytes.
+  test('a fast poll requests the small page size', async () => {
+    const a = makeAdapter();
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
+    let url = '';
+    a._fetchPage = async (u) => { url = u; return { products: [], changed: true }; };
+    await a.fetchProducts();
+    assert.match(url, /limit=50\b/, 'fast poll must not pull a full page');
+  });
+
+  test('a full sweep still uses the full page size, so accuracy is unchanged', async () => {
+    const a = makeAdapter();
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000;
+    const urls = [];
+    a._fetchPage = async (u) => { urls.push(u); return { products: [], changed: true }; };
+    await a.fetchProducts();
+    assert.ok(urls.length > 0);
+    assert.match(urls[0], /limit=250\b/, 'the sweep reads full pages');
+  });
+
+  test('collection shops also use the small page on the fast path', async () => {
+    const a = makeAdapter({ collections: ['pokemon-sealed'] });
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
+    let url = '';
+    a._fetchPage = async (u) => { url = u; return { products: [], changed: true }; };
+    await a.fetchProducts();
+    assert.match(url, /collections\/pokemon-sealed\/products\.json\?limit=50/);
+  });
+});

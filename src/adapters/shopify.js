@@ -30,6 +30,24 @@ const rateBudget = require('../utils/rate-budget');
 const SHOPIFY_BUDGET = 'shopify';
 
 /**
+ * How many products a FAST poll asks for. The full sweep still uses the full page size.
+ *
+ * The budget limits how many REQUESTS we may make, so the fast path was already down to one.
+ * What it does not limit is how big each one is, and a 250-product page is enormous —
+ * measured live: hobbiesville 2,045KB, pokejeux 1,691KB, zardocards 874KB. That was being
+ * pulled every 9 seconds, and the transfer alone put shop poll times at ~2s, which is what
+ * kept the active shops at 10.5-11.3s detection instead of the intended 9.3s.
+ *
+ * New listings sit at the top of page 1 (products.json is published_at descending), so a
+ * fast poll only needs the top slice. 50 costs 95-335KB and 166-255ms — roughly an eighth of
+ * the bytes and half the time. A shop would have to publish more than 50 products within one
+ * poll interval to overflow it; the busiest shop measured publishes ~250 per DAY. Anything
+ * that did overflow is still picked up by the next full sweep, and the seen-set stops it
+ * being mistaken for a new listing when it appears.
+ */
+const FAST_PAGE_LIMIT = 50;
+
+/**
  * Non-TCG filter, shared by every shop.
  *
  * 25 of the 31 shops have no keyword list and no collections, so they tracked their entire
@@ -152,14 +170,14 @@ class ShopifyAdapter extends BaseAdapter {
         if (this.collections.length > 0) {
           for (const handle of this.collections) {
             const { products: page } = await this._fetchPage(
-              `${this.url}/collections/${handle}/products.json?limit=${this.pageLimit}&page=1`,
+              `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=1`,
             );
             this._detectPriceUnit(page);
             for (const item of page) this.parseShopifyProduct(item, products);
           }
         } else {
           const { products: page } = await this._fetchPage(
-            `${this.url}/products.json?limit=${this.pageLimit}&page=1`,
+            `${this.url}/products.json?limit=${FAST_PAGE_LIMIT}&page=1`,
           );
           this._detectPriceUnit(page);
           for (const item of page) {
