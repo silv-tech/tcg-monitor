@@ -30,6 +30,51 @@ const rateBudget = require('../utils/rate-budget');
 const SHOPIFY_BUDGET = 'shopify';
 
 /**
+ * Non-TCG filter, shared by every shop.
+ *
+ * 25 of the 31 shops have no keyword list and no collections, so they tracked their entire
+ * catalogue — tcgfy was surfacing "Women's Feather Fur Peep Toe Mules" as a monitored product.
+ *
+ * The obvious fix, an include-list of TCG keywords, was tested against live data and is WRONG.
+ * Card titles mostly do not contain the game's name: they use character and set names. The
+ * existing 19-keyword list dropped 85 real Pokemon cards from zardocards alone — "Rayquaza
+ * Vmax 102/159 Crown Zenith", "Eevee ex - SV Scarlet & Violet Promo", "PSA 10 PICHU". Chasing
+ * every character and set name is unwinnable, and every gap is a MISSED DROP, which is the one
+ * failure this product exists to prevent. Junk getting through is merely annoying.
+ *
+ * So this excludes instead: only things positively identified as not-cards. Measured across
+ * page 1 of all 25 shops — 6,123 products, 195 removed (3.2%), all of them genuinely shampoo,
+ * shoes, Funko Pops, Warhammer, board games or console games, and not one card.
+ *
+ * RESCUE always wins over a block, so anything that smells like a card survives even if its
+ * category looks wrong — a sealed Pokemon box filed under "Toys & Games" stays.
+ */
+const NON_TCG_TYPE = [
+  'shoe', 'sandal', 'heel', 'bag', 'backpack', 'shampoo', 'conditioner', 'skincare',
+  'apparel', 'clothing', 'sweater', 'hoodie', 't-shirt', 'jewelry', 'comic', 'manga',
+  'video game', 'playstation', 'xbox', 'nintendo switch', 'board game', 'miniature',
+  'warhammer', 'paint', 'model kit', 'funko', 'plush', 'candle', 'mug',
+];
+const NON_TCG_TITLE = ['women’s', "women's", 'shampoo', 'peep toe', 'high heel'];
+const TCG_RESCUE = [
+  'pokemon', 'pokémon', 'tcg', 'trading card', 'booster', 'elite trainer', 'one piece',
+  'yugioh', 'yu-gi-oh', 'lorcana', 'digimon', 'magic the gathering', 'mtg', 'flesh and blood',
+  'grand archive', 'star wars: unlimited', 'union arena', 'weiss schwarz', 'vanguard',
+  'single', 'slab', 'psa ', 'cgc ', 'graded',
+];
+
+function isNonTcg(item) {
+  const type = String(item.product_type || '').toLowerCase();
+  const title = String(item.title || '').toLowerCase();
+  const tags = (item.tags || []).join(' ').toLowerCase();
+  const hay = `${type} ${title} ${tags}`;
+  // A false negative costs a missed drop; a false positive costs one junk alert. Rescue first.
+  if (TCG_RESCUE.some(k => hay.includes(k))) return false;
+  if (NON_TCG_TYPE.some(k => type.includes(k))) return true;
+  return NON_TCG_TITLE.some(k => title.includes(k));
+}
+
+/**
  * Universal Shopify adapter — works for ANY Shopify store.
  * Shopify exposes /products.json and /collections/{handle}.json publicly.
  * One adapter instance per store, configured via retailers.json.
@@ -305,6 +350,11 @@ class ShopifyAdapter extends BaseAdapter {
   }
 
   parseShopifyProduct(item, products) {
+    // Applied here rather than at each call site so the fast path, the collection walk and
+    // the full sweep all get it — there are four places products enter, and filtering at
+    // three of them is how a shop ends up alerting on shoes only on sweep polls.
+    if (isNonTcg(item)) return;
+
     // Each Shopify product can have multiple variants
     for (const variant of item.variants) {
       const inStock = variant.available === true;
@@ -381,3 +431,4 @@ class ShopifyAdapter extends BaseAdapter {
 
 module.exports = ShopifyAdapter;
 module.exports.FULL_SWEEP_MS = FULL_SWEEP_MS;
+module.exports.isNonTcg = isNonTcg;
