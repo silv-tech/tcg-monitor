@@ -243,37 +243,63 @@ describe('shopify fast poll: a partial read never loses stock', () => {
 
 describe('shopify fast poll: asks for a small page, not the whole one', () => {
   // The budget caps how many REQUESTS we make, not how big they are. A 250-product page is
-  // 874KB-2,045KB, and pulling that every 9s put shop poll times at ~2s, which is what kept
-  // active shops at 10.5-11.3s detection instead of 9.3s. 50 costs ~an eighth of the bytes.
-  test('a fast poll requests the small page size', async () => {
+  // A restock can be anywhere in a catalogue, not only at the top. At limit=50 the fast poll
+  // saw 131 of facetoface's 1,581 SKUs — 92% of the shop went unchecked between sweeps, and
+  // every change accumulated in that window fired at once when the sweep landed.
+  test('a fast poll requests a full page, for restock coverage', async () => {
     const a = makeAdapter();
     a._sweepOffset = 0;
     a._lastFullSweep = Date.now();
     let url = '';
     a._fetchPage = async (u) => { url = u; return { products: [], changed: true }; };
     await a.fetchProducts();
-    assert.match(url, /limit=50\b/, 'fast poll must not pull a full page');
+    assert.match(url, /limit=250\b/, 'fast poll reads a full page — same request, 5x the SKUs');
   });
 
-  test('a full sweep still uses the full page size, so accuracy is unchanged', async () => {
+  test('a fast poll is still ONE request — coverage came from page size, not more requests', async () => {
+    const a = makeAdapter();
+    a._sweepOffset = 0;
+    a._lastFullSweep = Date.now();
+    const urls = [];
+    a._fetchPage = async (u) => { urls.push(u); return { products: [], changed: true }; };
+    await a.fetchProducts();
+    assert.strictEqual(urls.length, 1, 'still one request per fast poll');
+    assert.match(urls[0], /page=1\b/);
+  });
+
+  test('a full sweep still walks every page', async () => {
     const a = makeAdapter();
     a._sweepOffset = 0;
     a._lastFullSweep = Date.now() - FULL_SWEEP_MS - 1000;
     const urls = [];
-    a._fetchPage = async (u) => { urls.push(u); return { products: [], changed: true }; };
+    let page = 0;
+    a._fetchPage = async (u) => {
+      urls.push(u);
+      page += 1;
+      if (page > 2) return { products: [product(999, 'Last', '1.00')], changed: true };
+      const list = [];
+      for (let i = 0; i < a.pageLimit; i++) list.push(product(page * 1000 + i, `P${i}`, '9.99'));
+      return { products: list, changed: true };
+    };
     await a.fetchProducts();
-    assert.ok(urls.length > 0);
-    assert.match(urls[0], /limit=250\b/, 'the sweep reads full pages');
+    assert.ok(urls.length >= 3, 'the sweep pages past page 1');
+    assert.match(urls[0], /limit=250\b/);
   });
 
-  test('collection shops also use the small page on the fast path', async () => {
+  test('collection shops fetch a full page per collection on the fast path', async () => {
     const a = makeAdapter({ collections: ['pokemon-sealed'] });
     a._sweepOffset = 0;
     a._lastFullSweep = Date.now();
     let url = '';
     a._fetchPage = async (u) => { url = u; return { products: [], changed: true }; };
     await a.fetchProducts();
-    assert.match(url, /collections\/pokemon-sealed\/products\.json\?limit=50/);
+    assert.match(url, /collections\/pokemon-sealed\/products\.json\?limit=250/);
+  });
+
+  test('the sweep window bounds how stale a deep product can get', () => {
+    // 15 minutes of accumulated changes is what arrived as a burst and tripped the flood
+    // suppressor. 5 cuts both the staleness and the batch size by three.
+    assert.strictEqual(FULL_SWEEP_MS, 5 * 60 * 1000);
   });
 });
 

@@ -20,12 +20,16 @@ const { normalizePrice } = require('../utils/helpers');
 // How often a shop reads its WHOLE catalogue rather than just the newest page. New listings
 // are caught on every poll regardless; this cadence only bounds how quickly a stock or price
 // change deep in the catalogue is noticed.
-// 15 minutes, not 5: sweeps draw from the same budget as the fast polls, and every request
-// a sweep spends is one a new-listing check cannot. Measured, sweeps at 5 minutes consumed
-// roughly a fifth of the whole Shopify budget and pushed fast-poll waits to 5-16 seconds.
-// New listings are still caught on every poll; this only bounds how quickly a stock or price
-// change deep in a catalogue is noticed.
-const FULL_SWEEP_MS = 15 * 60 * 1000;
+// Back to 5 minutes. This was raised to 15 when sweeps were competing with fast polls for a
+// single overloaded budget, but that contention is gone: shops now run on 8 ISP exits with a
+// per-IP budget, and sweeps yield to fast polls in the queue.
+//
+// The cadence is the ceiling on how STALE a product deep in a catalogue can be, and staleness
+// is what produced the alert floods — every change accumulated over the window fired the
+// instant the sweep landed. Measured load at 5 minutes: 1.55 req/s total, ~0.35 req/s on the
+// busiest exit against a 2.5 ceiling. There is no reason to make customers wait 15 minutes
+// for a restock alert to buy headroom we are not using.
+const FULL_SWEEP_MS = 5 * 60 * 1000;
 
 const rateBudget = require('../utils/rate-budget');
 const SHOPIFY_BUDGET = 'shopify';
@@ -40,22 +44,30 @@ function hostOfProxy(proxyUrl) {
 }
 
 /**
- * How many products a FAST poll asks for. The full sweep still uses the full page size.
+ * How many products a FAST poll asks for.
  *
- * The budget limits how many REQUESTS we may make, so the fast path was already down to one.
- * What it does not limit is how big each one is, and a 250-product page is enormous —
- * measured live: hobbiesville 2,045KB, pokejeux 1,691KB, zardocards 874KB. That was being
- * pulled every 9 seconds, and the transfer alone put shop poll times at ~2s, which is what
- * kept the active shops at 10.5-11.3s detection instead of the intended 9.3s.
+ * This was 50, on the reasoning that new listings sit at the top of page 1 so a small slice
+ * is enough. That is true for NEW LISTINGS and false for everything else, and the gap caused
+ * real alert floods.
  *
- * New listings sit at the top of page 1 (products.json is published_at descending), so a
- * fast poll only needs the top slice. 50 costs 95-335KB and 166-255ms — roughly an eighth of
- * the bytes and half the time. A shop would have to publish more than 50 products within one
- * poll interval to overflow it; the busiest shop measured publishes ~250 per DAY. Anything
- * that did overflow is still picked up by the next full sweep, and the seen-set stops it
- * being mistaken for a new listing when it appears.
+ * Measured against the three collection shops:
+ *
+ *   shop            fast poll @50    full sweep     never seen between sweeps
+ *   facetoface         131 SKUs      1,581 SKUs        1,450  (92%)
+ *   chimeragaming       54 SKUs        184 SKUs          130  (71%)
+ *   untouchables       344 SKUs      7,923 SKUs        7,579  (96%)
+ *
+ * A restock can happen anywhere in a catalogue, not just at the top. So 92% of facetoface was
+ * only being checked every 15 minutes, and every stock change in that window fired at once
+ * when the sweep landed — 13 alerts in 0s, tripping the flood suppressor. The alerts were
+ * genuine; they were just late and clumped, which is its own kind of wrong.
+ *
+ * 250 is Shopify's maximum page size and costs the SAME ONE REQUEST, only more bytes
+ * (measured 95-335KB vs 60-100KB). Payload was never the latency bottleneck here — queue
+ * order was, and that is fixed in rate-budget.js — so buying 5x the coverage for zero extra
+ * requests is the right trade.
  */
-const FAST_PAGE_LIMIT = 50;
+const FAST_PAGE_LIMIT = 250;
 
 /**
  * Non-TCG filter, shared by every shop.
