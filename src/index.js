@@ -47,30 +47,37 @@ const ADAPTER_MAP = {
  * /products.json is ordered by published_at descending, so every new listing is on page 1),
  * and every Shopify request passes through one shared rate budget.
  *
- * That budget is a hard ceiling, measured on this Railway IP by moving SHOPIFY_RATE and
- * watching the circuit breakers: 2.5 req/sec kept all 37 circuits closed; 5 req/sec reopened
- * all 31 shop circuits within minutes.
+ * The budget was then walked up on this Railway IP, changing SHOPIFY_RATE and watching the
+ * circuit breakers for five minutes at each step:
  *
- * Polling faster than the budget can serve does NOT make detection faster — it queues inside
- * the poll. At a flat 14s, demand was 2.57 req/sec and the median poll spent 6,749ms waiting,
- * giving ~20.7s detection instead of the intended ~14.2s.
+ *   2.5 req/sec  all 37 circuits closed
+ *   3.1 req/sec  all 37 closed, 0 x 429, 0 strikes
+ *   3.6 req/sec  all 37 closed, 0 x 429, 0 strikes   <- current
+ *   5.0 req/sec  all 31 shop circuits reopened within minutes
  *
- * So the budget is fixed, and the only way to make the shops that matter faster is to stop
- * spending it on the ones that do not — a flat interval polled a store that had not listed
- * anything in 352 days exactly as often as one listing 250 items a day.
+ * Note the 5.0 failure was measured BEFORE the fast-poll path, the startup-burst fix and the
+ * budget priority queue existed, so it is a loose upper bound rather than a sharp one.
  *
- * Measured 2026-09-05 from published_at on page 1 of all 31 shops — new listings in 24h:
- *   ACTIVE  pokejeux 250, infinitycards 250, zardocards 182, 401games 171, hobbiesville 102,
- *           remicardtrader 72, tistaminis 23, shopville 20, kanzengames 19, danireon 17,
- *           facetoface 15, gameshack 14, fusiongaming 12, rivalcards 11
- *   QUIET   cardlegendstcg (last listing 352 DAYS ago), poketherapy 88d, catchacard 47d,
- *           hastycards 29d, spshop 28d, cardcycle 8d, tonkatomtcg
- *   MEDIUM  everything else
+ * Two counter-intuitive results, both learned by measuring rather than reasoning:
  *
- * 9s / 30s / 90s costs 2.28 req/sec against the 2.5 budget, counting the three
- * collection-configured shops at two requests per poll. That buys ~9.3s detection on the 14
- * shops that actually drop product — under the 10s target, the same class as the big six —
- * and spends 90s intervals on shops where nothing has happened in a month.
+ *   - Polling faster than the budget can serve does NOT make detection faster; it queues
+ *     inside the poll. At a flat 14s, demand was 2.57 req/sec and the median poll spent
+ *     6,749ms waiting, giving ~20.7s detection instead of the intended ~14.2s.
+ *   - Average rate is not the whole story. Detection was stuck at 10.5-11.3s with demand
+ *     comfortably inside the budget, because a sweep's ten back-to-back requests sat in front
+ *     of every new-listing check. Fixing the QUEUE ORDER (see rate-budget.js) dropped shop
+ *     poll times from 2.4-3.1s to 110-643ms. Headroom matters too: keep demand near 90% of
+ *     budget or waits creep back in.
+ *
+ * Activity measured 2026-09-05 from published_at on page 1 of all 31 shops, new listings/24h:
+ *   FAST (24)   pokejeux 250, infinitycards 250, zardocards 182, 401games 171,
+ *               hobbiesville 102, remicardtrader 72, and the rest of the shops that list
+ *               anything at all. Both the active and medium tiers now sit at 9s.
+ *   QUIET (7)   cardlegendstcg (last listing 352 DAYS ago), poketherapy 88d, catchacard 47d,
+ *               hastycards 29d, spshop 28d, cardcycle 8d, tonkatomtcg
+ *
+ * At 9s/9s/90s demand is 3.22 req/sec against 3.6 — 11% headroom — and all 24 fast-tier shops
+ * measured under 10s detection, the same class as the big six.
  *
  * These tiers are a snapshot and will go stale. They should become self-measuring, driven by
  * observed listing rate, which is the same change autotune needs: allocate a shared budget by
@@ -97,7 +104,7 @@ const SHOP_TIERS = {
     ids: new Set(['tonkatomtcg', 'cardlegendstcg', 'catchacard', 'spshop', 'cardcycle',
       'poketherapy', 'hastycards']),
   },
-  medium: { intervalMs: tierMs('SHOP_MEDIUM_MS', 30000), ids: null },
+  medium: { intervalMs: tierMs('SHOP_MEDIUM_MS', 9000), ids: null },
 };
 
 function clampShopInterval(retailer) {
@@ -228,7 +235,7 @@ async function main() {
   // and sweeps draw from the same budget instead of spiking on top of it.
   const shopCount = retailers.filter(r => r.adapter === 'shopify' && r.enabled).length;
   if (shopCount > 0) {
-    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 2.5), 5);
+    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 3.6), 5);
   }
 
   const clamped = retailers.filter(r => r._clampedFrom);
