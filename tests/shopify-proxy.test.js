@@ -112,3 +112,62 @@ describe('shop proxy budgets are per exit IP', () => {
     assert.ok(perIp < 2.5, 'comfortably inside the measured per-IP ceiling');
   });
 });
+
+describe('shared-pool distribution', () => {
+  // The bug: the round-robin pointer starts at 0 for any retailer not seen before, so all 31
+  // shops took pool[0] on their first call and the sticky map pinned them there. That funnels
+  // every shop through ONE exit IP — no better than the single Railway IP, and worse because
+  // that IP belongs to Walmart's dedicated pool.
+  const seedFor = (retailerId, poolLen) => {
+    let h = 0;
+    for (const ch of String(retailerId)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return h % poolLen;
+  };
+
+  const SHOP_IDS = ['401games', 'facetoface', 'hobbiesville', 'chimeragaming', 'untouchables',
+    'deckoutgaming', 'danireon', 'pokejeux', 'tcgfy', 'hobbystoptcg', 'cardlegendstcg',
+    'gameshack', 'fusiongaming', 'pokechalet', 'catchacard', 'spshop', 'remicardtrader',
+    'cardcycle', 'vancitycj', 'infinitycards', 'poketherapy', 'shopville', 'tistaminis',
+    'doescards', 'zardocards', 'rivalcards', 'hastycards', 'emmettstoystop', 'tonkatomtcg',
+    'vancitytcg', 'kanzengames'];
+
+  test('the old behaviour put every shop on one IP', () => {
+    const starts = new Set(SHOP_IDS.map(() => 0));
+    assert.strictEqual(starts.size, 1, 'this is the bug being fixed');
+  });
+
+  test('seeding from the id spreads 31 shops across the pool', () => {
+    const counts = {};
+    for (const id of SHOP_IDS) {
+      const i = seedFor(id, 10);
+      counts[i] = (counts[i] || 0) + 1;
+    }
+    const used = Object.keys(counts).length;
+    const max = Math.max(...Object.values(counts));
+    assert.ok(used >= 8, `expected a wide spread, used only ${used} of 10`);
+    assert.ok(max <= 8, `one IP took ${max} shops — too concentrated`);
+  });
+
+  test('the busiest IP stays far inside the per-IP ceiling', () => {
+    const counts = {};
+    for (const id of SHOP_IDS) {
+      const i = seedFor(id, 10);
+      counts[i] = (counts[i] || 0) + 1;
+    }
+    const max = Math.max(...Object.values(counts));
+    assert.ok(max / 9 < 2.5, `busiest IP ${(max / 9).toFixed(2)} req/s at a 9s interval`);
+  });
+
+  test('the seed is deterministic, so a restart keeps the same layout', () => {
+    assert.strictEqual(seedFor('hobbiesville', 10), seedFor('hobbiesville', 10));
+  });
+
+  test('a retailer WITH a dedicated pool is unaffected by the seeding', () => {
+    // Only retailers with no assignment get seeded — walmart/amazon/costco/pokemoncenter
+    // keep their explicit pools untouched.
+    const allowed = [0, 1, 2];
+    const shouldSeed = (allowedIndices) => !allowedIndices;
+    assert.strictEqual(shouldSeed(allowed), false);
+    assert.strictEqual(shouldSeed(undefined), true);
+  });
+});

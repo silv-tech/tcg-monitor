@@ -95,6 +95,20 @@ function getNextIspProxy(retailerId) {
 
   if (pool.length === 0) return null;
 
+  // Spread retailers that have NO dedicated pool across the shared one.
+  //
+  // The round-robin pointer starts at 0 for every retailer that has not been seen before, so
+  // on their first call they all take pool[0] — and the sticky map then pins them there for
+  // good. With one or two unassigned retailers that is harmless; with 31 Shopify shops it
+  // meant every single one funnelled through the same exit IP, which is no better than the
+  // single Railway IP they were moved off, and worse because that IP belongs to Walmart's
+  // pool. Seeding the pointer from the retailer's own id spreads them deterministically.
+  if (retailerId && !allowedIndices && !ispPool.retailerIndex.has(retailerId)) {
+    let h = 0;
+    for (const ch of String(retailerId)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    ispPool.retailerIndex.set(retailerId, h % pool.length);
+  }
+
   // Sticky session: same retailer sticks to same proxy until it breaks
   if (retailerId && ispPool.sticky.has(retailerId)) {
     const stickyIdx = ispPool.sticky.get(retailerId);
