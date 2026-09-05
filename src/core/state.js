@@ -210,6 +210,35 @@ function jaccardSimilarity(a, b) {
   return union === 0 ? 0 : intersection / union;
 }
 
+/**
+ * Ids of retailers we currently monitor, cached briefly.
+ *
+ * Read from the config file rather than tracked in Redis on purpose: a removed retailer
+ * disappears from the file immediately, while its cached PRODUCTS linger for up to their
+ * 7-day TTL. The file is the authority on what exists; Redis is only the authority on what
+ * those retailers last looked like.
+ *
+ * Returns null if the config cannot be read, and callers treat null as "do not filter" —
+ * a missing config should never silently empty the index.
+ */
+let liveIdsCache = null;
+let liveIdsAt = 0;
+const LIVE_IDS_TTL = 60000;
+
+function liveRetailerIds() {
+  const now = Date.now();
+  if (liveIdsCache && now - liveIdsAt < LIVE_IDS_TTL) return liveIdsCache;
+  try {
+    const path = require('path').join(__dirname, '../config/retailers.json');
+    const list = JSON.parse(require('fs').readFileSync(path, 'utf-8'));
+    liveIdsCache = new Set(list.map((r) => r.id));
+    liveIdsAt = now;
+    return liveIdsCache;
+  } catch {
+    return null;
+  }
+}
+
 async function rebuildCrossRetailerIndex() {
   const now = Date.now();
   const pattern = `${PREFIX}product:*`;
@@ -227,12 +256,21 @@ async function rebuildCrossRetailerIndex() {
   keys.forEach(k => pipeline.get(k));
   const results = await pipeline.exec();
 
+  // Only retailers we still monitor may appear in "Also In Stock".
+  //
+  // This scan reads every cached product key, and cached products outlive the retailer: when
+  // 20 stores were removed on 2026-09-05 their product keys stayed in Redis for up to seven
+  // days. Without this filter, alerts would have told customers a product was "Also In Stock
+  // at Face to Face Games" — a store we no longer poll, at a price nobody was refreshing.
+  const live = liveRetailerIds();
+
   crossRetailerIndex.length = 0;
   const MAX_INDEX_SIZE = 20000;
   for (const [err, data] of results) {
     if (err || !data) continue;
     const p = safeParse(data);
     if (!p || !p.inStock || p.price == null || p.price <= 0) continue;
+    if (live && !live.has(p.retailerId)) continue;
     crossRetailerIndex.push(indexEntry(p.retailerId, p));
     if (crossRetailerIndex.length >= MAX_INDEX_SIZE) break;
   }
