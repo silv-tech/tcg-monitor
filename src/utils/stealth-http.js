@@ -14,6 +14,47 @@ async function getImpit() {
 // Cache Impit instances per proxy URL to reuse connections
 const impitCache = new Map();
 
+/**
+ * Per-host rate-limit cooldowns.
+ *
+ * Thirty Shopify shops on one Railway IP polled in lockstep and took 202 rate-limit
+ * rejections in a 23-second window — because a 429 changed nothing. `maxRetries: 1` meant
+ * the Retry-After sleep below was never reached (attempt 1 >= 1 throws immediately), so every
+ * shop kept firing on its next tick regardless of the retailer asking us to stop.
+ *
+ * A 429 is the retailer telling us its price for the next N seconds. Honour it at the HOST
+ * level: every caller for that host fails fast until the cooldown expires, instead of each
+ * one independently rediscovering the block. Failing fast is also what lets the caller
+ * distinguish "throttled" from "this shop has no products" — the two were indistinguishable,
+ * which is what raised false parser alerts and alert floods on recovery.
+ */
+const hostCooldowns = new Map(); // host -> epoch ms until which requests fail fast
+const MAX_COOLDOWN_MS = 120000;
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch { return url; }
+}
+
+function cooldownRemaining(url) {
+  const until = hostCooldowns.get(hostOf(url));
+  if (!until) return 0;
+  const left = until - Date.now();
+  if (left <= 0) { hostCooldowns.delete(hostOf(url)); return 0; }
+  return left;
+}
+
+function setCooldown(url, ms) {
+  const host = hostOf(url);
+  const until = Date.now() + Math.min(ms, MAX_COOLDOWN_MS);
+  // Never shorten an existing cooldown — repeated 429s mean the host wants more room.
+  if ((hostCooldowns.get(host) || 0) < until) hostCooldowns.set(host, until);
+}
+
+/** True when the error came from a retailer throttling us rather than a parse or block failure. */
+function isRateLimited(err) {
+  return /^(Rate limited|Cooling down)/.test(err?.message || '');
+}
+
 // `lane` splits one proxy URL across several cached impit instances. Each instance keeps its
 // own connection, and the residential pool hands out a different exit IP per connection —
 // measured: 4 requests through one shared instance all came from 184.65.189.19, while 4
@@ -68,6 +109,11 @@ async function stealthGet(url, opts = {}) {
   } = opts;
   const cacheKey = instanceKey(proxyUrl, ignoreTlsErrors, lane);
 
+  // The host asked us to back off and the window has not expired. Do not spend a request
+  // finding that out again.
+  const cooling = cooldownRemaining(url);
+  if (cooling > 0) throw new Error(`Cooling down ${Math.round(cooling / 1000)}s after 429: ${url}`);
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const impit = await getImpitInstance(proxyUrl, ignoreTlsErrors, lane);
@@ -100,8 +146,11 @@ async function stealthGet(url, opts = {}) {
       clearTimeout(timeout);
 
       if (response.status === 429) {
-        if (attempt >= maxRetries) throw new Error(`Rate limited (429): ${url}`);
         const retryAfter = Math.max(parseInt(response.headers.get('retry-after') || '5') * 1000, 2000);
+        // Record it before deciding whether to retry, so that even a no-retry caller
+        // (maxRetries: 1) still stops the NEXT poll from walking into the same wall.
+        setCooldown(url, retryAfter);
+        if (attempt >= maxRetries) throw new Error(`Rate limited (429): ${url}`);
         logger.warn(`Stealth: rate limited on ${url}, waiting ${retryAfter}ms`);
         await sleep(retryAfter);
         continue;
@@ -153,4 +202,6 @@ function _clearCache(proxyUrl, ignoreTlsErrors = false, lane = null) {
   impitCache.delete(instanceKey(proxyUrl, ignoreTlsErrors, lane));
 }
 
-module.exports = { stealthGet, _clearCache };
+function _resetCooldowns() { hostCooldowns.clear(); }
+
+module.exports = { stealthGet, _clearCache, isRateLimited, cooldownRemaining, _resetCooldowns };

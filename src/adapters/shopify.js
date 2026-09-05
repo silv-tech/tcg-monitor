@@ -1,6 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { stealthGet } = require('../utils/stealth-http');
+const { stealthGet, isRateLimited } = require('../utils/stealth-http');
 
 // Shopify prices by the CALLER'S GEOGRAPHY. The app runs from Railway in Virginia, so these
 // Canadian stores were quoting USD while we labelled the result CAD — measured on live stores:
@@ -40,11 +40,17 @@ class ShopifyAdapter extends BaseAdapter {
     // moved, and it can skip the diff and the Redis round-trips entirely.
     this._anyPageChanged = false;
 
+    // A throttled shop and an empty shop used to look identical from here: both returned {}.
+    // That is what let a burst of 429s raise "PARSER SUSPECT — 0% of products have a price"
+    // and, on recovery, an alert flood. Track WHY we came back empty.
+    let throttled = false;
+
     // Method 1: Fetch from specific collections
     for (const collection of this.collections) {
       try {
         await this.fetchCollection(collection, products);
       } catch (err) {
+        if (isRateLimited(err)) throttled = true;
         logger.warn(`${this.name}: collection "${collection}" failed: ${err.message}`);
       }
     }
@@ -54,8 +60,15 @@ class ShopifyAdapter extends BaseAdapter {
       try {
         await this.fetchAllProducts(products);
       } catch (err) {
+        if (isRateLimited(err)) throttled = true;
         logger.warn(`${this.name}: /products.json failed: ${err.message}`);
       }
+    }
+
+    // Empty because the retailer refused us is a failed poll, not a catalogue of nothing.
+    // Throwing keeps it out of the diff, the health ratio and the event stream alike.
+    if (throttled && Object.keys(products).length === 0) {
+      throw new Error(`${this.name}: rate limited — skipping poll rather than reporting an empty catalogue`);
     }
 
     return products;

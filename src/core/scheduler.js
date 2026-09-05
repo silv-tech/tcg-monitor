@@ -239,27 +239,46 @@ class Scheduler {
 
     logger.info(`Scheduler starting with ${this.adapters.size} adapters`);
 
-    let stagger = 0;
-    for (const [id, adapter] of this.adapters) {
+    // Spread each adapter's polls across its OWN period.
+    //
+    // A flat `stagger += 3000` only staggers the FIRST poll; after that every adapter runs a
+    // bare setInterval, so what matters is the offset modulo the interval. With ~30 shops on
+    // an 8000ms interval, 3000ms steps land on just 8 distinct phases ({0,3000,6000,1000,...}),
+    // putting four shops on the same millisecond forever. Measured result: bursts of 52-90
+    // requests inside a single second and 202 rate-limit rejections in 23 seconds, from an
+    // average request rate the retailers would otherwise have accepted.
+    //
+    // Grouping by interval and dividing the period evenly gives every adapter its own slot,
+    // so the same number of requests arrives smoothly instead of in a spike.
+    const groups = new Map(); // intervalMs -> [adapter]
+    for (const [, adapter] of this.adapters) {
       if (!adapter.enabled) {
         logger.info(`Skipping disabled adapter: ${adapter.name}`);
         continue;
       }
+      if (!groups.has(adapter.intervalMs)) groups.set(adapter.intervalMs, []);
+      groups.get(adapter.intervalMs).push(adapter);
+    }
 
-      // Stagger initial polls so they don't all fire at once
-      setTimeout(() => {
-        this.pollAdapter(adapter);
-        const timer = setInterval(() => {
-          if (this.running) this.pollAdapter(adapter);
-        }, adapter.intervalMs);
-        this.timers.set(id, timer);
-      }, stagger);
+    for (const [intervalMs, members] of groups) {
+      const slot = intervalMs / members.length;
+      members.forEach((adapter, i) => {
+        setTimeout(() => {
+          if (!this.running) return;
+          this.pollAdapter(adapter);
+          const timer = setInterval(() => {
+            if (this.running) this.pollAdapter(adapter);
+          }, adapter.intervalMs);
+          this.timers.set(adapter.id, timer);
+        }, Math.round(i * slot));
 
-      if (adapter.watchlist && adapter.watchlist.size > 0) {
-        this._startWatchlistLoop(adapter);
+        if (adapter.watchlist && adapter.watchlist.size > 0) {
+          this._startWatchlistLoop(adapter);
+        }
+      });
+      if (members.length > 1) {
+        logger.info(`Phase-spread ${members.length} adapters across ${intervalMs}ms (${Math.round(slot)}ms apart)`);
       }
-
-      stagger += 3000;
     }
 
     // Self-tuning cadence (off unless AUTOTUNE=on — see autotune.js).
@@ -330,10 +349,18 @@ class Scheduler {
     if (!this.running) return;
 
     if (adapter.enabled) {
-      // Create new timer with updated interval
-      const timer = setInterval(() => {
-        if (this.running) this.pollAdapter(adapter);
-      }, adapter.intervalMs);
+      // Land on a random phase rather than re-anchoring to "now". Retuning several adapters
+      // in one pass would otherwise align them all to the same instant — the same collision
+      // the startup spread above exists to prevent.
+      const phase = Math.floor(Math.random() * adapter.intervalMs);
+      const timer = setTimeout(() => {
+        if (!this.running) return;
+        this.pollAdapter(adapter);
+        const repeat = setInterval(() => {
+          if (this.running) this.pollAdapter(adapter);
+        }, adapter.intervalMs);
+        this.timers.set(adapterId, repeat);
+      }, phase);
       this.timers.set(adapterId, timer);
 
       // Restart watchlist timer if adapter has a watchlist
