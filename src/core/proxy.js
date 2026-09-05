@@ -83,6 +83,38 @@ function normalizeProxyUrl(raw) {
   return raw; // Return as-is, let it fail at connection time if invalid
 }
 
+/**
+ * Retailers whose ISP proxies nothing else may share.
+ *
+ * Of the ten ISP IPs, eight are reserved for walmart [0,1,2], amazon [3,4,5] and
+ * pokemoncenter [8,9] — but all three actually run on RESIDENTIAL proxies, so those eight sit
+ * idle. Costco is the only retailer whose proxyTier is genuinely 'isp', and it is one of the
+ * six stores the product is sold on.
+ *
+ * So the 31 Shopify shops can have the idle eight without costing the big six anything, but
+ * they must never land on Costco's. Enforcing that here rather than by convention means a
+ * future retailer added to the shared pool inherits the protection automatically.
+ */
+const PROTECTED_ISP_RETAILERS = String(process.env.PROTECTED_ISP_RETAILERS || 'costco')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+function protectedIndices() {
+  const out = new Set();
+  for (const id of PROTECTED_ISP_RETAILERS) {
+    for (const i of ispPool.retailerPools[id] || []) out.add(i);
+  }
+  return out;
+}
+
+/** Proxies available to any retailer without its own assignment. */
+function sharedPool() {
+  const blocked = protectedIndices();
+  const pool = ispPool.proxies.filter(p => !blocked.has(p.index));
+  // Never hand back an empty pool: an unassigned retailer with nowhere to go would fall back
+  // to a direct connection silently, which is exactly the single-IP problem being avoided.
+  return pool.length > 0 ? pool : ispPool.proxies;
+}
+
 function getNextIspProxy(retailerId) {
   if (ispPool.proxies.length === 0) return null;
   const now = Date.now();
@@ -91,7 +123,7 @@ function getNextIspProxy(retailerId) {
   const allowedIndices = ispPool.retailerPools[retailerId];
   const pool = allowedIndices
     ? allowedIndices.map(i => ispPool.proxies[i]).filter(Boolean)
-    : ispPool.proxies; // No assignment = shared pool (fallback)
+    : sharedPool(); // No assignment = everything except the protected pools
 
   if (pool.length === 0) return null;
 
@@ -109,11 +141,15 @@ function getNextIspProxy(retailerId) {
     ispPool.retailerIndex.set(retailerId, h % pool.length);
   }
 
-  // Sticky session: same retailer sticks to same proxy until it breaks
+  // Sticky session: same retailer sticks to same proxy until it breaks.
+  // The sticky entry is re-checked against the CURRENT pool, not just for health: a shop
+  // pinned before the protected pools existed would otherwise keep using Costco's proxy
+  // forever, since sticky short-circuits the selection below.
   if (retailerId && ispPool.sticky.has(retailerId)) {
     const stickyIdx = ispPool.sticky.get(retailerId);
     const proxy = ispPool.proxies[stickyIdx];
-    if (proxy && proxy.healthy && proxy.blockedUntil < now) {
+    const stillAllowed = proxy && pool.some(p => p.index === proxy.index);
+    if (stillAllowed && proxy.healthy && proxy.blockedUntil < now) {
       return proxy;
     }
     ispPool.sticky.delete(retailerId);
