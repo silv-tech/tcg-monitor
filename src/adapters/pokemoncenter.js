@@ -49,7 +49,10 @@ class PokemonCenterAdapter extends BaseAdapter {
     this.watchlist = new Set(config.watchlist || []);
 
     this._knownSkus = new Set();      // every sku seen in a sitemap scan
-    this._newSkuQueue = [];           // newly listed skus awaiting a paid check
+    this._newSkuQueue = [];             // newly listed skus awaiting a paid check
+    this._rotationCheckedAt = new Map(); // sku -> last rotation check, so the sweep is fair
+    this._rotationSpentToday = 0;
+    this._rotationDay = null;
     this._seededSkus = false;         // first scan seeds silently — no flood after a restart
     this._watchlistCheckedAt = new Map();
     this._stealthBlockedUntil = 0;    // free-path circuit; retried occasionally in case the block lifts
@@ -70,7 +73,26 @@ class PokemonCenterAdapter extends BaseAdapter {
     this.paidCheckIntervalMs = this.timingValue('paidCheckIntervalMs', 5 * 60 * 1000, 60 * 1000);
   }
 
-  /** Products the paid checker should spend credits on this poll. */
+  /**
+   * Products the paid checker should spend credits on this poll.
+   *
+   * This used to draw from exactly two sources — the watchlist and newly-seen SKUs — and with
+   * an empty watchlist and a stable sitemap it selected NOTHING, on every poll, indefinitely.
+   * The store logged "1195 products, no checks due (0 queued, 0 with known stock)" for days:
+   * no product ever got a price, none was ever marked in stock, and so no restock could ever
+   * be detected. A big-six retailer that structurally could not alert.
+   *
+   * A third source fixes the deadlock: rotate through the catalogue, oldest-checked first.
+   * It is strictly budget-bounded because these checks are expensive — DataDome 403s the free
+   * path (verified against live product pages), so every check is a 25-credit ultraPremium
+   * ScraperAPI call. At 1,195 products a full rotation is 29,875 credits, roughly a third of
+   * the monthly plan, which is why rotation alone can never be the answer.
+   *
+   * Priority order matters more than volume here:
+   *   1. watchlist    — the products someone explicitly cares about
+   *   2. new SKUs     — a listing that just appeared
+   *   3. rotation     — everything else, oldest first, so nothing is permanently invisible
+   */
   _selectCheckTargets() {
     const now = Date.now();
     const targets = [];
@@ -86,7 +108,41 @@ class PokemonCenterAdapter extends BaseAdapter {
       if (this.sitemapProducts.has(sku) && !targets.includes(sku)) targets.push(sku);
     }
 
+    // Rotation, only with budget left for it today.
+    if (targets.length < this.checksPerPoll && this._rotationBudgetLeft() > 0) {
+      const candidates = [];
+      for (const sku of this.sitemapProducts.keys()) {
+        if (targets.includes(sku)) continue;
+        candidates.push([sku, this._rotationCheckedAt.get(sku) || 0]);
+      }
+      candidates.sort((a, b) => a[1] - b[1]); // never-checked (0) first, then stalest
+      for (const [sku] of candidates) {
+        if (targets.length >= this.checksPerPoll) break;
+        targets.push(sku);
+        this._rotationCheckedAt.set(sku, now);
+        this._rotationSpentToday += 1;
+      }
+    }
+
     return targets.slice(0, Math.max(this.checksPerPoll, this.watchlist.size));
+  }
+
+  /**
+   * Checks the rotation may still spend today.
+   *
+   * Deliberately a hard daily cap rather than a rate: the failure mode being guarded against
+   * is a fast poll loop quietly draining a month of credits in a day. Defaults to 40, which is
+   * the ~2/hour the budget comment in scraper-api.js was written around, and can be set to 0
+   * to turn rotation off entirely and rely on the watchlist alone.
+   */
+  _rotationBudgetLeft() {
+    const cap = this.timingValue('dailyRotationChecks', 40, 0);
+    const today = new Date().toISOString().slice(0, 10);
+    if (this._rotationDay !== today) {
+      this._rotationDay = today;
+      this._rotationSpentToday = 0;
+    }
+    return Math.max(0, cap - this._rotationSpentToday);
   }
 
   isChallengePage(html) {
@@ -175,7 +231,20 @@ class PokemonCenterAdapter extends BaseAdapter {
     // Nothing new and nothing due: a quiet poll, not a failed one
     if (batchSize === 0) {
       this._consecutiveFailures = 0;
-      logger.info(`Pokemon Center: ${Object.keys(products).length} products, no checks due (${this._newSkuQueue.length} queued, ${this.availabilityCache.size} with known stock)`);
+      // Selecting nothing to check is only "quiet" if something else can still produce an
+      // alert. With an empty watchlist, nothing queued and no product known to be in stock,
+      // this store cannot detect a restock at all — it logged exactly that, at info level,
+      // every poll for days while appearing healthy. That is a configuration failure and it
+      // must not read like a normal cycle.
+      const detail = `${Object.keys(products).length} products, no checks due `
+        + `(${this._newSkuQueue.length} queued, ${this.availabilityCache.size} with known stock)`;
+      if (this.watchlist.size === 0 && this.availabilityCache.size === 0
+          && this._rotationBudgetLeft() === 0) {
+        logger.warn(`Pokemon Center: ${detail} — watchlist EMPTY and rotation budget spent, `
+          + 'so no restock can be detected. Add SKUs to the watchlist or raise dailyRotationChecks.');
+      } else {
+        logger.info(`Pokemon Center: ${detail}`);
+      }
       return products;
     }
 
