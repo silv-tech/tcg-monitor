@@ -36,6 +36,9 @@ class ShopifyAdapter extends BaseAdapter {
 
   async fetchProducts() {
     const products = {};
+    // Reset per poll. If every page comes back 304 we can tell the scheduler that nothing
+    // moved, and it can skip the diff and the Redis round-trips entirely.
+    this._anyPageChanged = false;
 
     // Method 1: Fetch from specific collections
     for (const collection of this.collections) {
@@ -87,6 +90,7 @@ class ShopifyAdapter extends BaseAdapter {
       // Unchanged — reuse what this page gave us last time, parse nothing, transfer nothing.
       return { products: this._pageCache.get(url) || [], changed: false };
     }
+    this._anyPageChanged = true;
     let data;
     try { data = JSON.parse(res.body); } catch { return { products: [], changed: false }; }
     const list = data.products || [];
