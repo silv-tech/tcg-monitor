@@ -374,6 +374,11 @@ class AmazonAdapter extends BaseAdapter {
       out.push({
         asin,
         name: decodeEntities(name.trim()),
+        // The raw image alt, carried through so the game filter can see the FULL title.
+        // Amazon's aria-label drops an accented brand prefix, turning "Pokémon TCG: X" into
+        // "TCG: X" — a title with no franchise word in it. Without the alt, requiring the
+        // game name in the title would throw away real Pokemon products.
+        _alt: altRaw ? decodeEntities(altRaw.trim()) : '',
         price,
         inStock: !!price && !oos,
         image: (card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com[^"]+)"/) || [])[1] || '',
@@ -393,8 +398,22 @@ class AmazonAdapter extends BaseAdapter {
     const lower = item.name.toLowerCase();
     if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return null;
     if (!isTCGProduct(item.name)) return null;
-    // A title naming a game we do not track is a genuine miss, not a truncation
-    if (/yu-?gi-?oh|magic the gathering|\bmtg\b|lorcana|digimon|dragon ball/i.test(item.name)) return null;
+
+    // The product must actually be one of the games we track.
+    //
+    // This path used to accept ANY trading card game and merely blocklist five named ones
+    // (yugioh, mtg, lorcana, digimon, dragon ball). A blocklist cannot keep up: an "Italian
+    // Brainrot Trading Card Game" box matched isTCGProduct, was not on the list, and was
+    // alerted on — then mislabelled 'pokemon' by the category fallback below.
+    //
+    // fetchProductPage, the watchlist path, has always required a tracked game name. These two
+    // paths disagreeing is what let a meme card game into a Pokemon monitor.
+    //
+    // Checked against the image alt as well as the title, because Amazon's aria-label drops
+    // accented brand prefixes — "Pokémon TCG: Mega Evolution" arrives as "TCG: Mega Evolution".
+    // The alt keeps the full title, so real Pokemon products with truncated titles still pass.
+    const haystack = `${item.name} ${item._alt || ''}`.toLowerCase();
+    if (!GAME_NAMES.some(g => haystack.includes(g))) return null;
 
     const cached = this._knownProducts.get(item.asin) || {};
     const product = this.classify({
@@ -411,9 +430,17 @@ class AmazonAdapter extends BaseAdapter {
       lastSeen: Date.now(),
     });
 
-    if (product.category === 'other' && query) {
-      product.category = /one piece/i.test(query) ? 'onepiece' : 'pokemon';
-      product._categoryFromQuery = true;
+    // Category from the product itself, falling back to the query only when the product really
+    // does name a tracked game. Previously this defaulted to 'pokemon' for anything the
+    // classifier could not place, which is how an Italian Brainrot card game ended up
+    // labelled as Pokemon in an alert.
+    if (product.category === 'other') {
+      if (/one piece/.test(haystack)) product.category = 'onepiece';
+      else if (/pokemon|pokémon/.test(haystack)) product.category = 'pokemon';
+      else if (query) {
+        product.category = /one piece/i.test(query) ? 'onepiece' : 'pokemon';
+        product._categoryFromQuery = true;
+      }
     }
     return product;
   }
