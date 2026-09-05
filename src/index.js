@@ -52,7 +52,8 @@ const ADAPTER_MAP = {
  *
  *   2.5 req/sec  all 37 circuits closed
  *   3.1 req/sec  all 37 closed, 0 x 429, 0 strikes
- *   3.6 req/sec  all 37 closed, 0 x 429, 0 strikes   <- current
+ *   3.6 req/sec  all 37 closed — all 24 fast-tier shops under 10s
+ *   4.2 req/sec  all 37 closed, 0 x 429, 0 strikes — ALL 31 shops under 10s  <- current
  *   5.0 req/sec  all 31 shop circuits reopened within minutes
  *
  * Note the 5.0 failure was measured BEFORE the fast-poll path, the startup-burst fix and the
@@ -76,8 +77,12 @@ const ADAPTER_MAP = {
  *   QUIET (7)   cardlegendstcg (last listing 352 DAYS ago), poketherapy 88d, catchacard 47d,
  *               hastycards 29d, spshop 28d, cardcycle 8d, tonkatomtcg
  *
- * At 9s/9s/90s demand is 3.22 req/sec against 3.6 — 11% headroom — and all 24 fast-tier shops
- * measured under 10s detection, the same class as the big six.
+ * At 9s across every tier, demand is 3.91 req/sec against 4.2 and all 31 shops measured under
+ * 10s detection — the same class as the big six.
+ *
+ * The tiers are deliberately KEPT even though all three now hold the same interval: they are
+ * the control surface for backing specific shops off if this IP is ever throttled again,
+ * which is a far better first move than slowing all 31 uniformly.
  *
  * These tiers are a snapshot and will go stale. They should become self-measuring, driven by
  * observed listing rate, which is the same change autotune needs: allocate a shared budget by
@@ -100,7 +105,7 @@ const SHOP_TIERS = {
       'gameshack', 'fusiongaming', 'rivalcards']),
   },
   quiet: {
-    intervalMs: tierMs('SHOP_QUIET_MS', 90000),
+    intervalMs: tierMs('SHOP_QUIET_MS', 9000),
     ids: new Set(['tonkatomtcg', 'cardlegendstcg', 'catchacard', 'spshop', 'cardcycle',
       'poketherapy', 'hastycards']),
   },
@@ -235,7 +240,7 @@ async function main() {
   // and sweeps draw from the same budget instead of spiking on top of it.
   const shopCount = retailers.filter(r => r.adapter === 'shopify' && r.enabled).length;
   if (shopCount > 0) {
-    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 3.6), 5);
+    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 4.2), 5);
   }
 
   const clamped = retailers.filter(r => r._clampedFrom);
