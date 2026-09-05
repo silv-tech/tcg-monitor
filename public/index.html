@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="en-CA">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nocturne Monitors: Canadian TCG restock monitors for Discord</title>
+<meta name="description" content="Restock, pre-order and price alerts from Canadian retailers only, posted to your Discord server in seconds. Walmart.ca, Costco.ca, Amazon.ca, Best Buy Canada and the hobby shops that ship here.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Nocturne Monitors">
+<meta property="og:description" content="Canadian TCG restock monitors for Discord groups, card shops and resellers.">
+<meta property="og:url" content="https://nocturnemonitors.com/">
+<meta name="theme-color" content="#0D1836">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='12' fill='%230D1836'/%3E%3Cpath d='M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z' fill='%23F4DA8C'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --night:#0D1836;
+  --night-2:#132148;
+  --night-3:#1C2D5E;
+  --line:rgba(190,205,255,.13);
+  --line-strong:rgba(190,205,255,.26);
+  --ink:#EEF2FF;
+  --ink-2:#B9C3E6;
+  --ink-3:#8593C2;
+  --moon:#F4DA8C;
+  --moon-deep:#E6C563;
+  --moon-ink:#1B1500;
+  --aurora:#6EE3C1;
+  --dc-bg:#313338;
+  --dc-embed:#2B2D31;
+  --dc-text:#DBDEE1;
+  --dc-muted:#949BA4;
+  --dc-btn:#4E5058;
+  --dc-blurple:#5865F2;
+  --font:"Bricolage Grotesque","Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
+  --dc-font:"gg sans","Noto Sans","Helvetica Neue",Arial,sans-serif;
+  --max:1160px;
+  --pad:24px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:84px}
+body{margin:0;background:var(--night);color:var(--ink);font-family:var(--font);font-size:17px;line-height:1.6;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:
+  radial-gradient(1000px 520px at 88% -8%,rgba(110,227,193,.14),transparent 62%),
+  radial-gradient(760px 420px at 6% 2%,rgba(244,218,140,.10),transparent 60%),
+  radial-gradient(1.5px 1.5px at 12% 22%,rgba(255,255,255,.55) 50%,transparent 52%),
+  radial-gradient(1px 1px at 28% 68%,rgba(255,255,255,.45) 50%,transparent 52%),
+  radial-gradient(1.5px 1.5px at 46% 14%,rgba(255,255,255,.5) 50%,transparent 52%),
+  radial-gradient(1px 1px at 63% 42%,rgba(255,255,255,.4) 50%,transparent 52%),
+  radial-gradient(1.5px 1.5px at 77% 78%,rgba(255,255,255,.5) 50%,transparent 52%),
+  radial-gradient(1px 1px at 91% 30%,rgba(255,255,255,.45) 50%,transparent 52%),
+  radial-gradient(1px 1px at 38% 88%,rgba(255,255,255,.35) 50%,transparent 52%),
+  radial-gradient(1.5px 1.5px at 8% 50%,rgba(255,255,255,.4) 50%,transparent 52%)}
+h1,h2,h3,h4{margin:0;font-weight:700;letter-spacing:-.02em;line-height:1.1}
+p{margin:0}
+a{color:var(--moon)}
+.wrap{max-width:var(--max);margin:0 auto;padding:0 var(--pad)}
+.skip{position:absolute;left:-999px;top:8px;background:var(--moon);color:var(--moon-ink);padding:8px 12px;border-radius:8px;z-index:100;text-decoration:none;font-weight:600}
+.skip:focus{left:8px}
+:focus-visible{outline:2px solid var(--moon);outline-offset:3px}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:13px 22px;border-radius:10px;font:inherit;font-weight:650;font-size:16px;line-height:1.2;text-decoration:none;border:1px solid transparent;cursor:pointer;transition:background .15s ease,border-color .15s ease}
+.btn-primary{background:var(--moon);color:var(--moon-ink)}
+.btn-primary:hover{background:var(--moon-deep)}
+.btn-secondary{background:transparent;color:var(--ink);border-color:var(--line-strong)}
+.btn-secondary:hover{background:var(--night-2);border-color:var(--ink-3)}
+.btn-sm{padding:9px 16px;font-size:15px}
+.btn-block{width:100%}
+
+/* Nav */
+.nav{position:sticky;top:0;z-index:50;background:rgba(13,24,54,.78);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.nav .wrap{display:flex;align-items:center;justify-content:space-between;height:68px;gap:24px}
+.brand{display:inline-flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-weight:750;font-size:21px;letter-spacing:-.015em}
+.brand span{font-weight:450;color:var(--ink-2)}
+.brand .moon{width:22px;height:22px;fill:var(--moon)}
+.nav-links{display:flex;align-items:center;gap:28px}
+.nav-links a{color:var(--ink-2);text-decoration:none;font-size:15.5px;font-weight:500}
+.nav-links a:hover{color:var(--ink)}
+.nav-links a.btn{color:var(--moon-ink);font-weight:650}
+.nav-links a.btn:hover{color:var(--moon-ink)}
+.nav-toggle{display:none;background:transparent;border:1px solid var(--line-strong);color:var(--ink);border-radius:8px;padding:8px 12px;font:inherit;font-size:15px;cursor:pointer}
+
+/* Hero */
+.hero{padding:76px 0 96px}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:64px;align-items:center}
+h1{font-size:clamp(42px,6vw,70px);line-height:1.02;letter-spacing:-.028em;font-weight:760;max-width:11.5em}
+.lead{margin-top:24px;font-size:19px;color:var(--ink-2);max-width:34em;line-height:1.55}
+.cta-row{display:flex;flex-wrap:wrap;gap:12px;margin-top:32px}
+.hero-note{margin-top:18px;font-size:15px;color:var(--ink-3)}
+
+/* Discord window */
+.dc{background:var(--dc-bg);border-radius:14px;overflow:hidden;font-family:var(--dc-font);box-shadow:0 40px 90px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.06);color:var(--dc-text)}
+.dc-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.07)}
+.dc-chan{font-weight:600;font-size:15px}
+.dc-chan span{color:var(--dc-muted);margin-right:4px;font-weight:500}
+.dc-status{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--dc-muted);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--aurora);box-shadow:0 0 0 3px rgba(110,227,193,.16)}
+.dc-clock{padding:8px 16px;font-size:12px;color:var(--dc-muted);font-variant-numeric:tabular-nums;border-bottom:1px solid rgba(255,255,255,.05);display:flex;gap:6px;align-items:center}
+.dc-clock b{color:var(--dc-text);font-weight:600}
+.dc-clock .sep{width:1px;height:12px;background:rgba(255,255,255,.14);margin:0 6px}
+.dc-feed{padding:14px 16px 18px;display:flex;flex-direction:column;gap:14px;min-height:560px}
+.msg{display:grid;grid-template-columns:40px minmax(0,1fr);gap:12px}
+.msg.enter{animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.msg-av{width:40px;height:40px;border-radius:50%;background:var(--night);display:grid;place-items:center}
+.msg-av svg{width:20px;height:20px;fill:var(--moon)}
+.msg-meta{font-size:14px;color:#fff;font-weight:500;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.bot-tag{background:var(--dc-blurple);color:#fff;font-size:10px;font-weight:600;padding:1px 5px;border-radius:3px;line-height:1.5}
+.msg-time{font-size:12px;color:var(--dc-muted);font-weight:400}
+.embed{margin-top:6px;background:var(--dc-embed);border-left:4px solid var(--moon);border-radius:4px;padding:10px 14px 12px;display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:0 14px}
+.embed-store{font-size:12px;color:var(--dc-muted);font-weight:500}
+.embed-title{font-size:15px;font-weight:600;color:#fff;line-height:1.3;margin:2px 0 8px;letter-spacing:0}
+.embed-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px}
+.embed-fields span{display:block;font-size:11.5px;font-weight:600;color:var(--dc-muted);margin-bottom:1px}
+.embed-fields b{font-weight:500;color:var(--dc-text)}
+.embed-fields b.in{color:var(--aurora);font-weight:600}
+.embed-fields b.pre{color:var(--moon);font-weight:600}
+.embed-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.embed-actions a{background:var(--dc-btn);color:#fff;font-size:12px;font-weight:500;padding:5px 10px;border-radius:3px;text-decoration:none}
+.embed-actions a.main{background:var(--dc-blurple)}
+.thumb{width:64px;height:64px;border-radius:6px;background:#1E1F22;display:grid;place-items:center}
+.thumb svg{width:44px;height:44px}
+.embed-foot{grid-column:1/-1;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dc-muted);margin-top:8px}
+.embed-foot i{width:3px;height:3px;border-radius:50%;background:var(--dc-muted);display:inline-block}
+
+/* Sections */
+.section{padding:96px 0}
+.section + .section{border-top:1px solid var(--line)}
+.section-head{max-width:720px;margin-bottom:44px}
+.section-head h2{font-size:clamp(30px,4vw,44px);font-weight:720;line-height:1.08;letter-spacing:-.024em}
+.section-head p{margin-top:16px;color:var(--ink-2);font-size:18px;max-width:36em}
+
+/* Retailers */
+.group{display:grid;grid-template-columns:260px minmax(0,1fr);gap:24px 40px;padding:28px 0;border-top:1px solid var(--line)}
+.group:last-of-type{border-bottom:1px solid var(--line)}
+.group-title h3{font-size:20px;font-weight:650;letter-spacing:-.01em}
+.group-title span{display:block;margin-top:4px;font-size:14px;color:var(--ink-3)}
+.chips{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.chips li{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line-strong);border-radius:999px;padding:7px 14px 7px 12px;font-size:15px;color:var(--ink);background:rgba(19,33,72,.5)}
+.chips li::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--aurora);flex:none}
+.chips.plain li{padding-left:14px}
+.chips.plain li::before{display:none}
+.chips li.request{border-style:dashed;background:transparent;padding-left:14px}
+.chips li.request::before{display:none}
+.chips li.request a{color:var(--moon);text-decoration:none}
+
+/* Compare table */
+.table-wrap{overflow-x:auto;border-top:1px solid var(--line)}
+table{width:100%;border-collapse:collapse;min-width:640px}
+th,td{text-align:left;padding:18px 24px 18px 0;border-bottom:1px solid var(--line);vertical-align:top;font-size:16.5px}
+thead th{font-size:14px;color:var(--ink-3);font-weight:600;padding-top:14px;padding-bottom:14px}
+thead th.us{color:var(--moon)}
+tbody th{font-weight:600;color:var(--ink);width:30%}
+td{color:var(--ink-2);width:35%}
+td.us{color:var(--ink);font-weight:550;position:relative;padding-left:20px}
+td.us::before{content:"";position:absolute;left:0;top:27px;width:8px;height:8px;border-radius:50%;background:var(--moon)}
+
+/* Features */
+.features{display:grid;grid-template-columns:1fr 1fr;gap:0 56px;margin:0}
+.feature{padding:26px 0;border-top:1px solid var(--line)}
+.feature dt{font-size:20px;font-weight:650;letter-spacing:-.012em}
+.feature dd{margin:8px 0 0;color:var(--ink-2);max-width:44em;font-size:16.5px}
+
+/* Add-ons */
+.addons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:40px}
+.addon h3{font-size:22px;font-weight:650;letter-spacing:-.014em}
+.addon p{margin-top:10px;color:var(--ink-2);font-size:16.5px}
+.sample{margin-top:18px;background:var(--night-2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:14px;color:var(--ink-2);display:grid;gap:4px}
+.sample b{color:var(--ink);font-weight:600}
+.sample .was{text-decoration:line-through;color:var(--ink-3)}
+.sample .up{color:var(--aurora);font-weight:600}
+
+/* Night timeline */
+.night{position:relative;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:24px;list-style:none;margin:8px 0 0;padding:34px 0 0}
+.night::before{content:"";position:absolute;left:0;right:0;top:9px;height:2px;border-radius:2px;background:linear-gradient(90deg,var(--night-3) 0%,var(--moon) 45%,var(--moon) 55%,var(--night-3) 100%)}
+.stop{position:relative;padding-right:8px}
+.stop::before{content:"";position:absolute;left:0;top:-30px;width:10px;height:10px;border-radius:50%;background:var(--moon);box-shadow:0 0 0 4px var(--night)}
+.stop time{display:block;font-weight:700;font-size:20px;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.stop p{margin-top:6px;color:var(--ink-2);font-size:15.5px}
+.caught{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:14px;color:var(--aurora);font-weight:600}
+.caught svg{width:14px;height:14px}
+
+/* Reliability */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:40px;border-top:1px solid var(--line);padding-top:32px}
+.trio h3{font-size:21px;font-weight:650;letter-spacing:-.012em}
+.trio p{margin-top:10px;color:var(--ink-2);font-size:16.5px}
+.uptime{margin-top:44px;display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;color:var(--ink-2)}
+.uptime b{font-size:40px;font-weight:750;letter-spacing:-.03em;color:var(--ink)}
+
+/* Pricing */
+.plans{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;align-items:stretch}
+.plan{border:1px solid var(--line-strong);border-radius:18px;padding:30px 28px;display:flex;flex-direction:column;background:rgba(19,33,72,.35)}
+.plan.featured{border-color:var(--moon);background:linear-gradient(180deg,rgba(244,218,140,.10),rgba(244,218,140,.02))}
+.plan-name{font-size:22px;font-weight:650;letter-spacing:-.014em;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tag{font-size:12.5px;font-weight:600;color:var(--moon-ink);background:var(--moon);border-radius:999px;padding:3px 10px;letter-spacing:0}
+.plan-for{margin-top:6px;color:var(--ink-3);font-size:15px}
+.price{margin-top:22px;font-size:46px;font-weight:750;letter-spacing:-.03em;line-height:1}
+.price small{font-size:16px;font-weight:500;color:var(--ink-2);letter-spacing:0;margin-left:4px}
+.price.custom{font-size:34px}
+.plan ul{list-style:none;padding:0;margin:24px 0 28px;display:grid;gap:10px;color:var(--ink-2);font-size:16px}
+.plan li{display:flex;gap:10px;align-items:flex-start}
+.plan li svg{width:18px;height:18px;flex:none;margin-top:3px;color:var(--aurora)}
+.plan .btn{margin-top:auto}
+.pricing-note{margin-top:22px;color:var(--ink-3);font-size:15px}
+
+/* FAQ */
+.faq{max-width:820px}
+.faq details{border-top:1px solid var(--line)}
+.faq details:last-child{border-bottom:1px solid var(--line)}
+.faq summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:20px 0;font-size:19px;font-weight:600;letter-spacing:-.01em}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::after{content:"+";font-size:26px;font-weight:400;color:var(--moon);line-height:1;transition:transform .2s ease;flex:none}
+.faq details[open] summary::after{transform:rotate(45deg)}
+.faq details p{padding:0 0 22px;color:var(--ink-2);max-width:44em}
+
+/* Contact */
+.contact{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:56px}
+.form{display:grid;gap:16px}
+.field{display:grid;gap:6px}
+.field label{font-size:15px;font-weight:600}
+.field input,.field select,.field textarea{width:100%;background:var(--night-2);border:1px solid var(--line-strong);border-radius:10px;color:var(--ink);padding:12px 14px;font:inherit;font-size:16px}
+.field textarea{min-height:140px;resize:vertical}
+.field select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23B9C3E6' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:40px}
+.field select option{background:var(--night-2)}
+.form-note{font-size:14px;color:var(--ink-3);min-height:1.4em}
+.direct h3{font-size:20px;font-weight:650}
+.direct > p{margin-top:8px;color:var(--ink-2)}
+.direct ul{list-style:none;padding:0;margin:18px 0 0;display:grid;gap:12px}
+.direct a{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;border:1px solid var(--line-strong);border-radius:12px;color:var(--ink);text-decoration:none;font-weight:600}
+.direct a span{color:var(--ink-3);font-size:14px;font-weight:400;text-align:right}
+.direct a:hover{border-color:var(--moon)}
+
+/* Footer */
+footer{border-top:1px solid var(--line);padding:40px 0 48px;color:var(--ink-3);font-size:15px}
+footer .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:16px 32px;align-items:center}
+footer nav{display:flex;gap:22px;flex-wrap:wrap}
+footer a{color:var(--ink-2);text-decoration:none}
+footer a:hover{color:var(--ink)}
+
+/* Responsive */
+@media (max-width:980px){
+  .hero-grid{grid-template-columns:1fr;gap:48px}
+  .features{grid-template-columns:1fr}
+  .addons,.trio{grid-template-columns:1fr;gap:32px}
+  .plans{grid-template-columns:1fr}
+  .contact{grid-template-columns:1fr;gap:40px}
+  .group{grid-template-columns:1fr;gap:14px}
+  .night{grid-template-columns:1fr;gap:26px;padding:0 0 0 28px}
+  .night::before{left:4px;right:auto;top:6px;bottom:6px;width:2px;height:auto;background:linear-gradient(180deg,var(--night-3),var(--moon),var(--night-3))}
+  .stop::before{left:-28px;top:7px}
+}
+@media (max-width:720px){
+  .nav-links{display:none;position:absolute;left:0;right:0;top:68px;flex-direction:column;align-items:stretch;gap:0;background:var(--night);border-bottom:1px solid var(--line);padding:8px 24px 20px}
+  .nav-links.open{display:flex}
+  .nav-links a{padding:12px 0;font-size:17px}
+  .nav-links a.btn{margin-top:10px;padding:12px 16px}
+  .nav-toggle{display:inline-block}
+  .hero{padding:48px 0 72px}
+  .section{padding:72px 0}
+  .dc-feed{min-height:0}
+  .embed{grid-template-columns:minmax(0,1fr) 52px;padding:10px 12px 12px}
+  .thumb{width:52px;height:52px}
+  .thumb svg{width:36px;height:36px}
+  .embed-fields{gap:6px 10px}
+}
+@media (prefers-reduced-motion:reduce){
+  .msg.enter{animation:none}
+  .btn,.faq summary::after{transition:none}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Nocturne Monitors home">
+      <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+      Nocturne <span>Monitors</span>
+    </a>
+    <nav class="nav-links" id="nav-links" aria-label="Site">
+      <a href="#retailers">Retailers</a>
+      <a href="#features">Features</a>
+      <a href="#addons">Add-ons</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+      <a class="btn btn-primary btn-sm" data-link="discord" href="#contact">Join the Discord</a>
+    </nav>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-links">Menu</button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- Hero -->
+<section class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <h1>Every Canadian TCG restock, caught at any hour.</h1>
+      <p class="lead">Nocturne watches Walmart.ca, Costco.ca, Amazon.ca, Best Buy Canada and the hobby shops that actually ship here, then posts to your Discord within seconds. No US drops. No USD prices. No noise.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" data-link="discord" href="#contact">Join the Discord</a>
+        <a class="btn btn-secondary" href="#pricing">See pricing</a>
+      </div>
+      <p class="hero-note">Built for Discord groups, card shops and resellers in Canada. Priced in CAD.</p>
+    </div>
+
+    <div class="hero-feed" aria-label="Example alerts as they appear in Discord">
+      <div class="dc">
+        <div class="dc-head">
+          <div class="dc-chan"><span>#</span>ca-restocks</div>
+          <div class="dc-status"><span class="dot" aria-hidden="true"></span>Toronto node online</div>
+        </div>
+        <div class="dc-clock"><b id="clock-et">--:--</b> ET <span class="sep" aria-hidden="true"></span> <b id="clock-pt">--:--</b> PT</div>
+        <div class="dc-feed" id="feed">
+          <!-- Static fallback, replaced by the live feed script. Swap sample products for current ones before launch. -->
+          <div class="msg">
+            <div class="msg-av"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></div>
+            <div>
+              <div class="msg-meta">Nocturne Monitors <span class="bot-tag">BOT</span> <span class="msg-time">Today at 23:30</span></div>
+              <div class="embed">
+                <div class="embed-main">
+                  <div class="embed-store">Walmart.ca</div>
+                  <div class="embed-title">Pokémon TCG: Prismatic Evolutions Elite Trainer Box</div>
+                  <div class="embed-fields">
+                    <div><span>Price</span><b>$69.97 CAD</b></div>
+                    <div><span>Status</span><b class="in">In stock</b></div>
+                    <div><span>SKU</span><b>6000209612345</b></div>
+                    <div><span>Ships to</span><b>All provinces</b></div>
+                  </div>
+                  <div class="embed-actions"><a class="main" href="#">Add to cart</a><a href="#">x2</a><a href="#">x3</a><a href="#">View</a></div>
+                </div>
+                <div class="thumb" aria-hidden="true"><svg viewBox="0 0 44 44" fill="none"><rect x="6" y="10" width="32" height="26" rx="3" fill="#3A3D43"/><rect x="6" y="10" width="32" height="8" rx="3" fill="#F4DA8C"/><rect x="18" y="18" width="8" height="18" fill="#6EE3C1" opacity=".9"/></svg></div>
+                <div class="embed-foot">Nocturne Monitors <i></i> Canada</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Retailers -->
+<section class="section" id="retailers">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Canadian retailers only, from big box to the hobby shop down the street.</h2>
+      <p>Launch coverage is below. If a Canadian store stocks sealed product and has a website, we can add it. Ask in the Discord or use the form at the bottom of this page.</p>
+    </div>
+    <!-- Edit these lists to match what the monitors actually cover at launch. -->
+    <div class="group">
+      <div class="group-title"><h3>Big box, grocery and pharmacy</h3><span>12 sites</span></div>
+      <ul class="chips">
+        <li>Walmart.ca</li>
+        <li>Costco.ca</li>
+        <li>Amazon.ca</li>
+        <li>Best Buy Canada</li>
+        <li>Canadian Tire</li>
+        <li>Toys R Us Canada</li>
+        <li>Indigo</li>
+        <li>Staples Canada</li>
+        <li>Real Canadian Superstore</li>
+        <li>Shoppers Drug Mart</li>
+        <li>London Drugs</li>
+        <li>Mastermind Toys</li>
+      </ul>
+    </div>
+    <div class="group">
+      <div class="group-title"><h3>Game and hobby shops</h3><span>8 sites</span></div>
+      <ul class="chips">
+        <li>GameStop Canada (EB Games)</li>
+        <li>Pokémon Center Canada</li>
+        <li>Hobbiesville</li>
+        <li>401 Games</li>
+        <li>Face to Face Games</li>
+        <li>Fusion Gaming Online</li>
+        <li>Exor Games</li>
+        <li>Game Knight Games</li>
+        <li class="request"><a href="#contact">Request a retailer</a></li>
+      </ul>
+    </div>
+    <div class="group">
+      <div class="group-title"><h3>Games we track</h3><span>Anything sealed, at any of the stores above</span></div>
+      <ul class="chips plain">
+        <li>Pokémon</li>
+        <li>One Piece</li>
+        <li>Magic: The Gathering</li>
+        <li>Yu-Gi-Oh!</li>
+        <li>Disney Lorcana</li>
+        <li>Dragon Ball Super</li>
+        <li>Star Wars: Unlimited</li>
+        <li>Riftbound</li>
+        <li>Flesh and Blood</li>
+        <li>Union Arena</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Why Canada only -->
+<section class="section" id="why">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>US providers treat Canada as a footnote.</h2>
+      <p>The biggest monitor providers list around 20 Canadian sites beside 200 or more American ones. You pay for hundreds of monitors your members can't buy from, and the Canadian ones get fixed last.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th scope="col"></th><th scope="col">US-first providers</th><th scope="col" class="us">Nocturne</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Canadian retailers</th><td>About 20, beside 200 or more US sites</td><td class="us">Every retailer we support is Canadian</td></tr>
+          <tr><th scope="row">Prices in alerts</th><td>USD</td><td class="us">CAD</td></tr>
+          <tr><th scope="row">Restocks your members can buy</th><td>A fraction of the feed</td><td class="us">All of them</td></tr>
+          <tr><th scope="row">Release dates</th><td>US calendar</td><td class="us">Canadian pre-order and release dates</td></tr>
+          <tr><th scope="row">When a Canadian monitor breaks</th><td>Waits behind US fixes</td><td class="us">It's the only thing we fix</td></tr>
+          <tr><th scope="row">What you pay for</th><td>Sites your members never use</td><td class="us">Canada, and nothing else</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>What your server gets.</h2>
+      <p>Everything below is included on every plan. You keep your community and your brand, we keep the monitors running.</p>
+    </div>
+    <dl class="features">
+      <div class="feature">
+        <dt>Keyword pings</dt>
+        <dd>Members set keywords like ETB, booster box or Prismatic. When a match posts, they get a role mention or a DM. Nobody has to watch a channel all night.</dd>
+      </div>
+      <div class="feature">
+        <dt>Your branding, not ours</dt>
+        <dd>Your name, logo, colour and footer on every alert. Members see your group. Nocturne stays invisible unless you want the credit.</dd>
+      </div>
+      <div class="feature">
+        <dt>Channel routing</dt>
+        <dd>Send Pokémon to one channel and One Piece to another, or split by retailer, price or product type. Set it up with one command per channel.</dd>
+      </div>
+      <div class="feature">
+        <dt>Affiliate links</dt>
+        <dd>Amazon.ca Associates tags and other Canadian affiliate links are applied to every alert automatically. The feed can pay for its own subscription.</dd>
+      </div>
+      <div class="feature">
+        <dt>Canadian details in every alert</dt>
+        <dd>CAD price, stock status, pickup and shipping availability, and direct cart links where the retailer supports them.</dd>
+      </div>
+      <div class="feature">
+        <dt>Setup and support</dt>
+        <dd>We set up your server with you, usually in one call. Every command is documented, and support is one-on-one in Discord.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<!-- Add-ons -->
+<section class="section" id="addons">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Add-ons for groups that want more than restocks.</h2>
+      <p>Bundled with Canada AIO. Add any of them to Starter.</p>
+    </div>
+    <!-- Remove any add-on that isn't live at launch. -->
+    <div class="addons">
+      <div class="addon">
+        <h3>Deals</h3>
+        <p>Clearance, markdowns and price errors on sealed product across Canadian retailers, posted the moment the price changes.</p>
+        <div class="sample" aria-label="Example deal alert">
+          <span>Costco.ca</span>
+          <b>Pokémon TCG: Elite Trainer Box</b>
+          <span><b>$49.99</b> <span class="was">$69.99</span> <span class="up">29% off</span></span>
+        </div>
+      </div>
+      <div class="addon">
+        <h3>Releases</h3>
+        <p>A Canadian pre-order and release calendar, plus an alert the moment pre-orders open at any retailer we cover.</p>
+        <div class="sample" aria-label="Example release alert">
+          <span>Best Buy Canada</span>
+          <b>Pre-orders open: next Pokémon TCG set</b>
+          <span>Release <b>Fri, Nov 6</b>, limit 2 per customer</span>
+        </div>
+      </div>
+      <div class="addon">
+        <h3>Spread</h3>
+        <p>Retail price beside current market price in CAD, on the alert itself. Members see the margin before they click.</p>
+        <div class="sample" aria-label="Example spread alert">
+          <span>Walmart.ca</span>
+          <b>Booster Bundle, 6 packs</b>
+          <span>Retail <b>$34.97</b>, market <b>$52.00</b>, spread <span class="up">+$17.03</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Night timeline -->
+<section class="section" id="night">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Restocks don't keep business hours.</h2>
+      <p>An illustrative night. Times change by retailer, and most Canadian drops land while Ontario is asleep. Nocturne is awake for all of them.</p>
+    </div>
+    <ol class="night">
+      <li class="stop">
+        <time>20:15 ET</time>
+        <p>Amazon.ca listing goes live from a third-party seller at MSRP.</p>
+        <span class="caught"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Caught</span>
+      </li>
+      <li class="stop">
+        <time>23:30 ET</time>
+        <p>Walmart.ca overnight restock: Elite Trainer Boxes and booster bundles.</p>
+        <span class="caught"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Caught</span>
+      </li>
+      <li class="stop">
+        <time>02:05 ET</time>
+        <p>Best Buy Canada opens pre-orders for the next set with no announcement.</p>
+        <span class="caught"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Caught</span>
+      </li>
+      <li class="stop">
+        <time>05:40 ET</time>
+        <p>Costco.ca posts a new bundle before the warehouses open.</p>
+        <span class="caught"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Caught</span>
+      </li>
+      <li class="stop">
+        <time>07:00 ET</time>
+        <p>Hobby shops list the week's allocation as staff arrive.</p>
+        <span class="caught"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Caught</span>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- Reliability -->
+<section class="section" id="reliability">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Running all night, every night.</h2>
+      <p>A monitor that goes quiet at 2 a.m. is worse than no monitor, because your members stop checking. Nocturne is built so that never happens silently.</p>
+    </div>
+    <!-- Only publish commitments the infrastructure can back. Update the status page link in CONFIG below. -->
+    <div class="trio">
+      <div>
+        <h3>Redundant nodes</h3>
+        <p>Monitors run on two independent nodes, one of them in Toronto, so a single failure never stops your alerts.</p>
+      </div>
+      <div>
+        <h3>Health checks every minute</h3>
+        <p>If a monitor stops posting or a retailer changes their site, our team is paged before your members notice anything.</p>
+      </div>
+      <div>
+        <h3>Public status page</h3>
+        <p>Uptime and incident history for every retailer, in the open. <a data-link="status" href="#">See the status page</a>.</p>
+      </div>
+    </div>
+    <p class="uptime"><b>99.9%</b> monthly uptime commitment, measured per retailer and published on the status page.</p>
+  </div>
+</section>
+
+<!-- Pricing -->
+<section class="section" id="pricing">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Simple pricing in Canadian dollars.</h2>
+      <p>Monthly, cancel anytime. Every plan includes keyword pings, branding, channel routing, affiliate links and setup.</p>
+    </div>
+    <!-- Prices are placeholders. Set them before launch. -->
+    <div class="plans">
+      <div class="plan">
+        <div class="plan-name">Starter</div>
+        <p class="plan-for">For new groups and single-game servers.</p>
+        <p class="price">$59<small>/month</small></p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Pick up to 8 retailers</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>1 Discord server</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Add-ons available individually</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Support in Discord</li>
+        </ul>
+        <a class="btn btn-secondary btn-block" data-link="discord" href="#contact">Start in Discord</a>
+      </div>
+      <div class="plan featured">
+        <div class="plan-name">Canada AIO <span class="tag">Most groups pick this</span></div>
+        <p class="plan-for">For established groups and card shops.</p>
+        <p class="price">$129<small>/month</small></p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Every Canadian retailer we support</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>All add-ons: Deals, Releases, Spread</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Up to 2 Discord servers</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Priority on new retailer requests</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>One-on-one setup call</li>
+        </ul>
+        <a class="btn btn-primary btn-block" data-link="discord" href="#contact">Start in Discord</a>
+      </div>
+      <div class="plan">
+        <div class="plan-name">Shops and networks</div>
+        <p class="plan-for">For store networks and white label.</p>
+        <p class="price custom">Custom</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>White label, no Nocturne mention</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Unlimited servers</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Webhooks for your own tools</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Invoice billing and volume pricing</li>
+        </ul>
+        <a class="btn btn-secondary btn-block" href="#contact">Talk to us</a>
+      </div>
+    </div>
+    <p class="pricing-note">Prices in CAD. HST added where it applies. Cancel from Discord at any time and keep access to the end of your billing period.</p>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section class="section" id="faq">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Questions groups ask before they switch.</h2>
+    </div>
+    <div class="faq">
+      <details>
+        <summary>Who is Nocturne for?</summary>
+        <p>Discord groups, card shops and resellers who want Canadian restock alerts in their own server. You run the community, we run the monitors.</p>
+      </details>
+      <details>
+        <summary>What do I need to get started?</summary>
+        <p>A Discord server where you have admin access. Join our Discord, open a ticket, and we set up the bot, channels and branding with you. Most servers are live within a day.</p>
+      </details>
+      <details>
+        <summary>Do you monitor US retailers?</summary>
+        <p>No, and we won't. Every monitor we run is a Canadian storefront, so every alert is something your members can buy and have shipped inside Canada.</p>
+      </details>
+      <details>
+        <summary>Which games do you cover?</summary>
+        <p>Pokémon, One Piece, Magic: The Gathering, Yu-Gi-Oh!, Disney Lorcana, Dragon Ball Super, Star Wars: Unlimited, Riftbound, Flesh and Blood and Union Arena. If a retailer we cover stocks it sealed, we track it.</p>
+      </details>
+      <details>
+        <summary>Can members set their own keyword pings?</summary>
+        <p>Yes. Each member adds keywords with a command and gets a mention or DM when a matching product posts. You control which channels allow it.</p>
+      </details>
+      <details>
+        <summary>Can I use my own branding and affiliate links?</summary>
+        <p>Yes. Your name, logo, colour and footer go on every alert, and Amazon.ca Associates tags or other Canadian affiliate links are applied automatically.</p>
+      </details>
+      <details>
+        <summary>How does billing work?</summary>
+        <p>Monthly in Canadian dollars, charged at the start of each cycle. Cancel any time from Discord and you keep access to the end of the period. HST is added where it applies, and invoices are available for shops.</p>
+      </details>
+      <details>
+        <summary>I'm not running a group. Can I still get alerts?</summary>
+        <p>Nocturne sells to servers, not individuals. Ask in the Discord and we'll point you to communities that run Nocturne.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- Contact -->
+<section class="section" id="contact">
+  <div class="wrap contact">
+    <div>
+      <div class="section-head">
+        <h2>Missing a retailer? Tell us.</h2>
+        <p>Retailer requests, feature ideas, partnerships, or anything else.</p>
+      </div>
+      <form class="form" id="contact-form" method="post" action="#" novalidate>
+        <div class="field">
+          <label for="contact">Email or Discord handle</label>
+          <input id="contact" name="contact" type="text" autocomplete="email" required>
+        </div>
+        <div class="field">
+          <label for="group">Group or shop name</label>
+          <input id="group" name="group" type="text" autocomplete="organization">
+        </div>
+        <div class="field">
+          <label for="subject">Subject</label>
+          <select id="subject" name="subject">
+            <option>General question</option>
+            <option>Retailer request</option>
+            <option>Feature request</option>
+            <option>Partnership</option>
+            <option>Billing</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="message">Message</label>
+          <textarea id="message" name="message" required></textarea>
+        </div>
+        <div>
+          <button class="btn btn-primary" type="submit">Send message</button>
+        </div>
+        <p class="form-note" id="form-note"></p>
+      </form>
+    </div>
+    <div class="direct">
+      <h3>Reach us directly</h3>
+      <p>Fastest answers are in Discord. Open a ticket and a person replies.</p>
+      <ul>
+        <li><a data-link="discord" href="#">Discord server <span>Tickets and setup</span></a></li>
+        <li><a data-link="email" data-text="email" href="#">hello@nocturnemonitors.com</a></li>
+        <li><a data-link="x" href="#">X <span>@NocturneMonitors</span></a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>Nocturne Monitors. Restock monitors for the Canadian TCG market. Made in Canada.</div>
+    <nav aria-label="Footer">
+      <a data-link="status" href="#">Status</a>
+      <a href="#">Terms</a>
+      <a href="#">Privacy</a>
+      <a data-link="discord" href="#">Discord</a>
+    </nav>
+    <div>&copy; 2026 Nocturne Monitors</div>
+  </div>
+</footer>
+
+<script>
+/* Fill these in before launch. Every link on the page reads from here. */
+const CONFIG = {
+  discord: "https://discord.gg/YOUR-INVITE",
+  email: "hello@nocturnemonitors.com",
+  status: "/status",
+  x: "https://x.com/NocturneMonitors",
+  formEndpoint: ""   /* e.g. "https://formspree.io/f/xxxxxxxx". Empty = the form opens the visitor's email app. */
+};
+
+/* Sample alerts for the hero. Swap in current products before launch. */
+const ALERTS = [
+  {store:"Walmart.ca", title:"Pokémon TCG: Prismatic Evolutions Elite Trainer Box", price:"$69.97 CAD", status:"In stock", cls:"in", sku:"6000209612345", ships:"All provinces", kind:"box"},
+  {store:"Costco.ca", title:"Pokémon TCG: Booster Bundle, 6 packs", price:"$34.99 CAD", status:"In stock", cls:"in", sku:"1852771", ships:"Online only", kind:"pack"},
+  {store:"Best Buy Canada", title:"One Piece Card Game: Booster Box", price:"$144.99 CAD", status:"Pre-order open", cls:"pre", sku:"18541233", ships:"Ships to Canada", kind:"box"},
+  {store:"Amazon.ca", title:"Magic: The Gathering, Final Fantasy Collector Booster Box", price:"$649.99 CAD", status:"In stock", cls:"in", sku:"B0D3K7Q2LM", ships:"Prime eligible", kind:"box"},
+  {store:"GameStop Canada", title:"Disney Lorcana: Booster Box, 24 packs", price:"$169.99 CAD", status:"In stock", cls:"in", sku:"20015532", ships:"Pickup and shipping", kind:"box"},
+  {store:"Pokémon Center Canada", title:"Pokémon TCG: 151 Ultra-Premium Collection", price:"$159.99 CAD", status:"Restocked", cls:"in", sku:"290-87340", ships:"Canada", kind:"box"}
+];
+
+(function () {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Links */
+  document.querySelectorAll("[data-link]").forEach(function (el) {
+    const key = el.dataset.link;
+    if (key === "email") el.href = "mailto:" + CONFIG.email;
+    else if (CONFIG[key]) el.href = CONFIG[key];
+    if (el.dataset.text === "email") el.textContent = CONFIG.email;
+  });
+
+  /* Mobile nav */
+  const toggle = document.querySelector(".nav-toggle");
+  const links = document.getElementById("nav-links");
+  toggle.addEventListener("click", function () {
+    const open = links.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.textContent = open ? "Close" : "Menu";
+  });
+  links.querySelectorAll("a").forEach(function (a) {
+    a.addEventListener("click", function () {
+      links.classList.remove("open");
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.textContent = "Menu";
+    });
+  });
+
+  /* Clocks */
+  function clock(tz) {
+    return new Intl.DateTimeFormat("en-CA", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz }).format(new Date());
+  }
+  const et = document.getElementById("clock-et");
+  const pt = document.getElementById("clock-pt");
+  function tick() { et.textContent = clock("America/Toronto"); pt.textContent = clock("America/Vancouver"); }
+  tick();
+  setInterval(tick, 15000);
+
+  /* Live feed */
+  const feed = document.getElementById("feed");
+  const moon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
+  const thumbs = {
+    box: '<svg viewBox="0 0 44 44" fill="none"><rect x="6" y="10" width="32" height="26" rx="3" fill="#3A3D43"/><rect x="6" y="10" width="32" height="8" rx="3" fill="#F4DA8C"/><rect x="18" y="18" width="8" height="18" fill="#6EE3C1" opacity=".9"/></svg>',
+    pack: '<svg viewBox="0 0 44 44" fill="none"><path d="M12 6h20l2 6-2 26H12l-2-26z" fill="#3A3D43"/><path d="M12 6h20l2 6H10z" fill="#F4DA8C"/><circle cx="22" cy="25" r="6" fill="#6EE3C1" opacity=".9"/></svg>'
+  };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function render(a) {
+    const el = document.createElement("div");
+    el.className = "msg" + (reduce ? "" : " enter");
+    el.innerHTML =
+      '<div class="msg-av">' + moon + '</div>' +
+      '<div>' +
+        '<div class="msg-meta">Nocturne Monitors <span class="bot-tag">BOT</span> <span class="msg-time">Today at ' + clock("America/Toronto") + '</span></div>' +
+        '<div class="embed">' +
+          '<div class="embed-main">' +
+            '<div class="embed-store">' + esc(a.store) + '</div>' +
+            '<div class="embed-title">' + esc(a.title) + '</div>' +
+            '<div class="embed-fields">' +
+              '<div><span>Price</span><b>' + esc(a.price) + '</b></div>' +
+              '<div><span>Status</span><b class="' + a.cls + '">' + esc(a.status) + '</b></div>' +
+              '<div><span>SKU</span><b>' + esc(a.sku) + '</b></div>' +
+              '<div><span>Ships to</span><b>' + esc(a.ships) + '</b></div>' +
+            '</div>' +
+            '<div class="embed-actions"><a class="main" href="#">Add to cart</a><a href="#">x2</a><a href="#">x3</a><a href="#">View</a></div>' +
+          '</div>' +
+          '<div class="thumb" aria-hidden="true">' + thumbs[a.kind] + '</div>' +
+          '<div class="embed-foot">Nocturne Monitors <i></i> Canada</div>' +
+        '</div>' +
+      '</div>';
+    return el;
+  }
+  const MAX = window.innerWidth < 720 ? 2 : 3;
+  let i = 0;
+  function next() {
+    feed.appendChild(render(ALERTS[i % ALERTS.length]));
+    i++;
+    while (feed.children.length > MAX) feed.removeChild(feed.firstElementChild);
+  }
+  feed.innerHTML = "";
+  if (reduce) {
+    for (let k = 0; k < MAX; k++) next();
+  } else {
+    next();
+    setTimeout(next, 700);
+    if (MAX > 2) setTimeout(next, 1400);
+    setInterval(next, 7000);
+  }
+
+  /* Contact form: posts to formEndpoint when set, otherwise opens the visitor's email app */
+  const form = document.getElementById("contact-form");
+  const note = document.getElementById("form-note");
+  if (CONFIG.formEndpoint) form.action = CONFIG.formEndpoint;
+  form.addEventListener("submit", function (e) {
+    const contact = form.contact.value.trim();
+    const message = form.message.value.trim();
+    if (!contact || !message) {
+      e.preventDefault();
+      note.textContent = "Add a way to reach you and a message, then send again.";
+      return;
+    }
+    if (CONFIG.formEndpoint) return;
+    e.preventDefault();
+    const subject = encodeURIComponent("[Nocturne] " + form.subject.value);
+    const body = encodeURIComponent("From: " + contact + "\nGroup or shop: " + (form.group.value.trim() || "n/a") + "\n\n" + message);
+    window.location.href = "mailto:" + CONFIG.email + "?subject=" + subject + "&body=" + body;
+    note.textContent = "Opening your email app. If nothing happens, email " + CONFIG.email + " directly.";
+  });
+})();
+</script>
+</body>
+</html>

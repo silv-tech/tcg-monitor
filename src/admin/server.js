@@ -137,11 +137,21 @@ function createAdminServer() {
 
   app.use('/api', routes);
 
-  // Serve admin UI
-  app.use(express.static(path.join(__dirname, '../../admin-ui')));
-  app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '../../admin-ui/index.html'));
-  });
+  // Public marketing site at the root, admin dashboard moved to /admin.
+  //
+  // Serving both from this one service means the status page calls /api/health SAME-ORIGIN —
+  // that endpoint sends no CORS headers, so hosting the site anywhere else needs a proxy in
+  // front of it. It also keeps one deployment and one domain instead of two.
+  const PUBLIC_DIR = path.join(__dirname, '../../public');
+  const ADMIN_DIR = path.join(__dirname, '../../admin-ui');
+
+  app.use('/admin', express.static(ADMIN_DIR));
+  app.get('/admin', (req, res) => res.sendFile(path.join(ADMIN_DIR, 'index.html')));
+
+  app.use(express.static(PUBLIC_DIR, { extensions: ['html'] }));
+  app.get('/', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
+  // Pretty URL for the status page — the marketing site links to /status.
+  app.get('/status', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'status.html')));
 
   const server = app.listen(config.admin.port, () => {
     logger.info(`Admin server running on port ${config.admin.port}`);
