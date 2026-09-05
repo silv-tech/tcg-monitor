@@ -97,6 +97,24 @@ const tierMs = (envVar, fallback) => {
   return Number.isFinite(v) && v >= 1000 ? v : fallback;
 };
 
+/**
+ * Shops promoted to the fast interval one small batch at a time, by id.
+ *
+ * The budget ceiling was originally found by moving the global rate and watching for five
+ * minutes at each step. That was too short: 4.2 req/sec looked clean at every check and then
+ * 429s reappeared roughly an hour later, with the backoff climbed to 594s and the container
+ * out of local sockets. Shopify's throttle accumulates over a much longer window than a
+ * single observation.
+ *
+ * So promotion is now incremental and reversible. Add three ids, let them soak, confirm they
+ * are under 10s AND that nothing else degraded, then add three more. A bad batch costs one
+ * step back rather than every shop, and it finds the sustainable ceiling instead of
+ * overshooting it.
+ */
+const promotedIds = new Set(
+  String(process.env.SHOP_FAST_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
+);
+
 const SHOP_TIERS = {
   active: {
     intervalMs: tierMs('SHOP_ACTIVE_MS', 9000),
@@ -118,7 +136,8 @@ function clampShopInterval(retailer) {
   // Deliberately overrides Redis rather than taking a floor from it. The live intervals in
   // Redis are a flat 8000ms left over from before the budget existed; honouring them would
   // put demand at ~4 req/sec and queue every poll behind the budget again.
-  const tier = SHOP_TIERS.active.ids.has(retailer.id) ? 'active'
+  // An explicitly promoted shop takes the active interval regardless of its measured tier.
+  const tier = (promotedIds.has(retailer.id) || SHOP_TIERS.active.ids.has(retailer.id)) ? 'active'
     : SHOP_TIERS.quiet.ids.has(retailer.id) ? 'quiet'
       : 'medium';
   const intervalMs = SHOP_TIERS[tier].intervalMs;

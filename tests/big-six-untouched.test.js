@@ -162,3 +162,51 @@ describe('big six: phase spread changes offset, never cadence', () => {
     }
   });
 });
+
+describe('incremental promotion: SHOP_FAST_IDS', () => {
+  // Promotion is per-id and env-driven so a batch can be rolled back without a deploy.
+  const build = (promotedCsv) => {
+    const promoted = new Set(String(promotedCsv || '').split(',').map((s) => s.trim()).filter(Boolean));
+    const ACTIVE = new Set(['pokejeux', 'hobbiesville']);
+    const QUIET = new Set(['cardlegendstcg', 'poketherapy']);
+    return (r) => {
+      if (r.adapter !== 'shopify') return r;
+      const tier = (promoted.has(r.id) || ACTIVE.has(r.id)) ? 'active'
+        : QUIET.has(r.id) ? 'quiet' : 'medium';
+      return { ...r, intervalMs: { active: 9000, medium: 30000, quiet: 90000 }[tier], _tier: tier };
+    };
+  };
+
+  test('a promoted shop takes the fast interval', () => {
+    const clamp = build('untouchables,chimeragaming,deckoutgaming');
+    const r = clamp({ id: 'untouchables', adapter: 'shopify', intervalMs: 30000 });
+    assert.strictEqual(r.intervalMs, 9000);
+    assert.strictEqual(r._tier, 'active');
+  });
+
+  test('an unpromoted shop keeps its measured tier', () => {
+    const clamp = build('untouchables');
+    assert.strictEqual(clamp({ id: 'tcgfy', adapter: 'shopify', intervalMs: 0 }).intervalMs, 30000);
+    assert.strictEqual(clamp({ id: 'cardlegendstcg', adapter: 'shopify', intervalMs: 0 }).intervalMs, 90000);
+  });
+
+  test('promotion can lift a QUIET shop too, for the later batches', () => {
+    const clamp = build('poketherapy');
+    assert.strictEqual(clamp({ id: 'poketherapy', adapter: 'shopify', intervalMs: 0 }).intervalMs, 9000);
+  });
+
+  test('an empty or unset list promotes nobody', () => {
+    for (const v of ['', undefined, '  ', ',,']) {
+      const clamp = build(v);
+      assert.strictEqual(clamp({ id: 'tcgfy', adapter: 'shopify', intervalMs: 0 }).intervalMs, 30000);
+    }
+  });
+
+  test('promotion still cannot reach the big six', () => {
+    // Even if a big-six id were listed, the adapter check gates tiering first.
+    const clamp = build('walmart,costco,bestbuy');
+    for (const [id, adapter, ms] of [['walmart', 'walmart', 6000], ['costco', 'costco', 5000]]) {
+      assert.strictEqual(clamp({ id, adapter, intervalMs: ms }).intervalMs, ms);
+    }
+  });
+});
