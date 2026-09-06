@@ -133,7 +133,14 @@ class PokemonCenterAdapter extends BaseAdapter {
   async _runChecks(targets) {
     let checked = 0;
     const failureCounts = {};
+    // Belt and braces: even if the batch size is ever mis-sized again, a batch cannot run
+    // indefinitely and strand the _checkRunning guard.
+    const batchDeadline = Date.now() + (Number(process.env.PC_BATCH_MAX_MS) || 10 * 60 * 1000);
     for (const sku of targets) {
+      if (Date.now() >= batchDeadline) {
+        logger.info(`Pokemon Center: batch deadline reached after ${checked}/${targets.length} — rest deferred`);
+        break;
+      }
       const meta = this.sitemapProducts.get(sku);
       if (!meta) continue;
       if (this.watchlist.has(sku)) this._watchlistCheckedAt.set(sku, Date.now());
@@ -275,7 +282,18 @@ class PokemonCenterAdapter extends BaseAdapter {
       }
     }
 
-    return targets.slice(0, Math.max(this.checksPerPoll, this.watchlist.size));
+    // Cap at checksPerPoll, NOT max(checksPerPoll, watchlist.size).
+    //
+    // That max() was written when a check was fast. With Bright Data a check can take 180s,
+    // and a 57-SKU watchlist therefore produced a single batch of 57 products — up to 5.7
+    // HOURS of work — while the _checkRunning guard blocked every later batch behind it. The
+    // symptom was "checks running" on every poll, no completion line ever, and a priced count
+    // frozen at 17 while the fetch layer looked healthy.
+    //
+    // Watchlist SKUs still come first in the list above, so they keep their priority; they
+    // are simply spread across successive batches instead of one enormous one, and
+    // _watchlistCheckedAt stops each from being re-picked until its interval elapses.
+    return targets.slice(0, this.checksPerPoll);
   }
 
   /**
