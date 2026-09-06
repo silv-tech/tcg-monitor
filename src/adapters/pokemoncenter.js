@@ -204,7 +204,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     // 120s, so three sequential checks with retries timed the whole poll out — 4 consecutive
     // "Adapter timeout after 120000ms", and nothing was ever saved. The sitemap phase above
     // is the part that must always complete; availability is cached and can finish next poll.
-    const CHECK_BUDGET_MS = Number(process.env.PC_CHECK_BUDGET_MS) || 70000;
+    const CHECK_BUDGET_MS = Number(process.env.PC_CHECK_BUDGET_MS) || 150000;
     const checkDeadline = Date.now() + CHECK_BUDGET_MS;
 
     let checked = 0;

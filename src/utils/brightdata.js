@@ -22,9 +22,11 @@ const ZONE = process.env.BRIGHTDATA_ZONE || '';
 
 // Measured worst case was 44s; the ceiling is generous because a slow success is still far
 // cheaper than a retry, and the caller is a background rotation rather than a drop race.
-// Fits inside the caller's check budget: a 90s ceiling plus a retry exceeded the
-// scheduler's 120s adapter timeout and killed the whole poll.
-const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 55000;
+// Sized against what production actually does, not a guess. Measured over 37 live calls:
+// mean 36s to a success. A 55s ceiling clipped the tail and produced a 46% success rate, so
+// most "failures" were our own timeout rather than Bright Data failing. 75s x 2 attempts
+// fits inside the caller's 150s budget, which fits inside a 180s adapter timeout.
+const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 75000;
 
 // 2 of 5 first attempts came back HTTP 200 with a ZERO-length body — not a block, just
 // nothing. Both succeeded on the next try, so one retry is the difference between a 60% and
