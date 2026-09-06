@@ -6,7 +6,7 @@ const productsConfig = require('../config/products.json');
 const { classifyCategory, isTCGProduct } = require('../utils/helpers');
 const scraperApi = require('../utils/scraper-api');
 const state = require('../core/state');
-const { isInScopeName } = require('../utils/scope');
+const { isInScopeName, repairMojibake } = require('../utils/scope');
 
 let browserModule;
 try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
@@ -311,20 +311,26 @@ class BaseAdapter {
     const { maxShare = 0.9, minKept = 25 } = opts;
     const all = await state.getAllProducts(this.id);
     const entries = Object.entries(all || {});
-    if (entries.length === 0) return { purged: 0, kept: 0, aborted: false };
+    if (entries.length === 0) return { purged: 0, kept: 0, repaired: 0, aborted: false };
 
     // A watchlist SKU is a hand-picked product; no name heuristic gets to delete it.
     const watched = this.watchlist instanceof Set ? this.watchlist : new Set();
     const doomed = entries.filter(([sku, p]) =>
       p && p.name && !watched.has(String(sku)) && !p._watchlist && !isInScopeName(p.name));
-    if (doomed.length === 0) return { purged: 0, kept: entries.length, aborted: false };
+
+    // Repair runs first and unconditionally. It used to sit after the purge, so once a
+    // catalogue was clean the early return below skipped it forever — which is precisely the
+    // state both retailers reached, leaving two corrupted Walmart names in place.
+    const repaired = await this._repairStoredNames(entries, new Set(doomed.map(([sku]) => sku)));
+
+    if (doomed.length === 0) return { purged: 0, kept: entries.length, repaired, aborted: false };
 
     const kept = entries.length - doomed.length;
     const share = doomed.length / entries.length;
     if (share > maxShare || kept < minKept) {
       logger.error(`${this.name}: refusing to purge ${doomed.length}/${entries.length} products ` +
         `(${Math.round(share * 100)}%, ${kept} would remain) — the scope test looks wrong, not the data`);
-      return { purged: 0, kept: entries.length, aborted: true };
+      return { purged: 0, kept: entries.length, repaired, aborted: true };
     }
 
     for (const [sku, p] of doomed) {
@@ -333,7 +339,33 @@ class BaseAdapter {
       logger.info(`${this.name}: purged out-of-scope product ${sku} — ${String(p.name).slice(0, 70)}`);
     }
     logger.warn(`${this.name}: purged ${doomed.length} out-of-scope products from state (${kept} kept)`);
-    return { purged: doomed.length, kept, aborted: false };
+    return { purged: doomed.length, kept, repaired, aborted: false };
+  }
+
+  /**
+   * Rewrite stored names that are mojibake.
+   *
+   * Repairing at read time keeps a corrupted row IN scope, which is what stopped two real
+   * Walmart products being deleted — but it leaves the corruption in Redis. Those rows are
+   * only rewritten when a poll happens to return them again, and a product that has dropped
+   * out of the current search results never does. Two Walmart rows sat corrupted for exactly
+   * that reason, and either would have gone out as "PokÃ©mon ... Shieldâ€”Evolving Skies" in
+   * a Discord embed the moment it restocked. A wrong value in an alert is worse than a
+   * missing one, so the name is fixed in place rather than only on the way past.
+   */
+  async _repairStoredNames(entries, skip = new Set()) {
+    let fixed = 0;
+    for (const [sku, p] of entries) {
+      if (skip.has(sku) || !p || !p.name) continue;
+      const repaired = repairMojibake(p.name);
+      if (repaired === p.name) continue;
+      await state.setProduct(this.id, sku, { ...p, name: repaired }).catch(err =>
+        logger.warn(`${this.name}: failed to repair ${sku}: ${err.message}`));
+      logger.info(`${this.name}: repaired stored name ${sku} — ${repaired.slice(0, 70)}`);
+      fixed++;
+    }
+    if (fixed > 0) logger.warn(`${this.name}: repaired ${fixed} mojibake product name(s) in state`);
+    return fixed;
   }
 
   classify(product) {
