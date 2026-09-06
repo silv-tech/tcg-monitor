@@ -358,13 +358,13 @@ class PokemonCenterAdapter extends BaseAdapter {
           .finally(() => { this._checkRunning = false; });
       }
     }
-    const checked = 0;
 
-    // Persist only when this poll actually learned something, so an idle poll costs no write.
-    if (checked > 0) await this._saveAvailability();
-
-    // Phase 3: Build full product list — use cached availability for all products
-    // Keep last-known availability (even if stale) — prevents false OOS events
+    // Phase 3: Build the product list from cached availability.
+    //
+    // The paid checks are asynchronous now, so this poll reports what is KNOWN rather than
+    // what was just fetched. Freshness and failure tracking moved into _runChecks with them —
+    // leaving them here referenced a batch size that no longer exists and threw
+    // "batchSize is not defined" on every poll.
     for (const [sku, meta] of this.sitemapProducts) {
       const avail = this.availabilityCache.get(sku) || { inStock: false, price: null, image: '' };
       products[sku] = this.classify({
@@ -380,47 +380,22 @@ class PokemonCenterAdapter extends BaseAdapter {
       });
     }
 
-    this.reportFreshness(checked, batchSize);
+    // The sitemap phase is what this poll actually does, and it succeeded if we got here.
+    this.reportFreshness(this.availabilityCache.size, this.sitemapProducts.size);
 
-    // Nothing new and nothing due: a quiet poll, not a failed one
-    if (batchSize === 0) {
-      this._consecutiveFailures = 0;
-      // Selecting nothing to check is only "quiet" if something else can still produce an
-      // alert. With an empty watchlist, nothing queued and no product known to be in stock,
-      // this store cannot detect a restock at all — it logged exactly that, at info level,
-      // every poll for days while appearing healthy. That is a configuration failure and it
-      // must not read like a normal cycle.
-      const detail = `${Object.keys(products).length} products, no checks due `
-        + `(${this._newSkuQueue.length} queued, ${this.availabilityCache.size} with known stock)`;
-      if (this.watchlist.size === 0 && this.availabilityCache.size === 0
-          && this._rotationBudgetLeft() === 0) {
-        logger.warn(`Pokemon Center: ${detail} — watchlist EMPTY and rotation budget spent, `
-          + 'so no restock can be detected. Add SKUs to the watchlist or raise dailyRotationChecks.');
-      } else {
-        // Diagnostic: selecting zero targets with a populated sitemap and budget left should
-        // be impossible, so print the inputs rather than guessing at it from the outside.
-        logger.info(`Pokemon Center: ${detail} [sitemap=${this.sitemapProducts.size} `
-          + `rotBudget=${this._rotationBudgetLeft()} spent=${this._rotationSpentToday} `
-          + `checksPerPoll=${this.checksPerPoll} paidGate=${Math.max(0, this.paidCheckIntervalMs - (Date.now() - this._lastPaidCheckAt))}ms]`);
-      }
-      return products;
+    // A store that cannot check anything cannot detect a restock, and must not read as a
+    // normal cycle. Kept from the previous shape because the failure it warns about is real.
+    if (this.watchlist.size === 0 && this.availabilityCache.size === 0
+        && this._rotationBudgetLeft() === 0) {
+      logger.warn(`Pokemon Center: ${Object.keys(products).length} products, but watchlist EMPTY `
+        + 'and rotation budget spent, so no restock can be detected. '
+        + 'Add SKUs to the watchlist or raise dailyRotationChecks.');
     }
 
-    // Track consecutive failures
-    if (checked === 0 && batchSize > 0) {
-      this._consecutiveFailures++;
-      if (this._consecutiveFailures <= 3 || this._consecutiveFailures % 10 === 0) {
-        const failureSummary = Object.entries(failureCounts).map(([r, c]) => `${r}:${c}`).join(', ');
-        logger.warn(`Pokemon Center: 0/${batchSize} checks succeeded (attempt ${this._consecutiveFailures}) — ${failureSummary}`);
-      }
-    } else {
-      if (this._consecutiveFailures > 0) {
-        logger.info(`Pokemon Center: recovered after ${this._consecutiveFailures} failed polls`);
-      }
-      this._consecutiveFailures = 0;
-    }
 
-    logger.info(`Pokemon Center: ${Object.keys(products).length} products (${checked}/${batchSize} checked, ${this._newSkuQueue.length} queued, ${this.availabilityCache.size} with known stock)`);
+    logger.info(`Pokemon Center: ${Object.keys(products).length} products ` +
+      `(${this.availabilityCache.size} with known stock, ${this._newSkuQueue.length} queued, ` +
+      `${this._unfetchable.size} parked, checks ${this._checkRunning ? 'running' : 'idle'})`);
     return products;
   }
 
