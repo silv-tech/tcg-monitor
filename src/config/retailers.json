@@ -197,7 +197,7 @@
     "proxyTier": "isp",
     "enabled": true,
     "color": "#ff6600",
-    "maxProducts": 2500,
+    "maxProducts": 14000,
     "collections": [],
     "searchKeywords": [
       "pokemon",

@@ -18,6 +18,11 @@ const CA_LOCALE_HEADERS = {
 };
 const { normalizePrice } = require('../utils/helpers');
 
+// Pages per catalogue sweep. Deliberately the SAME as the old hard ceiling: the window
+// rotates to gain coverage, it does not widen to gain it, so the request burst per sweep
+// is unchanged and cannot reintroduce the 429s that the old cadence experiment caused.
+const SWEEP_PAGES_PER_RUN = 10;
+
 // How often a shop reads its WHOLE catalogue rather than just the newest page. New listings
 // are caught on every poll regardless; this cadence only bounds how quickly a stock or price
 // change deep in the catalogue is noticed.
@@ -126,6 +131,10 @@ class ShopifyAdapter extends BaseAdapter {
     this.collections = config.collections || []; // e.g. ['pokemon', 'trading-cards', 'new-arrivals']
     this.searchKeywords = config.searchKeywords || [];
     this.pageLimit = config.pageLimit || 250; // Shopify max per page
+    // Previously ignored: the hard page>10 cap overrode it, so a shop asking for 4,000
+    // products silently received 2,500.
+    this.maxProducts = Number(config.maxProducts) > 0 ? Number(config.maxProducts) : 2500;
+    this._sweepCursor = 1;   // rotating window position
     // Conditional-request state, keyed by page URL. Both survive across polls: the ETag is what
     // earns the 304, and the cached page is what lets us skip parsing when we get one.
     this._etags = new Map();
@@ -231,6 +240,9 @@ class ShopifyAdapter extends BaseAdapter {
     // That is what let a burst of 429s raise "PARSER SUSPECT — 0% of products have a price"
     // and, on recovery, an alert flood. Track WHY we came back empty.
     let throttled = false;
+    // Set when the catalogue sweep covered only part of the shop by design (rotating window),
+    // as opposed to `incomplete`, which means something actually went wrong.
+    let windowed = false;
 
     // Any collection that fails leaves the catalogue INCOMPLETE, which matters more than it
     // looks. A shop with two collections that loses one still returns plenty of products, so
@@ -255,7 +267,11 @@ class ShopifyAdapter extends BaseAdapter {
     // Method 2: Fetch all products (fallback if no collections configured OR collections returned nothing)
     if (this.collections.length === 0 || Object.keys(products).length === 0) {
       try {
-        await this.fetchAllProducts(products);
+        // A rotating window reads a slice, not the whole shop, so it is a PARTIAL view even
+        // though the sweep itself succeeded. Saying so is what stops poll-adapter from
+        // reading the pages outside the window as products that disappeared — which would
+        // mark real stock out of stock and then fire it all back as false restocks.
+        windowed = !(await this.fetchAllProducts(products));
       } catch (err) {
         if (isRateLimited(err)) throttled = true;
         incomplete = true;
@@ -275,6 +291,10 @@ class ShopifyAdapter extends BaseAdapter {
     if (incomplete) {
       this._partialPoll = true;
       logger.warn(`${this.name}: sweep incomplete — treating as partial so stale cleanup is skipped`);
+    } else if (windowed) {
+      // Expected, not a fault: the shop is deeper than one window, so this run saw a slice.
+      // No warning — it happens on most sweeps for the large shops and would be pure noise.
+      this._partialPoll = true;
     }
 
     return products;
@@ -385,16 +405,41 @@ class ShopifyAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Sweep the catalogue through a ROTATING WINDOW.
+   *
+   * This used to stop dead at `page > 10`, a flat 2,500-product ceiling that ignored the
+   * configured maxProducts entirely — kanzengames asks for 4,000 and silently got 2,500.
+   * Hobbiesville is the case that showed what it costs: the shop carries 13,750 products
+   * across 55 pages, and of its in-scope sealed products only 21 sat inside the first ten
+   * pages while 109 sat beyond them. Several of those were in stock. They could never be
+   * alerted, because nothing ever looked at them.
+   *
+   * Reading all 55 pages in one go is not the fix. A sweep is already a burst of requests in
+   * quick succession, and that burst is what put twelve shops into 429s when the sweep cadence
+   * was tripled — this very scan hit HTTP 429 at page 56. So the window stays at ten pages,
+   * exactly the old maximum, and MOVES: each sweep starts where the last one stopped and wraps
+   * at the end. Same request rate, whole catalogue covered over successive sweeps.
+   *
+   * Page 1 is still read on every poll by the fast path, so a NEW listing is caught as
+   * quickly as before regardless of where the window happens to be.
+   *
+   * @returns {boolean} true only if this run read the catalogue from page 1 through to its
+   *   end, which is the only case where the caller may treat the result as a complete view.
+   */
   async fetchAllProducts(products) {
-    let page = 1;
-    let hasMore = true;
+    const maxPages = Math.max(1, Math.ceil(this.maxProducts / this.pageLimit));
+    const startPage = Math.min(this._sweepCursor || 1, maxPages);
+    let page = startPage;
+    let pagesRead = 0;
+    let reachedEnd = false;
 
-    while (hasMore) {
+    while (pagesRead < SWEEP_PAGES_PER_RUN && page <= maxPages) {
       const url = `${this.url}/products.json?limit=${this.pageLimit}&page=${page}`;
       const data = { products: (await this._fetchPage(url)).products };
 
       if (!data.products || data.products.length === 0) {
-        hasMore = false;
+        reachedEnd = true;
         break;
       }
 
@@ -412,10 +457,17 @@ class ShopifyAdapter extends BaseAdapter {
         this.parseShopifyProduct(item, products);
       }
 
-      hasMore = data.products.length === this.pageLimit;
+      pagesRead++;
+      // A short page is the last one Shopify has.
+      if (data.products.length < this.pageLimit) { reachedEnd = true; break; }
       page++;
-      if (page > 10) break;
     }
+
+    if (page > maxPages) reachedEnd = true;   // reached the configured ceiling
+
+    this._sweepCursor = reachedEnd ? 1 : page;
+    // Complete only when this single run spanned the entire catalogue.
+    return reachedEnd && startPage === 1;
   }
 
   /**
