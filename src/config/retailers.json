@@ -81,10 +81,10 @@
     "color": "#ffcb05",
     "timing": {
       "checksPerPoll": 3,
-      "watchlistIntervalMs": 3600000,
+      "watchlistIntervalMs": 1800000,
       "sitemapIntervalMs": 8000,
       "paidCheckIntervalMs": 300000,
-      "dailyRotationChecks": 440
+      "dailyRotationChecks": 150
     },
     "parseCanary": false,
     "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked",
