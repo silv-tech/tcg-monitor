@@ -22,11 +22,16 @@ const ZONE = process.env.BRIGHTDATA_ZONE || '';
 
 // Measured worst case was 44s; the ceiling is generous because a slow success is still far
 // cheaper than a retry, and the caller is a background rotation rather than a drop race.
-// Sized against what production actually does, not a guess. Measured over 37 live calls:
-// mean 36s to a success. A 55s ceiling clipped the tail and produced a 46% success rate, so
-// most "failures" were our own timeout rather than Bright Data failing. 75s x 2 attempts
-// fits inside the caller's 150s budget, which fits inside a 180s adapter timeout.
-const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 75000;
+// Sized against measured behaviour, not a guess. Real rotation URLs fetched from a fast
+// connection ranged 16.4s to 58.7s — a long tail, not a stable latency — and production's
+// path to Bright Data is slower still. 75s clipped that tail.
+const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 110000;
+
+// Retrying a TIMEOUT just spends the whole budget twice to fail twice. Retrying an EMPTY is
+// worth it: those come back in seconds and succeeded immediately on the next try in every
+// observed case. So a retry only happens when the first attempt failed FAST, which is the
+// signature of an empty rather than a slow block.
+const RETRY_ONLY_IF_FASTER_THAN_MS = 40000;
 
 // 2 of 5 first attempts came back HTTP 200 with a ZERO-length body — not a block, just
 // nothing. Both succeeded on the next try, so one retry is the difference between a 60% and
@@ -34,7 +39,7 @@ const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 75000;
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1500;
 
-const usage = { requests: 0, successes: 0, empties: 0, failures: 0, msTotal: 0 };
+const usage = { calls: 0, callSuccesses: 0, requests: 0, successes: 0, empties: 0, failures: 0, msTotal: 0 };
 
 function isConfigured() {
   return Boolean(API_KEY && ZONE);
@@ -48,8 +53,10 @@ async function unlock(url, opts = {}) {
   if (!isConfigured()) return null;
   const { timeoutMs = TIMEOUT_MS, attempts = MAX_ATTEMPTS, label = 'brightdata' } = opts;
 
+  usage.calls++;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const started = Date.now();
+    const attemptStarted = started;
     usage.requests++;
     try {
       const res = await fetch(API_URL, {
@@ -63,6 +70,7 @@ async function unlock(url, opts = {}) {
 
       if (res.ok && body && body.length > 1000) {
         usage.successes++;
+        usage.callSuccesses++;
         return body;
       }
       // An empty 200 is the known transient. Anything else is a real failure, but both are
@@ -74,7 +82,14 @@ async function unlock(url, opts = {}) {
       usage.failures++;
       logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} failed: ${err.message}`);
     }
-    if (attempt < attempts) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    // Only retry a FAST failure. A slow one is a timeout, and repeating it would burn the
+    // caller's entire budget to fail a second time in exactly the same way.
+    const elapsed = Date.now() - attemptStarted;
+    if (attempt < attempts && elapsed < RETRY_ONLY_IF_FASTER_THAN_MS) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      continue;
+    }
+    break;
   }
   return null;
 }
@@ -85,7 +100,11 @@ function getUsage() {
     configured: isConfigured(),
     zone: ZONE || null,
     ...usage,
-    successRate: usage.requests ? Number((usage.successes / usage.requests).toFixed(3)) : null,
+    // Per CALL is the number that matters — a call that retries once and then succeeds is a
+    // success, not a 50% rate. Reporting only per-attempt made the integration look far
+    // worse than it was.
+    callSuccessRate: usage.calls ? Number((usage.callSuccesses / usage.calls).toFixed(3)) : null,
+    attemptSuccessRate: usage.requests ? Number((usage.successes / usage.requests).toFixed(3)) : null,
     avgMs: usage.successes ? Math.round(usage.msTotal / usage.requests) : null,
     // Bright Data bills successful responses only, so this is the real spend.
     billableRequests: usage.successes,
