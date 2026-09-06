@@ -4,8 +4,35 @@ const { isSystemHealthy, checkRedisHealth, getZeroProductPolls, getComposition, 
 const { getBudgetStatus } = require('../utils/scraper-api');
 const { EmbedBuilder } = require('discord.js');
 
-// Per-retailer alert dedup — only alert ONCE per stale episode, not every 5 min
-const alertedRetailers = new Set();
+// Per-retailer alert state. Alerting ONCE per episode meant a store could sit broken for an
+// hour with nothing further said: Costco went DETECTION DOWN at 19:44 and the next word about
+// it was silence. So the first alert still fires immediately and is not repeated at that
+// cadence, but a store that stays broken is escalated on a widening ladder.
+const alertedRetailers = new Map(); // retailerId → { firstAt, lastAt, reminders }
+// Reminders at 5, 15 and 30 minutes, then hourly. Widening rather than fixed so a long
+// outage does not turn #admin-alerts into a wall of the same message.
+const REMINDER_LADDER_MS = [5 * 60 * 1000, 15 * 60 * 1000, 30 * 60 * 1000];
+const REMINDER_MAX_MS = 60 * 60 * 1000;
+
+function humanDuration(ms) {
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** Symptom lines for one retailer, shared by the first alert and the reminders. */
+function describeIssue(r) {
+  const parts = [];
+  if (r.consecutiveErrors > 0) parts.push(`Errors: ${r.consecutiveErrors}`);
+  if (r.stale) parts.push('⏰ STALE — no check in expected window');
+  if (r.zeroProductPolls >= 3) parts.push(`⚠️ 0 products for ${r.zeroProductPolls} polls`);
+  if (r.servingStaleData) parts.push(`🧊 DETECTION DOWN — only cached data for ${r.zeroFreshPolls} polls`);
+  if (r.parserSuspect) parts.push(`🧩 PARSER SUSPECT — only ${Math.round((r.pricedRatio || 0) * 100)}% of products have a price`);
+  if (r.lastError) parts.push(`Last error: ${r.lastError.message}`);
+  return parts;
+}
 const alertedComposition = new Set(); // retailerId:games signature already reported
 
 // Cooldown for budget + redis alerts (these don't have per-item dedup)
@@ -29,7 +56,7 @@ async function checkAndAlert(discordClient) {
 
   // Find RECOVERED retailers (were alerted, now healthy again)
   const recovered = [];
-  for (const id of alertedRetailers) {
+  for (const id of alertedRetailers.keys()) {
     if (!unhealthyIds.has(id)) {
       recovered.push(id);
     }
@@ -47,13 +74,8 @@ async function checkAndAlert(discordClient) {
     const MAX_LISTED = 24;
     newlyUnhealthy.forEach((r, i) => {
       if (i < MAX_LISTED) {
-        const parts = [];
-        if (r.consecutiveErrors > 0) parts.push(`Errors: ${r.consecutiveErrors}`);
-        if (r.stale) parts.push('⏰ STALE — no check in expected window');
-        if (r.zeroProductPolls >= 3) parts.push(`⚠️ 0 products for ${r.zeroProductPolls} polls`);
-        if (r.servingStaleData) parts.push(`🧊 DETECTION DOWN — only cached data for ${r.zeroFreshPolls} polls`);
-        if (r.parserSuspect) parts.push(`🧩 PARSER SUSPECT — only ${Math.round((r.pricedRatio || 0) * 100)}% of products have a price`);
-        if (r.lastError) parts.push(`Last error: ${r.lastError.message}\nat ${new Date(r.lastError.time).toISOString()}`);
+        // Shared with the still-down reminder, so an outage reads the same way each time.
+        const parts = describeIssue(r);
         embed.addFields({
           name: r.name,
           value: (parts.join('\n') || 'Unknown issue').slice(0, 1024),
@@ -62,7 +84,7 @@ async function checkAndAlert(discordClient) {
       }
 
       // Mark as alerted — won't alert again until it recovers
-      alertedRetailers.add(r.id);
+      alertedRetailers.set(r.id, { firstAt: now, lastAt: now, reminders: 0 });
     });
     if (newlyUnhealthy.length > MAX_LISTED) {
       embed.addFields({ name: 'More', value: `…and ${newlyUnhealthy.length - MAX_LISTED} more retailers`, inline: false });
@@ -74,6 +96,42 @@ async function checkAndAlert(discordClient) {
       logger.info(`Sent admin health alert for ${newlyUnhealthy.length} retailer(s): ${newlyUnhealthy.map(r => r.name).join(', ')}`);
     } catch (err) {
       logger.error(`Failed to send admin alert: ${err.message}`);
+    }
+  }
+
+  // --- Still-down reminders ---
+  //
+  // A retailer that stays broken gets chased until it recovers. Without this the only
+  // notification was the first one, so an outage at 19:44 was still silently ongoing at 20:41.
+  const stillDown = unhealthy
+    .map(r => ({ r, st: alertedRetailers.get(r.id) }))
+    .filter(({ r, st }) => {
+      if (!st || newlyUnhealthy.some(n => n.id === r.id)) return false;
+      const wait = REMINDER_LADDER_MS[st.reminders] ?? REMINDER_MAX_MS;
+      return now - st.lastAt >= wait;
+    });
+
+  if (stillDown.length > 0) {
+    const embed = new EmbedBuilder()
+      .setTitle('⏱️ Still down')
+      .setColor(0xe67e22)
+      .setDescription(`${stillDown.length} retailer(s) have not recovered.`)
+      .setTimestamp();
+
+    for (const { r, st } of stillDown.slice(0, 24)) {
+      const down = humanDuration(now - st.firstAt);
+      const lines = [`**Down for ${down}**`, ...describeIssue(r)];
+      embed.addFields({ name: r.name, value: lines.join(String.fromCharCode(10)).slice(0, 1024), inline: false });
+      st.reminders++;
+      st.lastAt = now;
+    }
+
+    try {
+      const channel = await discordClient.channels.fetch(config.discord.adminChannelId);
+      await channel.send({ content: adminPing, embeds: [embed] });
+      logger.warn(`Sent still-down reminder for ${stillDown.length} retailer(s): ${stillDown.map(x => x.r.name).join(', ')}`);
+    } catch (err) {
+      logger.error(`Failed to send still-down reminder: ${err.message}`);
     }
   }
 
@@ -90,8 +148,11 @@ async function checkAndAlert(discordClient) {
       .setDescription(`${recovered.length} retailer(s) recovered`)
       .setTimestamp();
 
-    for (const name of recoveredNames) {
-      embed.addFields({ name, value: 'Back online', inline: true });
+    for (const id of recovered) {
+      const r = system.retailers.find(ret => ret.id === id);
+      const st = alertedRetailers.get(id);
+      const downFor = st ? ` after ${humanDuration(now - st.firstAt)}` : '';
+      embed.addFields({ name: r ? r.name : id, value: `Back online${downFor}`, inline: true });
     }
 
     // Clear from alerted set
