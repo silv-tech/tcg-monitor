@@ -32,6 +32,10 @@ const PRINT_KEYWORDS = [
   'character guide', 'price guide', 'value guide', 'collezionare', 'paperback', 'hardcover',
 ];
 
+// If more than this share of the stored catalogue looks out of scope, the scope test is the
+// thing that is wrong. Measured when this shipped: 75 of 371, or 20%.
+const PURGE_SAFETY_LIMIT = 0.5;
+
 /**
  * Scope test applied to a product NAME, so it can be re-run against the cache and not only
  * against freshly parsed search cards. Everything tracked must name a game we follow and
@@ -256,6 +260,19 @@ class AmazonAdapter extends BaseAdapter {
         this._knownProducts.delete(asin);
         delete products[asin];
       }
+    }
+
+    // The in-memory drop above is not enough on its own: products already written to Redis
+    // by earlier builds survive a restart and a redeploy. Right after this fix shipped,
+    // Redis still held 371 Amazon products of which 75 were out of scope — Lorcana deck
+    // boxes, storage cases, sponsored-ad slots, hobby books. They are inert (nothing polls
+    // them, so they raise no events) but they pollute the catalogue and cross-retailer
+    // matching, and they would diff strangely if discovery ever touched them again.
+    // Cleared once per process rather than every poll, since it scans the retailer keyspace.
+    if (!this._scopePurgeDone) {
+      this._scopePurgeDone = true;
+      this._purgeOutOfScopeState().catch(err =>
+        logger.warn(`Amazon: out-of-scope state purge failed: ${err.message}`));
     }
 
     // Back off the enrichment sweep while search is struggling — they share a pool
@@ -521,6 +538,39 @@ class AmazonAdapter extends BaseAdapter {
    * Monitor: check known ASINs via the AOD offer endpoint (FREE).
    * Returns cached data for ASINs where the fetch fails (prevents false OOS).
    */
+  /**
+   * Delete persisted products that the scope test rejects.
+   *
+   * Deliberately conservative. It only removes entries that HAVE a name and fail the test —
+   * a nameless or half-written entry is left alone rather than guessed at — and it aborts
+   * without deleting anything if the proportion is implausibly high, because "almost
+   * everything is out of scope" is far more likely to mean the scope test regressed than
+   * that the catalogue really is that dirty. Wrongly deleting the catalogue would re-fire
+   * NEW_SKU for every product on rediscovery, which is the exact flood this is cleaning up.
+   */
+  async _purgeOutOfScopeState() {
+    const all = await state.getAllProducts(this.id);
+    const entries = Object.entries(all || {});
+    if (entries.length === 0) return;
+
+    const doomed = entries.filter(([, p]) => p && p.name && !isInScopeName(p.name));
+    if (doomed.length === 0) return;
+
+    const share = doomed.length / entries.length;
+    if (share > PURGE_SAFETY_LIMIT) {
+      logger.error(`Amazon: refusing to purge ${doomed.length}/${entries.length} products ` +
+        `(${Math.round(share * 100)}% > ${Math.round(PURGE_SAFETY_LIMIT * 100)}%) — the scope test looks wrong, not the data`);
+      return;
+    }
+
+    for (const [sku, p] of doomed) {
+      await state.deleteProduct(this.id, sku).catch(err =>
+        logger.warn(`Amazon: failed to purge ${sku}: ${err.message}`));
+      logger.info(`Amazon: purged out-of-scope product ${sku} — ${String(p.name).slice(0, 70)}`);
+    }
+    logger.warn(`Amazon: purged ${doomed.length} out-of-scope products from state (${entries.length - doomed.length} kept)`);
+  }
+
   async _monitorKnownAsins(products) {
     const asins = [...this._knownProducts.keys()];
     if (asins.length === 0) {
@@ -703,3 +753,4 @@ class AmazonAdapter extends BaseAdapter {
 
 module.exports = AmazonAdapter;
 module.exports.isInScopeName = isInScopeName;
+module.exports.PURGE_SAFETY_LIMIT = PURGE_SAFETY_LIMIT;
