@@ -36,6 +36,10 @@ const SET_NAMES = [
   'celebrations', 'first partner', 'poke ball tin', 'pokeball tin',
 ];
 
+// Unambiguous sealed product types. No accessory is named any of these, so their presence
+// settles the question when a title also happens to contain an accessory word.
+const DEFINITE_SEALED = /(elite trainer box|booster box|booster bundle|booster pack|booster display|build\s*[&and]+\s*battle|premium collection|ultra premium collection|collection box|battle deck|starter deck|structure deck|mini tin|booster tin|checklane)/i;
+
 // Accessories — never alert on these even if they name a game
 const ACCESSORY_KEYWORDS = [
   'deck box', 'deckbox', 'playmat', 'play mat', 'sleeves', 'card sleeves',
@@ -43,7 +47,7 @@ const ACCESSORY_KEYWORDS = [
   'display case', 'acrylic', 'portfolio', 'binder', 'card binder', 'album',
   'card holder', 'card organizer', 'storage box', 'card storage',
   'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box', 'token deck',
-  'divider', 'accessories',
+  'divider', 'accessories', 'card book', 'trading card book',
 ];
 
 // Books ABOUT the hobby. They name a game and use card wording, so game+form alone lets them
@@ -162,17 +166,29 @@ function isInScopeName(name) {
   const repaired = repairMojibake(name);
   const lower = repaired.toLowerCase();
   if (!lower) return false;
-  if (/^sponsored ad\b/.test(lower)) return false;
-  if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
+  if (/^sponsored ad/.test(lower)) return false;
   if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
+
+  // Checked BEFORE the sealed shortcut below, so a single named after the box it came from
+  // is still rejected ("Eevee (173) - Prismatic Evolutions Pokemon Center ETB - Promo").
   if (isSingleCard(repaired)) return false;
+
   const namesGame = GAME_NAMES.some(g => lower.includes(g)) || SET_NAMES.some(k => lower.includes(k));
   if (!namesGame) return false;
+
+  // An unambiguous sealed product type settles it. Sealed boxes describe their own contents,
+  // and the word "accessories" was vetoing real ones TWICE over — once via ACCESSORY_KEYWORDS
+  // here and again via the accessory entries inside isTCGProduct. Best Buy's "Scarlet & Violet
+  // (SV7) Stellar Crown Elite Trainer Box 9 packs & accessories" is an ETB, not an accessory.
+  if (DEFINITE_SEALED.test(repaired)) return true;
+
+  if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
   // Naming a game is not enough — it also has to BE a card product. Amazon always applied
   // this as a separate step and Walmart never did, which is how "Pokémon™ Violet (Nintendo
   // Switch)" and a shelf of UNO variants stayed in scope after the first cleanup.
   return isTCGProduct(repaired);
 }
+
 
 module.exports = {
   GAME_NAMES,

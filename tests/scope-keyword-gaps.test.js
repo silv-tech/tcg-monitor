@@ -88,3 +88,54 @@ describe('keyword gaps: sealed product that only LOOKS like merch is kept', () =
     );
   });
 });
+
+/**
+ * A sealed box describes its own contents, so the word "accessories" appears inside real
+ * product titles. It was vetoing them TWICE — once via ACCESSORY_KEYWORDS and again via the
+ * accessory entries inside isTCGProduct — so Best Buy's Stellar Crown ETB was discarded.
+ *
+ * An unambiguous sealed type now settles the question, but only AFTER the single-card check,
+ * so a promo card named after the box it came from is still rejected.
+ */
+describe('scope: an unambiguous sealed type outranks the accessory words', () => {
+  const kept = [
+    'Pokemon USA Pokemon Trading Card Game: Scarlet & Violet (SV7) Stellar Crown Elite Trainer Box 9 packs & accessories',
+    'Pokemon TCG Elite Trainer Box with sleeves and dice',
+    'Pokemon TCG Booster Bundle with card sleeves',
+  ];
+  for (const name of kept) {
+    test('keeps ' + name.slice(0, 46), () => assert.strictEqual(isInScopeName(name), true));
+  }
+
+  test('the shortcut does NOT rescue a single named after its box', () => {
+    // isSingleCard runs first, which is the ordering this test exists to lock.
+    assert.strictEqual(
+      isInScopeName('Eevee (173) - Prismatic Evolutions Pokemon Center ETB - Promo'),
+      false
+    );
+  });
+
+  const dropped = [
+    'Pokemon Scarlet & Violet: Prismatic Evolutions Accessory Pouch',
+    'Ultra PRO Pokemon Card Sleeves 100ct',
+    'Ultra Pro Pokemon Alcove Flip Deck Box',
+    'Pokemon 9-Pocket Portfolio Binder',
+    'Ultra PRO Pokemon Trading Card Book - 252 Cards',
+  ];
+  for (const name of dropped) {
+    test('still drops ' + name.slice(0, 44), () => assert.strictEqual(isInScopeName(name), false));
+  }
+});
+
+describe('scope: the source file carries no stray control characters', () => {
+  test('no backspace or other control byte survived an escaping slip', () => {
+    // A \b written as a real backspace inside DEFINITE_SEALED made it match nothing, and
+    // the rule silently failed open. Cheap to assert, invisible otherwise.
+    const src = require('fs').readFileSync(require.resolve('../src/utils/scope.js'), 'utf8');
+    const bad = [...src].filter((c) => {
+      const code = c.charCodeAt(0);
+      return code < 32 && c !== '\n' && c !== '\r' && c !== '\t';
+    });
+    assert.strictEqual(bad.length, 0, 'found control chars: ' + JSON.stringify(bad));
+  });
+});
