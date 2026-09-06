@@ -7,6 +7,10 @@ const DEEP_CRAWL_INTERVAL_DEFAULT = 5 * 60 * 1000;
 const DEEP_CRAWL_INTERVAL_FLOOR = 60 * 1000;
 const CONCURRENCY = 4;
 
+// A single crawl may never delete more than this share of the known catalogue. EB Games has
+// ~250 tracked products; a real delisting trickles, a bad read arrives all at once.
+const MAX_DROP_SHARE = 0.2;
+
 // Odoo eCommerce category routes — only the games the client tracks.
 // fastPages: pages fetched every poll (newest-first + recently-modified); the deep crawl covers the rest.
 const SOURCES = [
@@ -171,11 +175,16 @@ class EBGamesAdapter extends BaseAdapter {
     return results;
   }
 
+  /** @returns {number} product cards actually parsed out of this page */
   _ingest(html, source, into) {
+    let added = 0;
     for (const m of html.matchAll(CARD_RE)) {
       const parsed = parseCard(m[0], this.url, source.key);
-      if (parsed && !into.has(parsed.sku)) into.set(parsed.sku, this.classify(parsed));
+      if (!parsed) continue;
+      added++;
+      if (!into.has(parsed.sku)) into.set(parsed.sku, this.classify(parsed));
     }
+    return added;
   }
 
   // Newer observation wins — a background crawl must not overwrite a fresher fast-poll result
@@ -234,6 +243,10 @@ class EBGamesAdapter extends BaseAdapter {
       const fresh = new Map();
       let fetched = 0;
       let failed = 0;
+      // A page can return HTTP 200 and still contain no product cards — Odoo pagination
+      // drifts, and a re-render can briefly omit the grid. That is NOT evidence the products
+      // are gone, but it used to be treated as exactly that.
+      let empty = 0;
 
       const firstJobs = SOURCES.map(src => ({ src, url: this._listingUrl(src, 1, SORT_NEWEST) }));
       const firstPages = await this._fetchJobs(firstJobs);
@@ -244,7 +257,7 @@ class EBGamesAdapter extends BaseAdapter {
         fetched++;
         const pages = maxPage(r.value);
         this._pageCounts.set(src.key, pages);
-        this._ingest(r.value, src, fresh);
+        if (this._ingest(r.value, src, fresh) === 0) empty++;
         for (let p = 2; p <= pages; p++) remaining.push({ src, url: this._listingUrl(src, p, SORT_NEWEST) });
       });
 
@@ -252,18 +265,38 @@ class EBGamesAdapter extends BaseAdapter {
       rest.forEach((r, i) => {
         if (!r.ok) { failed++; return; }
         fetched++;
-        this._ingest(r.value, remaining[i].src, fresh);
+        if (this._ingest(r.value, remaining[i].src, fresh) === 0) empty++;
       });
 
       if (fetched === 0) throw new Error('all listing pages failed (Cloudflare block?)');
 
-      // Only a complete crawl may drop delisted products
-      this._merge(fresh, failed === 0);
+      // Only a complete, plausible crawl may drop delisted products.
+      //
+      // "Complete" used to mean every page returned HTTP 200. That let a page which loaded
+      // fine but parsed zero cards count as an authoritative "these products no longer
+      // exist": they were dropped from _knownProducts, poll-adapter's stale cleanup marked
+      // them out of stock, and the next crawl brought them all back at once. That is the
+      // source of the bursts — the alert limiter recorded "21 alerts in 0s", one poll
+      // flipping the catalogue, not products restocking every 24 minutes.
+      //
+      // The share guard is the second line of defence. Even a technically clean crawl that
+      // wants to delete most of the catalogue is far more likely to be a bad read than a
+      // retailer delisting its entire Pokemon range in five minutes.
+      const knownBefore = this._knownProducts.size;
+      const wouldDrop = knownBefore
+        ? [...this._knownProducts.keys()].filter(sku => !fresh.has(sku)).length / knownBefore
+        : 0;
+      const trustworthy = failed === 0 && empty === 0 && wouldDrop <= MAX_DROP_SHARE;
+      if (!trustworthy && knownBefore > 0 && (empty > 0 || wouldDrop > MAX_DROP_SHARE)) {
+        logger.warn(`EB Games: not dropping products this crawl — ${empty} empty page(s), ` +
+          `would have removed ${Math.round(wouldDrop * 100)}% of ${knownBefore}`);
+      }
+      this._merge(fresh, trustworthy);
       this._lastDeepCrawlAt = Date.now();
       if (!this._seeded) await this._seedRedis(failed === 0);
 
       const inStock = [...this._knownProducts.values()].filter(p => p.inStock).length;
-      logger.info(`EB Games: DEEP — ${fetched} pages${failed ? ` (${failed} failed)` : ''}, ${this._knownProducts.size} products (${inStock} in stock), ${Date.now() - start}ms. Next in ${Math.round(this.deepCrawlIntervalMs / 60000)}min.`);
+      logger.info(`EB Games: DEEP — ${fetched} pages${failed ? ` (${failed} failed)` : ''}${empty ? ` (${empty} empty)` : ''}, ${this._knownProducts.size} products (${inStock} in stock), ${Date.now() - start}ms. Next in ${Math.round(this.deepCrawlIntervalMs / 60000)}min.`);
     } finally {
       this._deepCrawlRunning = false;
     }
