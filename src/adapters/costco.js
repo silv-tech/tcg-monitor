@@ -75,6 +75,19 @@ class CostcoAdapter extends BaseAdapter {
     // Deliberately does NOT include a bare franchise name. Costco's catalogue is broad, so
     // "Pokémon" on its own also matches Switch games, LEGO sets, pinball machines and Toniebox
     // figures. Every entry here names a card product form.
+    // A product must name a game we track AND be a card product. One list mixing the two
+    // could not express that: "booster tin" let Magic: The Gathering through and "trading
+    // card" let an Upper Deck Golf blaster box through, because a card-shaped product from
+    // ANY game matched. Splitting them means neither a Magic booster box nor a Pokemon
+    // Nintendo Switch game can qualify — the first has no tracked game, the second no card
+    // form.
+    this.tcgGameNames = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
+    this.tcgProductForms = [
+      'tcg', 'trading card', 'booster box', 'booster pack', 'booster tin', 'booster bundle',
+      'elite trainer', 'etb', 'collection box', 'premium collection', 'ex box', 'ex boxes',
+      'card game', 'tin', 'blister',
+    ];
+    // Kept for the sitemap/slug paths, which match against URL slugs rather than titles.
     this.tcgNameKeywords = [
       'pokemon tcg', 'pokémon tcg', 'tcg:', 'trading card', 'booster box', 'booster pack',
       'booster tin', 'booster bundle', 'elite trainer', 'etb', 'collection box',
@@ -100,6 +113,22 @@ class CostcoAdapter extends BaseAdapter {
       this.knownProductIds.add(id);
     }
     this._deriveTiming();
+  }
+
+  /**
+   * A tracked game AND a card product form — both, not either.
+   *
+   * Costco's catalogue is broad enough that each half alone is wrong. Matching only the FORM
+   * tracked "Magic: The Gathering — TMNT Booster Tin Collection" and "Upper Deck Golf Trading
+   * Card Blaster Box", neither of which is a game we monitor. Matching only the FRANCHISE
+   * would track a Nintendo Switch Pokemon game, a LEGO Pikachu set, a Toniebox figure and a
+   * $7,299 Pokemon pinball machine — all of which were sitting in the cache from before the
+   * name filter existed.
+   */
+  _isTrackedCardProduct(title) {
+    const t = String(title || '').toLowerCase();
+    if (!this.tcgGameNames.some((g) => t.includes(g))) return false;
+    return this.tcgProductForms.some((f) => t.includes(f));
   }
 
   _deriveTiming() {
@@ -191,7 +220,7 @@ class CostcoAdapter extends BaseAdapter {
       const id = String(p.name || '').split('/products/').pop();
       const title = p.title;
       if (!id || !title) continue;
-      if (!this.tcgNameKeywords.some((kw) => title.toLowerCase().includes(kw))) continue;
+      if (!this._isTrackedCardProduct(title)) continue;
       if (!isTCGProduct(title)) continue;
 
       const inv = inventory.get(id) || {};
