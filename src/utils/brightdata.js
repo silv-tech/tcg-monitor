@@ -27,11 +27,17 @@ const ZONE = process.env.BRIGHTDATA_ZONE || '';
 // path to Bright Data is slower still. 75s clipped that tail.
 const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 110000;
 
-// Retrying a TIMEOUT just spends the whole budget twice to fail twice. Retrying an EMPTY is
-// worth it: those come back in seconds and succeeded immediately on the next try in every
-// observed case. So a retry only happens when the first attempt failed FAST, which is the
-// signature of an empty rather than a slow block.
-const RETRY_ONLY_IF_FASTER_THAN_MS = 40000;
+// Retry policy, by cause rather than by clock.
+//
+// The first version retried only failures faster than 40s, on the assumption that an empty
+// body comes back quickly. Instrumenting production disproved that: every failure was an
+// empty body, and they took 59-99s. So the rule skipped precisely the cases a retry fixes.
+//
+// An empty body is Bright Data giving up internally and is worth another attempt. Our own
+// timeout is not — repeating it produces the same timeout and doubles the wait for nothing.
+// This is only affordable because these checks now run off the poll path, so a slow retry
+// delays nothing, and because Bright Data bills successful responses only.
+const RETRYABLE = new Set(['empty_body', 'short_body', 'network_error']);
 
 // 2 of 5 first attempts came back HTTP 200 with a ZERO-length body — not a block, just
 // nothing. Both succeeded on the next try, so one retry is the difference between a 60% and
@@ -65,6 +71,7 @@ async function unlock(url, opts = {}) {
   const { timeoutMs = TIMEOUT_MS, attempts = MAX_ATTEMPTS, label = 'brightdata' } = opts;
 
   usage.calls++;
+  let lastReason = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const started = Date.now();
     const attemptStarted = started;
@@ -89,13 +96,16 @@ async function unlock(url, opts = {}) {
       const ms = Date.now() - started;
       if (!body || body.length === 0) {
         usage.empties++;
+        lastReason = 'empty_body';
         noteFailure('empty_body', { status: res.status, ms, label });
       } else if (!res.ok) {
         usage.failures++;
         // The body of a non-200 is Bright Data telling us why; keep a slice of it.
-        noteFailure('http_' + res.status, { status: res.status, ms, label, body: body.slice(0, 160) });
+        lastReason = 'http_' + res.status;
+        noteFailure(lastReason, { status: res.status, ms, label, body: body.slice(0, 160) });
       } else {
         usage.failures++;
+        lastReason = 'short_body';
         noteFailure('short_body', { status: res.status, ms, label, bytes: body.length });
       }
       logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} — HTTP ${res.status}, ${body.length}b in ${ms}ms`);
@@ -106,13 +116,11 @@ async function unlock(url, opts = {}) {
       // A TimeoutError here is OUR deadline, not Bright Data refusing — worth separating,
       // because the fix for one is a longer ceiling and for the other is a different vendor.
       const reason = /timeout|aborted/i.test(err.message || '') ? 'our_timeout' : 'network_error';
+      lastReason = reason;
       noteFailure(reason, { ms, label, message: String(err.message).slice(0, 120) });
       logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} failed after ${ms}ms: ${err.message}`);
     }
-    // Only retry a FAST failure. A slow one is a timeout, and repeating it would burn the
-    // caller's entire budget to fail a second time in exactly the same way.
-    const elapsed = Date.now() - attemptStarted;
-    if (attempt < attempts && elapsed < RETRY_ONLY_IF_FASTER_THAN_MS) {
+    if (attempt < attempts && RETRYABLE.has(lastReason)) {
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       continue;
     }

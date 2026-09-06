@@ -108,6 +108,41 @@ class PokemonCenterAdapter extends BaseAdapter {
    * Kept in Redis under one key rather than per-product: it is written once per poll at most,
    * and a single blob avoids 1,195 round trips.
    */
+  /**
+   * Run paid availability checks outside the poll.
+   *
+   * Free to be slow and to retry, because nothing is waiting on it. Every observed Bright
+   * Data failure was an empty body after 59-99s, and those succeed on a second attempt —
+   * the retry that could never fit inside a poll fits trivially here.
+   */
+  async _runChecks(targets) {
+    let checked = 0;
+    const failureCounts = {};
+    for (const sku of targets) {
+      const meta = this.sitemapProducts.get(sku);
+      if (!meta) continue;
+      if (this.watchlist.has(sku)) this._watchlistCheckedAt.set(sku, Date.now());
+      try {
+        const { data, failReason } = await this.checkProductAvailability(sku, meta);
+        if (data) {
+          data.checkedAt = Date.now();
+          this.availabilityCache.set(sku, data);
+          checked++;
+        } else if (failReason) {
+          failureCounts[failReason] = (failureCounts[failReason] || 0) + 1;
+        }
+      } catch (err) {
+        const reason = classifyError(err);
+        failureCounts[reason] = (failureCounts[reason] || 0) + 1;
+      }
+      await sleep(500 + Math.floor(Math.random() * 1000));
+    }
+    if (checked > 0) await this._saveAvailability();
+    const failSummary = Object.entries(failureCounts).map(([k, v]) => `${k}=${v}`).join(' ');
+    logger.info(`Pokemon Center: background checks — ${checked}/${targets.length} succeeded` +
+      `${failSummary ? ` (${failSummary})` : ''}, ${this.availabilityCache.size} products with known stock`);
+  }
+
   async _loadAvailability() {
     if (this._availabilityLoaded) return;
     this._availabilityLoaded = true;
@@ -233,51 +268,33 @@ class PokemonCenterAdapter extends BaseAdapter {
       throw new Error('No TCG products in sitemap cache');
     }
 
-    // Phase 2: paid availability checks, only for newly listed and watchlisted products, and
-    // only when the paid-check clock says so — the free sitemap phase above runs far more often.
+    // Phase 2: paid availability checks, kicked off in the BACKGROUND.
+    //
+    // These used to run inside the poll, and that was the wrong shape. Bright Data answers
+    // Pokemon Center in 16-99s, and instrumenting the failures showed why: every single one
+    // was HTTP 200 with an empty body after 59-99 seconds. Not our timeout — Bright Data
+    // giving up internally. A retry fixes those, but a retry could not fit inside a poll that
+    // also has to stay fast, so the fix kept colliding with the deadline: 120s adapter
+    // timeouts, then a 70s budget, then 150s, each one trading coverage against latency.
+    //
+    // Decoupling removes the trade entirely. The sitemap phase — free, fast, and the only
+    // thing that spots a NEW listing — returns immediately with whatever availability is
+    // cached. The paid check updates that cache whenever it finishes, however long it takes.
     await this._loadAvailability();
 
     const paidDue = Date.now() - this._lastPaidCheckAt >= this.paidCheckIntervalMs;
-    const targets = paidDue ? this._selectCheckTargets() : [];
-    if (targets.length > 0) this._lastPaidCheckAt = Date.now();
-    const batchSize = targets.length;
-
-    // The paid checks run under a HARD time budget, because they are now slow enough to kill
-    // the poll. Bright Data averages ~50s per page and the scheduler aborts an adapter at
-    // 120s, so three sequential checks with retries timed the whole poll out — 4 consecutive
-    // "Adapter timeout after 120000ms", and nothing was ever saved. The sitemap phase above
-    // is the part that must always complete; availability is cached and can finish next poll.
-    const CHECK_BUDGET_MS = Number(process.env.PC_CHECK_BUDGET_MS) || 150000;
-    const checkDeadline = Date.now() + CHECK_BUDGET_MS;
-
-    let checked = 0;
-    const failureCounts = {};
-    for (let i = 0; i < batchSize; i++) {
-      if (Date.now() >= checkDeadline) {
-        // Whatever is left keeps its place in the rotation and is picked up next poll.
-        logger.info(`Pokemon Center: check budget spent after ${i}/${batchSize} — remaining deferred`);
-        break;
+    if (paidDue && !this._checkRunning) {
+      const targets = this._selectCheckTargets();
+      if (targets.length > 0) {
+        this._lastPaidCheckAt = Date.now();
+        this._checkRunning = true;
+        // Deliberately not awaited.
+        this._runChecks(targets)
+          .catch(err => logger.warn(`Pokemon Center: background check failed: ${err.message}`))
+          .finally(() => { this._checkRunning = false; });
       }
-      const sku = targets[i];
-      const meta = this.sitemapProducts.get(sku);
-      if (!meta) continue;
-      if (this.watchlist.has(sku)) this._watchlistCheckedAt.set(sku, Date.now());
-      try {
-        const { data, failReason } = await this.checkProductAvailability(sku, meta);
-        if (data) {
-          data.checkedAt = Date.now();
-          this.availabilityCache.set(sku, data);
-          checked++;
-        } else if (failReason) {
-          failureCounts[failReason] = (failureCounts[failReason] || 0) + 1;
-        }
-      } catch (err) {
-        const reason = classifyError(err);
-        failureCounts[reason] = (failureCounts[reason] || 0) + 1;
-      }
-      // Small delay between checks to avoid triggering rate limits
-      if (i < batchSize - 1) await sleep(500 + Math.floor(Math.random() * 1000));
     }
+    const checked = 0;
 
     // Persist only when this poll actually learned something, so an idle poll costs no write.
     if (checked > 0) await this._saveAvailability();
