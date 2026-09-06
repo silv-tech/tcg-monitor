@@ -129,7 +129,7 @@ describe('amazon: books about the hobby are not sealed product', () => {
  * The scope test therefore runs against the cache as well, using the real implementation.
  */
 describe('amazon: the cache is re-scoped, not just new discoveries', () => {
-  const { isInScopeName } = require('../src/adapters/amazon');
+  const { isInScopeName } = require('../src/utils/scope');
 
   const evicted = [
     ['B0GX7S11S3', 'Trading Card Game 5-Pack Wave 1 Box | Psychedelic Universe'],

@@ -10,49 +10,22 @@ const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
 // Game names that we track — Amazon results MUST match one of these.
 // Scoped to Pokemon and One Piece to match every other adapter.
-const GAME_NAMES = [
-  'pokemon', 'pokémon', 'one piece',
-];
-
-// Accessories — never alert on these even if they mention a game name
-const ACCESSORY_KEYWORDS = [
-  'deck box', 'deckbox', 'playmat', 'play mat', 'sleeves', 'card sleeves',
-  'penny sleeves', 'card protector', 'protector case', 'toploader', 'top loader',
-  'display case', 'acrylic', 'portfolio', 'binder', 'card binder', 'album',
-  'card holder', 'card organizer', 'storage box', 'card storage',
-  'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box', 'token deck',
-  'divider', 'accessories',
-];
-
-// Books ABOUT the hobby. They carry a game name and card wording, so game+form alone lets
-// them through, and most have ordinary ASINs rather than an ISBN. Six of these alerted on
-// 2026-09-05, including "Pokemon TCG Collector & Investor Guide 2026" and an Italian one.
-const PRINT_KEYWORDS = [
-  'investing', 'investor', 'for beginners', 'complete guide', 'collector guide',
-  'character guide', 'price guide', 'value guide', 'collezionare', 'paperback', 'hardcover',
-];
+// One shared scope rule across every retailer — see src/utils/scope.js. It used to live
+// here, which is exactly why Walmart never had one.
+const {
+  GAME_NAMES,
+  ACCESSORY_KEYWORDS,
+  PRINT_KEYWORDS,
+  isInScopeName,
+} = require('../utils/scope');
 
 // If more than this share of the stored catalogue looks out of scope, the scope test is the
-// thing that is wrong. The real run removed 159 of 371 — 43%, much closer to this ceiling
-// than the 20% a "missing game name" count suggested, because most of the junk DID name a
-// game and was caught as an accessory or a book instead. Anything stricter than 0.5 would
-// have aborted the legitimate cleanup, so raise the threshold rather than tighten it if a
-// future purge trips this.
-const PURGE_SAFETY_LIMIT = 0.5;
-
-/**
- * Scope test applied to a product NAME, so it can be re-run against the cache and not only
- * against freshly parsed search cards. Everything tracked must name a game we follow and
- * must not be an accessory, a book, or a sponsored slot.
- */
-function isInScopeName(name) {
-  const lower = String(name || '').toLowerCase();
-  if (!lower) return false;
-  if (/^sponsored ad\b/.test(lower)) return false;
-  if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
-  if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
-  return GAME_NAMES.some(g => lower.includes(g));
-}
+// thing that is wrong. Amazon's real run removed 159 of 371 (43%); Walmart's first run has
+// 190 of 360 (53%), which is genuine — a filter applied for the first time to a catalogue
+// that never had one. So this guards against a total regression, not a large cleanup: it
+// aborts only when nearly everything fails, or when too little would be left standing.
+const PURGE_MAX_SHARE = 0.9;
+const PURGE_MIN_KEPT = 25;
 
 function decodeEntities(str) {
   return str
@@ -542,39 +515,6 @@ class AmazonAdapter extends BaseAdapter {
    * Monitor: check known ASINs via the AOD offer endpoint (FREE).
    * Returns cached data for ASINs where the fetch fails (prevents false OOS).
    */
-  /**
-   * Delete persisted products that the scope test rejects.
-   *
-   * Deliberately conservative. It only removes entries that HAVE a name and fail the test —
-   * a nameless or half-written entry is left alone rather than guessed at — and it aborts
-   * without deleting anything if the proportion is implausibly high, because "almost
-   * everything is out of scope" is far more likely to mean the scope test regressed than
-   * that the catalogue really is that dirty. Wrongly deleting the catalogue would re-fire
-   * NEW_SKU for every product on rediscovery, which is the exact flood this is cleaning up.
-   */
-  async _purgeOutOfScopeState() {
-    const all = await state.getAllProducts(this.id);
-    const entries = Object.entries(all || {});
-    if (entries.length === 0) return;
-
-    const doomed = entries.filter(([, p]) => p && p.name && !isInScopeName(p.name));
-    if (doomed.length === 0) return;
-
-    const share = doomed.length / entries.length;
-    if (share > PURGE_SAFETY_LIMIT) {
-      logger.error(`Amazon: refusing to purge ${doomed.length}/${entries.length} products ` +
-        `(${Math.round(share * 100)}% > ${Math.round(PURGE_SAFETY_LIMIT * 100)}%) — the scope test looks wrong, not the data`);
-      return;
-    }
-
-    for (const [sku, p] of doomed) {
-      await state.deleteProduct(this.id, sku).catch(err =>
-        logger.warn(`Amazon: failed to purge ${sku}: ${err.message}`));
-      logger.info(`Amazon: purged out-of-scope product ${sku} — ${String(p.name).slice(0, 70)}`);
-    }
-    logger.warn(`Amazon: purged ${doomed.length} out-of-scope products from state (${entries.length - doomed.length} kept)`);
-  }
-
   async _monitorKnownAsins(products) {
     const asins = [...this._knownProducts.keys()];
     if (asins.length === 0) {
@@ -756,5 +696,3 @@ class AmazonAdapter extends BaseAdapter {
 }
 
 module.exports = AmazonAdapter;
-module.exports.isInScopeName = isInScopeName;
-module.exports.PURGE_SAFETY_LIMIT = PURGE_SAFETY_LIMIT;

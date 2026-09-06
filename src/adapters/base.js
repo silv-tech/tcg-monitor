@@ -5,6 +5,8 @@ const { getProxyUrl, getNextIspProxy, recordRequest, markProxyBlocked, markProxy
 const productsConfig = require('../config/products.json');
 const { classifyCategory, isTCGProduct } = require('../utils/helpers');
 const scraperApi = require('../utils/scraper-api');
+const state = require('../core/state');
+const { isInScopeName } = require('../utils/scope');
 
 let browserModule;
 try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
@@ -286,6 +288,49 @@ class BaseAdapter {
         throw new Error(`${this.name}: all fetch methods failed — cookie: ${cookieErr.message}, browser: ${browserErr.message}`);
       }
     }
+  }
+
+  /**
+   * Delete persisted products that the shared scope test rejects.
+   *
+   * Filtering discovery is not enough on its own: products written by earlier builds survive
+   * restarts and redeploys, and a cached entry that is re-checked every poll has its lastSeen
+   * refreshed, so an "unseen for 24h" prune can never reach it. Amazon carried 159 such rows
+   * out of 371; Walmart carried 190 out of 360 and alerted on 49 of them.
+   *
+   * Deliberately conservative, because wrongly deleting a catalogue would re-fire NEW_SKU for
+   * every product on rediscovery — the exact flood this cleans up:
+   *   - only entries that HAVE a name and fail the test are removed; a nameless or
+   *     half-written entry is left alone rather than guessed at
+   *   - it aborts if nearly everything fails, or if too little would be left standing
+   *
+   * The abort guards a total regression rather than a large cleanup. A first filter applied
+   * to a catalogue that never had one legitimately removes a lot: Walmart's real share is 53%.
+   */
+  async _purgeOutOfScopeState(opts = {}) {
+    const { maxShare = 0.9, minKept = 25 } = opts;
+    const all = await state.getAllProducts(this.id);
+    const entries = Object.entries(all || {});
+    if (entries.length === 0) return { purged: 0, kept: 0, aborted: false };
+
+    const doomed = entries.filter(([, p]) => p && p.name && !isInScopeName(p.name));
+    if (doomed.length === 0) return { purged: 0, kept: entries.length, aborted: false };
+
+    const kept = entries.length - doomed.length;
+    const share = doomed.length / entries.length;
+    if (share > maxShare || kept < minKept) {
+      logger.error(`${this.name}: refusing to purge ${doomed.length}/${entries.length} products ` +
+        `(${Math.round(share * 100)}%, ${kept} would remain) — the scope test looks wrong, not the data`);
+      return { purged: 0, kept: entries.length, aborted: true };
+    }
+
+    for (const [sku, p] of doomed) {
+      await state.deleteProduct(this.id, sku).catch(err =>
+        logger.warn(`${this.name}: failed to purge ${sku}: ${err.message}`));
+      logger.info(`${this.name}: purged out-of-scope product ${sku} — ${String(p.name).slice(0, 70)}`);
+    }
+    logger.warn(`${this.name}: purged ${doomed.length} out-of-scope products from state (${kept} kept)`);
+    return { purged: doomed.length, kept, aborted: false };
   }
 
   classify(product) {

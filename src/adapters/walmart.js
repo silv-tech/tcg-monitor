@@ -7,6 +7,7 @@ const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const { hashSku } = require('../utils/helpers');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
+const { isInScopeName, repairMojibake } = require('../utils/scope');
 const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
 // Persisted-query hash and platform version of the product page's DynamicItemById call.
@@ -512,6 +513,38 @@ class WalmartAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Walmart's search queries are already game-specific ("pokemon tcg", "one piece card game"),
+   * but Walmart answers a query for a card game with every card game it sells. With no scope
+   * test of its own, this adapter tracked 190 out-of-scope products out of 360 — UNO, Jenga,
+   * Monopoly, Twister, Cards Against Humanity, He-Man figures, Dragon Ball — and alerted on 49.
+   *
+   * Names are mojibake-repaired first. Two real products were stored as "PokÃ©mon Trading Card
+   * Game: Sword & Shieldâ€”Evolving Skies", and "pokã©mon" matches no game name, so filtering
+   * without the repair would have deleted legitimate Pokemon products as junk. The repaired
+   * name is kept, which also fixes how those two read in an alert.
+   */
+  _applyScope(products) {
+    const kept = {};
+    let dropped = 0;
+    for (const [sku, p] of Object.entries(products || {})) {
+      if (!p) continue;
+      const name = repairMojibake(p.name);
+      if (!isInScopeName(name)) { dropped++; continue; }
+      kept[sku] = name === p.name ? p : { ...p, name };
+    }
+    if (dropped > 0) logger.debug(`Walmart: ${dropped} out-of-scope products filtered this poll`);
+
+    // Rows written before this filter existed survive restarts, and a re-checked row keeps
+    // refreshing its own lastSeen, so nothing else would ever remove them.
+    if (!this._scopePurgeDone) {
+      this._scopePurgeDone = true;
+      this._purgeOutOfScopeState().catch(err =>
+        logger.warn(`Walmart: out-of-scope state purge failed: ${err.message}`));
+    }
+    return kept;
+  }
+
   async fetchProducts() {
     // Overlap guard — if previous cycle is still running, skip
     if (this._polling) {
@@ -566,7 +599,7 @@ class WalmartAdapter extends BaseAdapter {
         this._retryInBackground(failedQueries);
       }
 
-      return products;
+      return this._applyScope(products);
     } finally {
       this._polling = false;
     }
