@@ -9,6 +9,8 @@
  * nothing. A per-retailer rule is a rule that drifts; this one is shared deliberately.
  */
 
+const { isTCGProduct } = require('./helpers');
+
 const GAME_NAMES = ['pokemon', 'pokémon', 'one piece'];
 
 // Accessories — never alert on these even if they name a game
@@ -80,12 +82,17 @@ function repairMojibake(str) {
  * sponsored ad slot. Names are mojibake-repaired first.
  */
 function isInScopeName(name) {
-  const lower = repairMojibake(name).toLowerCase();
+  const repaired = repairMojibake(name);
+  const lower = repaired.toLowerCase();
   if (!lower) return false;
   if (/^sponsored ad\b/.test(lower)) return false;
   if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
   if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
-  return GAME_NAMES.some(g => lower.includes(g));
+  if (!GAME_NAMES.some(g => lower.includes(g))) return false;
+  // Naming a game is not enough — it also has to BE a card product. Amazon always applied
+  // this as a separate step and Walmart never did, which is how "Pokémon™ Violet (Nintendo
+  // Switch)" and a shelf of UNO variants stayed in scope after the first cleanup.
+  return isTCGProduct(repaired);
 }
 
 module.exports = {

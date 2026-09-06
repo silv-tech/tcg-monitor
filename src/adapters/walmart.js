@@ -524,7 +524,7 @@ class WalmartAdapter extends BaseAdapter {
    * without the repair would have deleted legitimate Pokemon products as junk. The repaired
    * name is kept, which also fixes how those two read in an alert.
    */
-  _applyScope(products) {
+  _scopeFilter(products) {
     const kept = {};
     let dropped = 0;
     for (const [sku, p] of Object.entries(products || {})) {
@@ -533,7 +533,12 @@ class WalmartAdapter extends BaseAdapter {
       if (!isInScopeName(name)) { dropped++; continue; }
       kept[sku] = name === p.name ? p : { ...p, name };
     }
-    if (dropped > 0) logger.debug(`Walmart: ${dropped} out-of-scope products filtered this poll`);
+    if (dropped > 0) logger.debug(`Walmart: ${dropped} out-of-scope products filtered`);
+    return kept;
+  }
+
+  _applyScope(products) {
+    const kept = this._scopeFilter(products);
 
     // Rows written before this filter existed survive restarts, and a re-checked row keeps
     // refreshing its own lastSeen, so nothing else would ever remove them.
@@ -645,8 +650,11 @@ class WalmartAdapter extends BaseAdapter {
           this._processSearchItems(items, recovered);
         }
 
-        // Save recovered products directly to Redis state for next diff cycle
-        const entries = Object.entries(recovered);
+        // Save recovered products directly to Redis state for next diff cycle.
+        // Scoped here too: this path writes straight to Redis and never passes through
+        // fetchProducts, so without it the retry quietly re-seeded the very rows the purge
+        // had just deleted — ten of them were back within minutes of the first cleanup.
+        const entries = Object.entries(this._scopeFilter(recovered));
         if (entries.length > 0) {
           const pipeline = state.getRedis().pipeline();
           for (const [sku, product] of entries) {

@@ -114,6 +114,38 @@ describe('scope: real product is kept across every retailer', () => {
   });
 });
 
+/**
+ * Naming a game was never sufficient — the thing also has to BE a card product. Amazon
+ * always applied that as a separate step and Walmart never did, so after Walmart's first
+ * cleanup ten rows were still in scope: a Nintendo Switch game and a shelf of UNO variants,
+ * all of which legitimately contain "Pokémon" or read as a "card game".
+ */
+describe('scope: naming a game is not enough, it must be a card product', () => {
+  const rejected = [
+    'Pokémon™ Violet (Nintendo Switch)',
+    'Pokémon Legends: Z-A - Nintendo Switch 2',
+    'UNO Card Game',
+    'Phase 10 Card Game',
+    'Cards Against Humanity Everything Box',
+    "Liar's UNO Card Game for Adults, Kids, Families",
+    'UNO Truth Adults Only Card Game, Play Anywhere',
+    'Pokemon Home Edition Plus Pinball Game',
+    'LEGO Pokémon Pikachu and Poké Ball',
+  ];
+  for (const name of rejected) {
+    test('rejects ' + name.slice(0, 46), () => assert.strictEqual(isInScopeName(name), false));
+  }
+
+  test('these all name a game, which is exactly why the game check alone let them in', () => {
+    const GAMES = ['pokemon', 'pokémon', 'one piece'];
+    const survivors = ['Pokémon™ Violet (Nintendo Switch)', 'LEGO Pokémon Pikachu and Poké Ball'];
+    for (const n of survivors) {
+      assert.ok(GAMES.some((g) => n.toLowerCase().includes(g)), n + ' does name a game');
+      assert.strictEqual(isInScopeName(n), false, n + ' must still be rejected');
+    }
+  });
+});
+
 describe('scope: one rule, not one per adapter', () => {
   test('amazon and walmart resolve the identical function', () => {
     const shared = require('../src/utils/scope').isInScopeName;
