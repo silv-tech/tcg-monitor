@@ -24,6 +24,28 @@ const ACCESSORY_KEYWORDS = [
   'divider', 'accessories',
 ];
 
+// Books ABOUT the hobby. They carry a game name and card wording, so game+form alone lets
+// them through, and most have ordinary ASINs rather than an ISBN. Six of these alerted on
+// 2026-09-05, including "Pokemon TCG Collector & Investor Guide 2026" and an Italian one.
+const PRINT_KEYWORDS = [
+  'investing', 'investor', 'for beginners', 'complete guide', 'collector guide',
+  'character guide', 'price guide', 'value guide', 'collezionare', 'paperback', 'hardcover',
+];
+
+/**
+ * Scope test applied to a product NAME, so it can be re-run against the cache and not only
+ * against freshly parsed search cards. Everything tracked must name a game we follow and
+ * must not be an accessory, a book, or a sponsored slot.
+ */
+function isInScopeName(name) {
+  const lower = String(name || '').toLowerCase();
+  if (!lower) return false;
+  if (/^sponsored ad\b/.test(lower)) return false;
+  if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
+  if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
+  return GAME_NAMES.some(g => lower.includes(g));
+}
+
 function decodeEntities(str) {
   return str
     .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
@@ -223,6 +245,19 @@ class AmazonAdapter extends BaseAdapter {
       }
     }
 
+    // Re-apply the scope test to the CACHE, not just to newly discovered cards. A cached
+    // ASIN is re-checked every poll, and that re-check refreshes lastSeen, so the 24h prune
+    // above can never reach it — an ASIN that should never have been tracked would alert
+    // forever. This is what kept B0GX7S11S3 ("Psychedelic Universe", no franchise word)
+    // firing the same price drop 21 times until the limiter muted the retailer.
+    for (const [asin, data] of this._knownProducts) {
+      if (!isInScopeName(data.name)) {
+        logger.warn(`Amazon: dropping out-of-scope cached ASIN ${asin} — ${data.name}`);
+        this._knownProducts.delete(asin);
+        delete products[asin];
+      }
+    }
+
     // Back off the enrichment sweep while search is struggling — they share a pool
     const searchRate = this._searchSuccessRate();
     if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs && (searchRate ?? 1) >= 0.5) {
@@ -346,8 +381,15 @@ class AmazonAdapter extends BaseAdapter {
     for (const card of cards) {
       const asin = (card.match(/data-csa-c-item-id="amzn1\.asin\.([A-Z0-9]{10})"/) || [])[1];
       if (!asin) continue;
+      // An all-digit "ASIN" is an ISBN — a book about the game, not sealed product.
+      // 1604382643 ("Pokemon Deluxe Character Guide") alerted this way on 2026-09-05.
+      if (/^\d{10}$/.test(asin)) continue;
       const ariaName = (card.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
       if (!ariaName) continue;
+      // Sponsored placements render inside the result grid and their aria-label carries the
+      // ad markup verbatim, which is how "Sponsored Ad - Title: Star Wars: Unlimited..."
+      // became an alert title. The slot is an ad for another product, not a search result.
+      if (/^sponsored ad\b/i.test(ariaName.trim())) continue;
       let name = ariaName;
       // Amazon's aria-label drops an accented brand prefix, so "Pokémon TCG: Mega
       // Evolution—Pitch Black Elite Trainer Box" arrives as "TCG: Mega Evolution—Pitch Black
@@ -361,11 +403,15 @@ class AmazonAdapter extends BaseAdapter {
       // Binder" — so anything that is not a strict prefix-extension is ignored. By
       // construction this can only prepend a few characters, never swap in another product.
       const altRaw = (card.match(/class="s-image"[^>]*alt="([^"]{8,250})"/) || [])[1];
+      let altAccepted = '';
       if (altRaw) {
         const alt = decodeEntities(altRaw.trim());
         const bare = decodeEntities(ariaName.trim());
         const prefixLen = alt.length - bare.length;
-        if (prefixLen > 0 && prefixLen <= 30 && alt.endsWith(bare)) name = alt;
+        if (prefixLen > 0 && prefixLen <= 30 && alt.endsWith(bare)) {
+          name = alt;
+          altAccepted = alt;
+        }
       }
       // Scope the price to the card's OWN price block. A card's slice routinely contains
       // prices belonging to other ASINs — sponsored placements and related-item strips render
@@ -382,11 +428,17 @@ class AmazonAdapter extends BaseAdapter {
       out.push({
         asin,
         name: decodeEntities(name.trim()),
-        // The raw image alt, carried through so the game filter can see the FULL title.
+        // The image alt, carried through so the game filter can see the FULL title:
         // Amazon's aria-label drops an accented brand prefix, turning "Pokémon TCG: X" into
         // "TCG: X" — a title with no franchise word in it. Without the alt, requiring the
         // game name in the title would throw away real Pokemon products.
-        _alt: altRaw ? decodeEntities(altRaw.trim()) : '',
+        //
+        // Only the VALIDATED alt is carried. The raw alt used to be stored here, which
+        // handed the game filter the exact string the name logic above had just rejected as
+        // belonging to a neighbouring card. That is how "Trading Card Game 5-Pack Wave 1 Box
+        // | Psychedelic Universe" — no franchise word of its own — borrowed a neighbour's
+        // "Pokemon" and alerted 21 times on 2026-09-05, tripping the alert limiter.
+        _alt: altAccepted,
         price,
         inStock: !!price && !oos,
         image: (card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com[^"]+)"/) || [])[1] || '',
@@ -405,6 +457,7 @@ class AmazonAdapter extends BaseAdapter {
     if (!item.name || !item.asin) return null;
     const lower = item.name.toLowerCase();
     if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return null;
+    if (PRINT_KEYWORDS.some(k => lower.includes(k))) return null;
     if (!isTCGProduct(item.name)) return null;
 
     // The product must actually be one of the games we track.
@@ -649,3 +702,4 @@ class AmazonAdapter extends BaseAdapter {
 }
 
 module.exports = AmazonAdapter;
+module.exports.isInScopeName = isInScopeName;
