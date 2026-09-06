@@ -22,10 +22,11 @@ const ZONE = process.env.BRIGHTDATA_ZONE || '';
 
 // Measured worst case was 44s; the ceiling is generous because a slow success is still far
 // cheaper than a retry, and the caller is a background rotation rather than a drop race.
-// Sized against measured behaviour, not a guess. Real rotation URLs fetched from a fast
-// connection ranged 16.4s to 58.7s — a long tail, not a stable latency — and production's
-// path to Bright Data is slower still. 75s clipped that tail.
-const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 110000;
+// Bright Data support: the client timeout must be at least 180s, because observed unlock
+// waits on protected targets run 30-150 seconds. Our 110s ceiling was cutting off attempts
+// that were still progressing — a self-inflicted share of the failures. Safe to be this
+// generous only because these checks run off the poll path, so nothing waits on them.
+const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 180000;
 
 // Retry policy, by cause rather than by clock.
 //
@@ -37,13 +38,17 @@ const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 110000;
 // timeout is not — repeating it produces the same timeout and doubles the wait for nothing.
 // This is only affordable because these checks now run off the poll path, so a slow retry
 // delays nothing, and because Bright Data bills successful responses only.
-// Retry only what a retry can actually change.
-//   dd_hardblock  — the exit peer is blocked; an immediate retry reuses the same situation
-//   expect_element — a selector that page never renders will not appear on a second try
-//   resolve_failed_* — the captcha solver already failed on this page
-// Retrying those burns time for a guaranteed identical failure. Transient shapes still retry.
-const RETRYABLE = new Set(['empty_body', 'short_body', 'network_error']);
-const NEVER_RETRY = new Set(['dd_hardblock', 'expect_element']);
+// Retry policy, corrected against Bright Data's documented behaviour.
+//
+// Each request uses a DIFFERENT peer, so a failure caused by the peer or the unlock attempt
+// is worth retrying — that is the documented guidance, and it is the opposite of what I had
+// assumed for dd_hardblock. resolve_failed_* is explicitly retryable and a later attempt can
+// succeed; it does not mean the URL is unfetchable.
+//
+// expect_element is the exception: the docs say it does not improve with retries, and a
+// selector the page never renders will not appear on a second attempt.
+const NEVER_RETRY = [/^expect_element/];
+const isRetryable = (reason) => !!reason && !NEVER_RETRY.some((re) => re.test(reason));
 
 // 2 of 5 first attempts came back HTTP 200 with a ZERO-length body — not a block, just
 // nothing. Both succeeded on the next try, so one retry is the difference between a 60% and
@@ -86,7 +91,9 @@ async function unlock(url, opts = {}) {
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-        body: JSON.stringify({ zone: ZONE, url, format: 'raw' }),
+        // debug=true returns x-brd-debug and a req_id, which is what support asks for when
+        // escalating a specific persistently-failing URL.
+        body: JSON.stringify({ zone: ZONE, url, format: 'raw', debug: true }),
         signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await res.text();
@@ -115,6 +122,7 @@ async function unlock(url, opts = {}) {
         noteFailure(lastReason, {
           status: res.status, upstream: brdStatus, ms, label,
           brdError: brdError || null,
+          reqId: res.headers.get('x-brd-req-id') || res.headers.get('req_id') || null,
           url: String(targetUrl).slice(-60),
         });
       } else if (!res.ok) {
@@ -139,7 +147,7 @@ async function unlock(url, opts = {}) {
       noteFailure(reason, { ms, label, message: String(err.message).slice(0, 120) });
       logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} failed after ${ms}ms: ${err.message}`);
     }
-    if (attempt < attempts && RETRYABLE.has(lastReason) && !NEVER_RETRY.has(lastReason)) {
+    if (attempt < attempts && isRetryable(lastReason)) {
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       continue;
     }
