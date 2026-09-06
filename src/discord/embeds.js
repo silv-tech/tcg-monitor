@@ -208,7 +208,10 @@ function buildAlertEmbed(event, tier) {
     // Offer Id (Amazon OLID or Walmart offerId — per-seller, used for ATC)
     const offerId = (isAmazon && event._offerListingId) ? event._offerListingId : product._offerId;
     if (offerId) {
-      embed.addFields({ name: 'Offer Id', value: `\`${offerId}\``, inline: false });
+      // Shown percent-encoded, which is the form the token is actually usable in. An Amazon
+      // OLID is base64 and contains + / and =; pasted raw into a URL the + decodes to a
+      // space and Amazon resolves a different offer than the one this alert is about.
+      embed.addFields({ name: 'Offer Id', value: `\`${encodeURIComponent(offerId)}\``, inline: false });
     }
 
     // One Click Checkout

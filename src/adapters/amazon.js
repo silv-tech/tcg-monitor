@@ -149,8 +149,16 @@ class AmazonAdapter extends BaseAdapter {
     const name = titleMatch ? decodeEntities(titleMatch[1].trim()) : null;
 
     // Buy-box offer id — doubles as the "is anything purchasable" signal
+    // The OLID is a base64 token containing + / and =, and Amazon emits it percent-encoded.
+    // It is stored DECODED — one canonical internal form — and re-encoded exactly once
+    // wherever it is put in a URL or shown for copying. Storing it encoded instead would
+    // double-encode at those sites (%2B -> %252B) and select a different offer.
+    // decodeURIComponent throws on a malformed escape, which would take out the whole parse.
     const olidMatch = html.match(/name="items\[0\.base\]\[offerListingId\]"\s*value="([^"]+)"/);
-    const olid = olidMatch ? decodeURIComponent(olidMatch[1]) : null;
+    let olid = null;
+    if (olidMatch) {
+      try { olid = decodeURIComponent(olidMatch[1]); } catch { olid = olidMatch[1]; }
+    }
 
     let price = null;
     const apexPrice = html.match(/apex-pricetopay-accessibility-label"[^>]*>\s*\$?([\d,]+\.\d{2})/);
