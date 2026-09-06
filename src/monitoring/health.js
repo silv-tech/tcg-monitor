@@ -32,6 +32,7 @@ async function checkHealth() {
   const overrides = await state.getRetailerOverrides();
   const retailers = base.map(r => ({ ...r, ...(overrides[r.id] || {}) }));
 
+  const composedLost = getComposition();
   const results = [];
 
   for (const retailer of retailers) {
@@ -46,6 +47,10 @@ async function checkHealth() {
     const zeroCount = zeroProductPolls.get(retailer.id) || 0;
     const staleDataCount = zeroFreshPolls.get(retailer.id) || 0;
     const quality = parseQuality.get(retailer.id) || { emptyPolls: 0, lastRatio: null };
+    // A category this store reliably carried has gone to zero — reported, but NOT counted
+    // as unhealthy: it needs a human to judge whether the store stopped stocking it or we
+    // stopped seeing it, and flipping the store unhealthy would mute nothing and help nobody.
+    const lostCategories = (composedLost[retailer.id] || []).map(c => c.game);
     const healthy = status.healthy && !isStale
       && zeroCount < ZERO_PRODUCT_THRESHOLD
       && staleDataCount < ZERO_FRESH_THRESHOLD
@@ -64,6 +69,7 @@ async function checkHealth() {
       servingStaleData: staleDataCount >= ZERO_FRESH_THRESHOLD,
       pricedRatio: quality.lastRatio,
       parserSuspect: quality.emptyPolls >= QUALITY_THRESHOLD,
+      missingCategories: lostCategories,
     });
   }
 
@@ -144,6 +150,105 @@ function recordParseQuality(retailerId, products, enabled = true) {
   parseQuality.set(retailerId, entry);
 }
 
+/**
+ * Composition canary — the check for a failure that leaves no trace.
+ *
+ * Every other signal here watches whether a poll WORKED. None of them can see a store that
+ * keeps working while quietly losing a whole category. On 2026-09-06 the string 'hat ' in the
+ * non-TCG list matched "Straw Hat Crew" and classified One Piece starter decks and booster
+ * boxes as clothing. Product counts stayed plausible, prices were fine, every check read
+ * green, and the only symptom was drops we never alerted on. A missed drop generates no error
+ * and no support ticket — the customer just stops seeing One Piece.
+ *
+ * So this watches the SHAPE of what we track rather than the size. Per retailer, per game:
+ * once a store has reliably carried a category, its disappearance is reported.
+ *
+ * Learned, never hardcoded. London Drugs genuinely sells no One Piece — verified against all
+ * 29,775 products in its sitemap — so a rule saying "every store must have both" would cry
+ * wolf forever. A category only becomes expected after it has been seen consistently.
+ *
+ * Reports only. Like speed-guard, it changes nothing: autotune already demonstrated that a
+ * controller free to act can act wrongly.
+ */
+const GAME_PATTERNS = {
+  pokemon: /pokemon|pokémon/i,
+  'one piece': /one piece/i,
+};
+const COMPOSITION_KEY = 'tcg:composition';
+const BASELINE_POLLS = 20;        // observations before a category counts as expected
+const MISSING_THRESHOLD = 10;     // consecutive polls at zero before we say it is gone
+const composition = new Map();    // retailerId → { [game]: { seen, typical, missingStreak } }
+let _compositionLoaded = false;
+
+/** Baselines survive restarts — otherwise a redeploy resets them and this never fires. */
+async function loadComposition() {
+  if (_compositionLoaded) return;
+  _compositionLoaded = true;
+  try {
+    const raw = await state.getRedis().get(COMPOSITION_KEY);
+    if (!raw) return;
+    for (const [id, games] of Object.entries(JSON.parse(raw))) composition.set(id, games);
+    logger.info(`Composition canary: restored baselines for ${composition.size} retailer(s)`);
+  } catch (err) {
+    logger.warn(`Composition canary: could not restore baselines: ${err.message}`);
+  }
+}
+
+async function persistComposition() {
+  try {
+    await state.getRedis().set(COMPOSITION_KEY, JSON.stringify(Object.fromEntries(composition)), 'EX', 86400 * 30);
+  } catch {
+    // Non-critical — the canary degrades to in-memory baselines
+  }
+}
+
+/**
+ * @param {string} retailerId
+ * @param {object} products - the poll's final product map
+ */
+function recordComposition(retailerId, products) {
+  const values = Object.values(products || {});
+  // A tiny result is a partial read, not a catalogue that lost a category.
+  if (values.length < MIN_SAMPLE) return;
+
+  const entry = composition.get(retailerId) || {};
+  for (const [game, re] of Object.entries(GAME_PATTERNS)) {
+    const count = values.filter(p => p && re.test(String(p.name || ''))).length;
+    const g = entry[game] || { seen: 0, typical: 0, missingStreak: 0 };
+
+    if (count > 0) {
+      g.seen++;
+      // Rolling high-water mark, so one thin poll cannot deflate what "normal" means.
+      g.typical = Math.max(g.typical, count);
+      if (g.missingStreak >= MISSING_THRESHOLD) {
+        logger.info(`COMPOSITION: ${retailerId} is carrying ${game} again (${count} products)`);
+      }
+      g.missingStreak = 0;
+    } else if (g.seen >= BASELINE_POLLS) {
+      // Only a category this store has reliably carried can go missing.
+      g.missingStreak++;
+      if (g.missingStreak === MISSING_THRESHOLD) {
+        logger.error(`COMPOSITION: ${retailerId} has tracked ZERO ${game} products for ${g.missingStreak} polls ` +
+          `(normally ~${g.typical}) — a scope or parser change may be silently dropping them`);
+      }
+    }
+    entry[game] = g;
+  }
+  composition.set(retailerId, entry);
+}
+
+/** @returns {object} retailerId → [{ game, missingPolls, typical }] for categories now missing */
+function getComposition() {
+  const out = {};
+  for (const [id, games] of composition) {
+    const lost = Object.entries(games)
+      .filter(([, g]) => g.missingStreak >= MISSING_THRESHOLD)
+      .map(([game, g]) => ({ game, missingPolls: g.missingStreak, typical: g.typical }));
+    if (lost.length) out[id] = lost;
+  }
+  return out;
+}
+
 function getParseQuality() {
   const out = {};
   for (const [id, e] of parseQuality) {
@@ -193,4 +298,5 @@ module.exports = {
   recordProductCount, getZeroProductPolls,
   recordFreshness, getZeroFreshPolls,
   recordParseQuality, getParseQuality,
+  recordComposition, getComposition, loadComposition, persistComposition,
 };

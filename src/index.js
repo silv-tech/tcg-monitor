@@ -18,6 +18,7 @@ const ShopifyAdapter = require('./adapters/shopify');
 const BestBuyAdapter = require('./adapters/bestbuy');
 const LondonDrugsAdapter = require('./adapters/londondrugs');
 const { scanSitemaps, SCAN_INTERVAL_MS } = require('./core/sitemap-scanner');
+const { loadComposition } = require('./monitoring/health');
 let closeBrowser;
 try { closeBrowser = require('./utils/browser').closeBrowser; } catch { closeBrowser = null; }
 
@@ -160,6 +161,11 @@ async function main() {
   } else {
     logger.warn('No DISCORD_TOKEN — running without Discord');
   }
+
+  // Composition baselines live in Redis so a redeploy does not reset what "normal" means
+  // for each store. Without this the canary would restart its learning on every deploy and
+  // could never reach the threshold that lets it report a missing category.
+  await loadComposition();
 
   // 2. Seed config files from Redis (survives ephemeral filesystem deploys)
   const stateModule = require('./core/state');

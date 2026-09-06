@@ -1,11 +1,12 @@
 const config = require('../config');
 const logger = require('../monitoring/logger');
-const { isSystemHealthy, checkRedisHealth, getZeroProductPolls } = require('./health');
+const { isSystemHealthy, checkRedisHealth, getZeroProductPolls, getComposition, persistComposition } = require('./health');
 const { getBudgetStatus } = require('../utils/scraper-api');
 const { EmbedBuilder } = require('discord.js');
 
 // Per-retailer alert dedup — only alert ONCE per stale episode, not every 5 min
-const alertedRetailers = new Set(); // retailer IDs we've already alerted for
+const alertedRetailers = new Set();
+const alertedComposition = new Set(); // retailerId:games signature already reported
 
 // Cooldown for budget + redis alerts (these don't have per-item dedup)
 let lastBudgetAlert = 0;
@@ -106,6 +107,62 @@ async function checkAndAlert(discordClient) {
       logger.error(`Failed to send recovery alert: ${err.message}`);
     }
   }
+
+  // --- Composition alerts: a whole game quietly vanished from a store ---
+  //
+  // Deliberately its own path, because a store losing a category is NOT unhealthy in the
+  // usual sense: it polls fine, prices fine, errors zero. The 'hat ' bug that classified
+  // One Piece as clothing produced exactly that — every check green, drops silently missed.
+  // A missed drop never raises an error, so this is the only thing that would say so.
+  const lostByRetailer = getComposition();
+  const newlyLost = Object.entries(lostByRetailer).filter(([id, games]) => {
+    const key = id + ':' + games.map(g => g.game).sort().join(',');
+    if (alertedComposition.has(key)) return false;
+    alertedComposition.add(key);
+    return true;
+  });
+
+  if (newlyLost.length > 0) {
+    const embed = new EmbedBuilder()
+      .setTitle('🔍 Category missing from a store')
+      .setColor(0xf0b232)
+      .setDescription(
+        'A store has stopped tracking a game it used to carry. This does not show up as an ' +
+        'error — polls still succeed — so it is worth checking whether the store stopped ' +
+        'stocking it, or whether a scope or parser change is dropping it.'
+      )
+      .setTimestamp();
+
+    for (const [id, games] of newlyLost.slice(0, 24)) {
+      const r = system.retailers.find(ret => ret.id === id);
+      embed.addFields({
+        name: r ? r.name : id,
+        value: games
+          .map(g => `**${g.game}** — zero for ${g.missingPolls} polls (normally ~${g.typical} products)`)
+          .join(String.fromCharCode(10))
+          .slice(0, 1024),
+        inline: false,
+      });
+    }
+
+    try {
+      const channel = await discordClient.channels.fetch(config.discord.adminChannelId);
+      await channel.send({ content: adminPing, embeds: [embed] });
+      logger.info(`Sent composition alert for ${newlyLost.length} retailer(s)`);
+    } catch (err) {
+      logger.error(`Failed to send composition alert: ${err.message}`);
+    }
+  }
+
+  // Clear the dedup key once a store carries its category again, so a repeat is reported.
+  for (const key of [...alertedComposition]) {
+    const id = key.split(':')[0];
+    const still = lostByRetailer[id];
+    const sig = still ? id + ':' + still.map(g => g.game).sort().join(',') : null;
+    if (sig !== key) alertedComposition.delete(key);
+  }
+
+  await persistComposition();
 
   // --- ScraperAPI budget alerts (#2) ---
   const budget = getBudgetStatus();
