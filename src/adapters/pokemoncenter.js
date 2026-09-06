@@ -146,11 +146,24 @@ class PokemonCenterAdapter extends BaseAdapter {
     return Math.max(0, cap - this._rotationSpentToday);
   }
 
+  /**
+   * A challenge page, as opposed to a real page that merely MENTIONS the anti-bot vendor.
+   *
+   * This used to match the bare strings 'distil_referrer' and 'Incapsula'. Pokemon Center
+   * loads those scripts on every page it serves, including perfectly good ones, so a genuine
+   * product page carrying price and availability was classified as a block and discarded.
+   * Bright Data was returning real pages and every one of them was thrown away — 0 of 1,195
+   * products had a price while the fetch layer reported success.
+   *
+   * The markers below are the interstitials themselves, not references to the vendor that
+   * serves them. Anything that names a script is not evidence: the page that ships the
+   * defence and the page that IS the defence both mention it.
+   */
   isChallengePage(html) {
     if (!html || html.length < 500) return true; // Too short = challenge or error
     return html.includes('Pardon Our Interruption') ||
-      html.includes('distil_referrer') ||
-      html.includes('Incapsula') ||
+      html.includes('_Incapsula_Resource') ||
+      html.includes('captcha-delivery') ||
       html.includes('Access Denied') ||
       html.includes('Please verify you are a human') ||
       (html.length < 5000 && !html.includes('<loc>') && !html.includes('<html'));
@@ -462,9 +475,13 @@ class PokemonCenterAdapter extends BaseAdapter {
     // be served for nothing never reaches a billed provider.
     if (brightData.isConfigured()) {
       const html = await brightData.unlock(meta.url, { label: meta.sku || 'pc' });
-      if (html && !this.isChallengePage(html)) {
+      if (html) {
+        // Parse FIRST. A page that yields real price and availability is a real page,
+        // whatever scripts it happens to reference — that ordering is what stops a
+        // vendor-name false positive from discarding a good response ever again.
         const data = this._parseProductHtml(html);
         if (data) return { data, failReason: null };
+        if (this.isChallengePage(html)) return { data: null, failReason: FAILURE_REASONS.BOT_CHALLENGE };
         return { data: null, failReason: FAILURE_REASONS.NO_MARKERS };
       }
       // Fall through only when Bright Data itself could not deliver, so a genuine block is
