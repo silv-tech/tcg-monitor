@@ -68,7 +68,7 @@ function isConfigured() {
  */
 async function unlock(url, opts = {}) {
   if (!isConfigured()) return null;
-  const { timeoutMs = TIMEOUT_MS, attempts = MAX_ATTEMPTS, label = 'brightdata' } = opts;
+  const { timeoutMs = TIMEOUT_MS, attempts = MAX_ATTEMPTS, label = 'brightdata', url: targetUrl = url } = opts;
 
   usage.calls++;
   let lastReason = null;
@@ -97,7 +97,7 @@ async function unlock(url, opts = {}) {
       if (!body || body.length === 0) {
         usage.empties++;
         lastReason = 'empty_body';
-        noteFailure('empty_body', { status: res.status, ms, label });
+        noteFailure('empty_body', { status: res.status, ms, label, url: String(targetUrl).slice(-60) });
       } else if (!res.ok) {
         usage.failures++;
         // The body of a non-200 is Bright Data telling us why; keep a slice of it.

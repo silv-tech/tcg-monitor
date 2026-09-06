@@ -550,7 +550,9 @@ class PokemonCenterAdapter extends BaseAdapter {
     // Still second overall: the free stealth attempt above runs first, so a request that can
     // be served for nothing never reaches a billed provider.
     if (brightData.isConfigured()) {
-      const html = await brightData.unlock(meta.url, { label: meta.sku || 'pc' });
+      // meta carries {url, name} and no sku, so the label was always 'pc' and a failure
+      // could not be traced back to a product. The sku is passed explicitly now.
+      const html = await brightData.unlock(meta.url, { label: sku, url: meta.url });
       if (html) {
         // Parse FIRST. A page that yields real price and availability is a real page,
         // whatever scripts it happens to reference — that ordering is what stops a
