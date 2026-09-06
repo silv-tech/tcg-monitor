@@ -206,12 +206,26 @@ async function persistComposition() {
  * @param {string} retailerId
  * @param {object} products - the poll's final product map
  */
+const PARTIAL_READ_RATIO = 0.3;  // a poll well below this store's own normal is a partial read
+
 function recordComposition(retailerId, products) {
   const values = Object.values(products || {});
-  // A tiny result is a partial read, not a catalogue that lost a category.
-  if (values.length < MIN_SAMPLE) return;
+  if (values.length === 0) return;
 
   const entry = composition.get(retailerId) || {};
+
+  // "Too small to judge" has to be relative to the STORE, not a fixed number. A flat floor of
+  // 10 — borrowed from the parse-quality canary, where it is right — silently excluded every
+  // store with a small catalogue: Costco returns 6 products a poll, so it never built a
+  // baseline and had no cover at all. Six is not a partial read there, it is the whole shop.
+  //
+  // What actually indicates a partial read is a poll far below what this store normally
+  // returns, so that is what gets skipped.
+  entry._typicalTotal = Math.max(entry._typicalTotal || 0, values.length);
+  if (values.length < entry._typicalTotal * PARTIAL_READ_RATIO) {
+    composition.set(retailerId, entry);
+    return;
+  }
   for (const [game, re] of Object.entries(GAME_PATTERNS)) {
     const count = values.filter(p => p && re.test(String(p.name || ''))).length;
     const g = entry[game] || { seen: 0, typical: 0, missingStreak: 0 };
@@ -246,7 +260,9 @@ function recordComposition(retailerId, products) {
 function getCompositionState() {
   const out = { baselinePolls: BASELINE_POLLS, missingThreshold: MISSING_THRESHOLD, retailers: {} };
   for (const [id, games] of composition) {
-    out.retailers[id] = Object.fromEntries(Object.entries(games).map(([game, g]) => [game, {
+    out.retailers[id] = Object.fromEntries(Object.entries(games)
+      .filter(([game, g]) => game !== '_typicalTotal' && g && typeof g === 'object')
+      .map(([game, g]) => [game, {
       pollsSeenWith: g.seen,
       typical: g.typical,
       armed: g.seen >= BASELINE_POLLS,   // enough history to call a disappearance
@@ -261,7 +277,7 @@ function getComposition() {
   const out = {};
   for (const [id, games] of composition) {
     const lost = Object.entries(games)
-      .filter(([, g]) => g.missingStreak >= MISSING_THRESHOLD)
+      .filter(([game, g]) => game !== '_typicalTotal' && g && g.missingStreak >= MISSING_THRESHOLD)
       .map(([game, g]) => ({ game, missingPolls: g.missingStreak, typical: g.typical }));
     if (lost.length) out[id] = lost;
   }

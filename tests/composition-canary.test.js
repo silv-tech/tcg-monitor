@@ -141,3 +141,60 @@ describe('composition canary: what it reports', () => {
     assert.ok(lost.some((g) => g.game === 'pokemon'), 'the accented spelling must count');
   });
 });
+
+/**
+ * "Too small to judge" has to be relative to the store.
+ *
+ * The canary first shipped with a flat floor of 10 products, borrowed from the parse-quality
+ * canary where it is correct. It silently excluded every store with a small catalogue:
+ * Costco returns 6 products a poll, so it never built a baseline and had no cover at all —
+ * along with Best Buy and Walmart. Six is not a partial read there, it is the whole shop.
+ * The endpoint that exposed this is the only reason it was noticed.
+ */
+describe('composition canary: small catalogues are covered too', () => {
+  const small = (pokemon, onePiece) => {
+    const o = {};
+    for (let i = 0; i < pokemon; i++) o['p' + i] = { name: `Pokemon TCG Booster Box ${i}` };
+    for (let i = 0; i < onePiece; i++) o['o' + i] = { name: `One Piece Card Game Booster ${i}` };
+    return o;
+  };
+
+  test('a Costco-sized store (6 products a poll) builds a baseline and arms', () => {
+    const id = freshId();
+    for (let i = 0; i < BASELINE_POLLS + 2; i++) recordComposition(id, small(4, 2));
+    const st = health.getCompositionState().retailers[id];
+    assert.ok(st, 'the store must be tracked at all');
+    assert.strictEqual(st['one piece'].armed, true, 'and must be able to report a loss');
+  });
+
+  test('and it reports a loss, which a flat floor of 10 made impossible', () => {
+    const id = freshId();
+    for (let i = 0; i < BASELINE_POLLS + 2; i++) recordComposition(id, small(4, 2));
+    for (let i = 0; i < MISSING_THRESHOLD; i++) recordComposition(id, small(6, 0));
+    const lost = getComposition()[id];
+    assert.ok(lost, 'a small store losing a game must still be reported');
+    assert.strictEqual(lost[0].game, 'one piece');
+  });
+
+  test('a genuine partial read is still ignored, judged against the store itself', () => {
+    const id = freshId();
+    for (let i = 0; i < BASELINE_POLLS + 2; i++) recordComposition(id, small(4, 2));
+    // One product where six is normal: a partial read, not a vanished category.
+    for (let i = 0; i < MISSING_THRESHOLD * 2; i++) recordComposition(id, small(1, 0));
+    assert.strictEqual(getComposition()[id], undefined);
+  });
+
+  test('a big store still ignores a thin poll — the rule scales both ways', () => {
+    const id = freshId();
+    for (let i = 0; i < BASELINE_POLLS + 2; i++) recordComposition(id, small(600, 100));
+    for (let i = 0; i < MISSING_THRESHOLD * 2; i++) recordComposition(id, small(20, 0));
+    assert.strictEqual(getComposition()[id], undefined, '20 of ~700 is a partial read');
+  });
+
+  test('internal bookkeeping never leaks into the reported games', () => {
+    const id = freshId();
+    for (let i = 0; i < BASELINE_POLLS + 2; i++) recordComposition(id, small(4, 2));
+    const games = Object.keys(health.getCompositionState().retailers[id]);
+    assert.deepStrictEqual(games.sort(), ['one piece', 'pokemon']);
+  });
+});
