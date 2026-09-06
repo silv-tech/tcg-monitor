@@ -7,6 +7,9 @@ const { getProxyUrl } = require('../core/proxy');
 const state = require('../core/state');
 const brightData = require('../utils/brightdata');
 
+// One Redis key for the whole availability cache — written at most once per poll.
+const PC_AVAILABILITY_KEY = 'tcg:pokemoncenter:availability';
+
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
@@ -94,6 +97,44 @@ class PokemonCenterAdapter extends BaseAdapter {
    *   2. new SKUs     — a listing that just appeared
    *   3. rotation     — everything else, oldest first, so nothing is permanently invisible
    */
+  /**
+   * The availability cache is the ONLY record of what anything costs or whether it is in
+   * stock — the sitemap gives names and URLs and nothing else. It lived in memory, so every
+   * deploy wiped it: observed directly, the priced count fell from 17 back to 3 across one
+   * restart. At ~400 paid checks a day against 1,195 products, a catalogue that resets on
+   * each deploy can never accumulate coverage, which is why this store looked permanently
+   * blind no matter how well the fetching worked.
+   *
+   * Kept in Redis under one key rather than per-product: it is written once per poll at most,
+   * and a single blob avoids 1,195 round trips.
+   */
+  async _loadAvailability() {
+    if (this._availabilityLoaded) return;
+    this._availabilityLoaded = true;
+    try {
+      const raw = await state.getRedis().get(PC_AVAILABILITY_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      let restored = 0;
+      for (const [sku, data] of Object.entries(saved)) {
+        if (data && typeof data === 'object') { this.availabilityCache.set(sku, data); restored++; }
+      }
+      if (restored) logger.info(`Pokemon Center: restored ${restored} cached availability records`);
+    } catch (err) {
+      logger.warn(`Pokemon Center: could not restore availability cache: ${err.message}`);
+    }
+  }
+
+  async _saveAvailability() {
+    if (this.availabilityCache.size === 0) return;
+    try {
+      const blob = JSON.stringify(Object.fromEntries(this.availabilityCache));
+      await state.getRedis().set(PC_AVAILABILITY_KEY, blob, 'EX', 86400 * 14);
+    } catch (err) {
+      logger.debug(`Pokemon Center: could not persist availability cache: ${err.message}`);
+    }
+  }
+
   _selectCheckTargets() {
     const now = Date.now();
     const targets = [];
@@ -194,6 +235,8 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     // Phase 2: paid availability checks, only for newly listed and watchlisted products, and
     // only when the paid-check clock says so — the free sitemap phase above runs far more often.
+    await this._loadAvailability();
+
     const paidDue = Date.now() - this._lastPaidCheckAt >= this.paidCheckIntervalMs;
     const targets = paidDue ? this._selectCheckTargets() : [];
     if (targets.length > 0) this._lastPaidCheckAt = Date.now();
@@ -235,6 +278,9 @@ class PokemonCenterAdapter extends BaseAdapter {
       // Small delay between checks to avoid triggering rate limits
       if (i < batchSize - 1) await sleep(500 + Math.floor(Math.random() * 1000));
     }
+
+    // Persist only when this poll actually learned something, so an idle poll costs no write.
+    if (checked > 0) await this._saveAvailability();
 
     // Phase 3: Build full product list — use cached availability for all products
     // Keep last-known availability (even if stale) — prevents false OOS events
