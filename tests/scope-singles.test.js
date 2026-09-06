@@ -89,3 +89,46 @@ describe('singles: the big seven are unaffected', () => {
     for (const n of bigSeven) assert.strictEqual(isInScopeName(n), true, n);
   });
 });
+
+describe('One Piece promo singles are not sealed product', () => {
+  // These were being alerted as sealed product. The trap is that the pack names are shared:
+  // "Winner Pack", "Event Pack" and "Premium Card Collection" each name BOTH a sealed item and
+  // the singles pulled from it, so excluding on the pack name would destroy real product.
+  const SINGLES = [
+    'Gorgon Sisters (Winner Pack 2026 Vol. 3) [One Piece Promotion Cards] - NM-Mint Foil',
+    'Monkey.D.Luffy (Event Pack Vol. 9) [One Piece Promotion Cards] - Slightly Played Foil',
+    'Bepo (Winner Pack Vol. 7) (P-019) - One Piece Promotion Cards Foil',
+    'Tony Tony.Chopper (Winner Pack 2026 Vol. 2) (P-101) - One Piece Promotion Cards',
+    'Sabo (Premium Card Collection -Best Selection Vol. 3-) (P-073) - One Piece Promotion Cards',
+    'Jozu (Regional Participation Pack 2026 Vol.2) [One Piece Promotion Cards] - NM-Mint Foil',
+    'Nico Robin [Extra Booster: One Piece Heroines Edition Vol. 2] - Slightly Played Non English',
+    'Yamato (CS 2024 Event Pack) (P-046) - One Piece Promotion Cards Foil',
+  ];
+  for (const name of SINGLES) {
+    test(`drops single: ${name.slice(0, 48)}`, () => {
+      assert.strictEqual(isInScopeName(name), false);
+    });
+  }
+});
+
+describe('the sealed products sharing those pack names are KEPT', () => {
+  // Each of these is a real sealed item a customer wants alerted, and each collides with one
+  // of the single-card patterns above. This is the regression that matters: a missed alert is
+  // silent, so these assertions are the guard against over-matching.
+  const SEALED = [
+    'One Piece Winner Pack Vol. 7 (Law Cover)',
+    'One Piece Winner Pack 2025 Vol. 4 (Tsuru Cover)',
+    'One Piece Day 2026 [P-161] One Piece Card Game Premium Card Collection',
+    'One Piece Card Game - Premium Card Collection - Best Selection Vol 7 (Pre Order)',
+    'One Piece CG Premium Card Collection Best Selection ACE & SABO & LUFFY',
+    'One Piece OP-09 Emperors in the New World Booster Pack',
+    'One Piece Card Game OP-17 - The Worlds Strongest Warrior Booster Box',
+    'Pokemon - Scarlet and Violet - Destined Rivals Elite Trainer Box',
+    'Pokemon Ascended Heroes Booster Pack',
+  ];
+  for (const name of SEALED) {
+    test(`keeps sealed: ${name.slice(0, 48)}`, () => {
+      assert.strictEqual(isInScopeName(name), true);
+    });
+  }
+});

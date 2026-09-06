@@ -162,6 +162,27 @@ const SINGLE_CARD_MARKERS = [
   /\s[-–]\s(?:NM|LP|MP|HP|SP|DMG)(?:\s|$)/,
   /\b\d{3}\/\d{3}\b/,
   /\s[-–]\s\d{1,3}\/\d{1,3}(?:\s|$)/,
+
+  // One Piece promo singles. These were being alerted as sealed product.
+  //
+  // The trap here is that the pack names are shared with real products: "Winner Pack",
+  // "Event Pack" and "Premium Card Collection" each name BOTH a sealed item and the singles
+  // pulled from it. Excluding on the pack name would have destroyed genuine product —
+  // "One Piece Winner Pack Vol. 7 (Law Cover)" and "Premium Card Collection - Best Selection
+  // Vol 7" are things a customer wants alerted.
+  //
+  // So these match only wording that a sealed box never carries:
+  //   "One Piece Promotion Cards"  — plural CARDS, i.e. the cards, not the box
+  //   "(P-019)"                    — the parenthesised One Piece promo card number. Sealed
+  //                                  items that cite a promo code bracket it instead
+  //                                  ("One Piece Day 2026 [P-161] ... Premium Card Collection").
+  //   "NM-Mint" / "Slightly Played" — condition grades. Nothing factory-sealed is graded.
+  // Verified against 3,386 live in-scope products and 7,500 hobbiesville listings: 101 singles
+  // removed, and every sealed product above still kept.
+  /\bpromotion(?:al)? cards?\b/i,
+  /\(P-\d{2,4}\)/,
+  /\b(?:NM|LP|MP|HP|SP)-(?:mint|near ?mint|lightly played|played)\b/i,
+  /\bslightly played\b/i,
 ];
 
 function isSingleCard(name) {
