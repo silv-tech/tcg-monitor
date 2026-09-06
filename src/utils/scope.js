@@ -101,8 +101,62 @@ function repairMojibake(str) {
 }
 
 /**
- * Everything tracked must name a game we follow, and must not be an accessory, a book, or a
- * sponsored ad slot. Names are mojibake-repaired first.
+ * A SINGLE card, as opposed to a sealed product.
+ *
+ * The big seven only sell sealed, so this never came up there. The card shops are the
+ * opposite: of 80,861 stored shop products, ~79,000 were singles, other games or non-TCG
+ * stock, and they were the bulk of what reached Discord (97% of #infinitycards alerts).
+ *
+ * A single is identified by its own card code sitting near the START of the title —
+ * "EEVEE ex (174) - ...", "Hoothoot (TG12) - ...", "Zacian V (SWSH292) - ..." — or by a
+ * grade or condition anywhere in it.
+ *
+ * Nothing later in the title may override that. Singles are routinely named after the sealed
+ * product they were pulled from ("Eevee (173) - Prismatic Evolutions Pokemon Center ETB"),
+ * so an earlier attempt that rescued anything containing sealed wording reinstated 137 of the
+ * exact rows it was meant to remove. Validated against all 3,276 in-scope shop products:
+ * 1,635 dropped, every one a single; 1,641 kept, every one sealed.
+ */
+// Also matches a hyphenated set-and-number code — "(ST22-010)", "(EB03-034)", "(OP09-001)" —
+// which One Piece singles use, and which may be followed by "[Set Name]" rather than " - ".
+const CARD_CODE = '(?:[A-Z]{0,5}\\d{1,4}[A-Za-z]?|\\d{1,3}\\/\\d{1,3}|[A-Z]{1,4}\\d{1,3}-\\d{1,3})';
+// "<name> (CODE) - <rest>" — the rest may name a sealed form, so it gets the rescue below.
+const CODE_THEN_DASH = new RegExp(`^(?:.{0,70}?)\\(${CARD_CODE}\\)\\s*[-–]\\s*(.*)$`);
+// "<name> (CODE) [Set Name]" — bracketed text is always the SET a single came from, never a
+// product form. "Portgas.D.Ace (Parallel) (ST22-010) [Starter Deck 22]" is a card, and
+// rescuing on the words "Starter Deck" inside those brackets put it straight back.
+const CODE_THEN_BRACKET = new RegExp(`^(?:.{0,70}?)\\(${CARD_CODE}\\)\\s*\\[`);
+
+/**
+ * A set code can look exactly like a card code, so the word straight after it decides.
+ * "Japanese Pokemon Triple Beat EX (SV1a) - Booster" is a sealed booster and (SV1a) is the
+ * SET; "Eevee (173) - Prismatic Evolutions Pokemon Center ETB" is a card and (173) is its
+ * number. The difference is that the sealed one names its FORM immediately after the code.
+ *
+ * Deliberately anchored to the start of that remainder. Matching sealed wording anywhere in
+ * the title is what wrongly rescued 137 singles named after the box they came from.
+ */
+const SEALED_FORM_START = /^(?:booster|elite trainer|etb|starter deck|premium collection|collection box|build\s*[&and]+\s*battle|display|case|bundle|blister|tin|box|pack)\b/i;
+
+const SINGLE_CARD_MARKERS = [
+  /\bPSA\s?\d/i, /\bCGC\s?\d/i, /\bBGS\s?\d/i,
+  /\b(?:near mint|lightly played|moderately played|heavily played|damaged)\b/i,
+  /\s[-–]\s(?:NM|LP|MP|HP|SP|DMG)(?:\s|$)/,
+  /\b\d{3}\/\d{3}\b/,
+  /\s[-–]\s\d{1,3}\/\d{1,3}(?:\s|$)/,
+];
+
+function isSingleCard(name) {
+  const s = repairMojibake(name);
+  if (CODE_THEN_BRACKET.test(s)) return true;
+  const m = s.match(CODE_THEN_DASH);
+  if (m && !SEALED_FORM_START.test(m[1].trim())) return true;
+  return SINGLE_CARD_MARKERS.some(re => re.test(s));
+}
+
+/**
+ * Everything tracked must name a game we follow, and must not be an accessory, a book, a
+ * sponsored ad slot, or a single card. Names are mojibake-repaired first.
  */
 function isInScopeName(name) {
   const repaired = repairMojibake(name);
@@ -111,6 +165,7 @@ function isInScopeName(name) {
   if (/^sponsored ad\b/.test(lower)) return false;
   if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
   if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
+  if (isSingleCard(repaired)) return false;
   const namesGame = GAME_NAMES.some(g => lower.includes(g)) || SET_NAMES.some(k => lower.includes(k));
   if (!namesGame) return false;
   // Naming a game is not enough — it also has to BE a card product. Amazon always applied
@@ -125,5 +180,6 @@ module.exports = {
   ACCESSORY_KEYWORDS,
   PRINT_KEYWORDS,
   repairMojibake,
+  isSingleCard,
   isInScopeName,
 };

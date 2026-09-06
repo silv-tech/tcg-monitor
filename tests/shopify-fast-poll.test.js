@@ -124,7 +124,7 @@ describe('shopify fast poll: reads only page 1', () => {
     const urls = [];
     a._fetchPage = async (url) => {
       urls.push(url);
-      return { products: [product(1, 'Booster Box', '49.99')], changed: true };
+      return { products: [product(1, 'Pokemon Booster Box', '49.99')], changed: true };
     };
 
     const products = await a.fetchProducts();
@@ -142,9 +142,9 @@ describe('shopify fast poll: reads only page 1', () => {
     a._fetchPage = async () => {
       page += 1;
       // Two full pages then a short one ends the walk.
-      if (page > 2) return { products: [product(999, 'Last', '1.00')], changed: true };
+      if (page > 2) return { products: [product(999, 'Pokemon Last Booster Box', '1.00')], changed: true };
       const list = [];
-      for (let i = 0; i < a.pageLimit; i++) list.push(product(page * 1000 + i, `P${i}`, '9.99'));
+      for (let i = 0; i < a.pageLimit; i++) list.push(product(page * 1000 + i, `Pokemon Booster Box ${i}`, '9.99'));
       return { products: list, changed: true };
     };
 
@@ -169,7 +169,7 @@ describe('shopify fast poll: reads only page 1', () => {
     a._fetchPage = async () => {
       calls += 1;
       if (calls === 1) throw new Error('socket hang up');
-      return { products: [product(7, 'Elite Trainer Box', '59.99')], changed: true };
+      return { products: [product(7, 'Pokemon Elite Trainer Box', '59.99')], changed: true };
     };
     const products = await a.fetchProducts();
     assert.strictEqual(a._partialPoll, false, 'fallback produced a complete read');
@@ -276,9 +276,9 @@ describe('shopify fast poll: asks for a small page, not the whole one', () => {
     a._fetchPage = async (u) => {
       urls.push(u);
       page += 1;
-      if (page > 2) return { products: [product(999, 'Last', '1.00')], changed: true };
+      if (page > 2) return { products: [product(999, 'Pokemon Last Booster Box', '1.00')], changed: true };
       const list = [];
-      for (let i = 0; i < a.pageLimit; i++) list.push(product(page * 1000 + i, `P${i}`, '9.99'));
+      for (let i = 0; i < a.pageLimit; i++) list.push(product(page * 1000 + i, `Pokemon Booster Box ${i}`, '9.99'));
       return { products: list, changed: true };
     };
     await a.fetchProducts();
@@ -331,7 +331,7 @@ describe('shopify fast poll: collection shops fetch in parallel', () => {
     let n = 0;
     a._fetchPage = async () => {
       n += 1;
-      return { products: [product(n, `Booster Box ${n}`, '49.99')], changed: true };
+      return { products: [product(n, `Pokemon Booster Box ${n}`, '49.99')], changed: true };
     };
     const products = await a.fetchProducts();
     assert.strictEqual(Object.keys(products).length, 2, 'no collection is dropped');
@@ -343,7 +343,7 @@ describe('shopify fast poll: collection shops fetch in parallel', () => {
     a._lastFullSweep = Date.now();
     a._fetchPage = async (url) => {
       if (url.includes('c2')) throw new Error('Rate limited (429): c2');
-      return { products: [product(1, 'Booster Box', '49.99')], changed: true };
+      return { products: [product(1, 'Pokemon Booster Box', '49.99')], changed: true };
     };
     await assert.rejects(() => a.fetchProducts(), /rate limited/i);
   });

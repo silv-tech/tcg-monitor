@@ -1,5 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
+const { isInScopeName } = require('../utils/scope');
 const { stealthGet, isRateLimited } = require('../utils/stealth-http');
 const { markProxyBlocked, markProxySuccess } = require('../core/proxy');
 
@@ -447,6 +448,11 @@ class ShopifyAdapter extends BaseAdapter {
     // the full sweep all get it — there are four places products enter, and filtering at
     // three of them is how a shop ends up alerting on shoes only on sweep polls.
     if (isNonTcg(item)) return;
+    // The shared scope rule — identical to the one the big seven use. isNonTcg above is a
+    // coarse category screen that deliberately RESCUED every trading card game and singles
+    // ('yugioh', 'lorcana', 'mtg', 'single', 'psa ', 'graded'), which is why the shops were
+    // alerting on MTG, Lorcana, hockey boxes and 50,000 single cards. Scope is decided here.
+    if (!isInScopeName(item.title)) return;
 
     // Each Shopify product can have multiple variants
     for (const variant of item.variants) {
