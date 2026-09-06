@@ -38,7 +38,17 @@ const SET_NAMES = [
 
 // Unambiguous sealed product types. No accessory is named any of these, so their presence
 // settles the question when a title also happens to contain an accessory word.
+// Sealed product forms. Everything here ships booster packs inside a factory-sealed box, so
+// it is product a restock watcher cares about — not an accessory.
+//
+// The second line was added after Pokemon Center adopted this shared rule: pin collections,
+// poster collections, sticker collections and the holiday/advent calendars were all being
+// dropped as out-of-scope, which is a FALSE NEGATIVE — the silent kind that shows up as an
+// alert that never fires rather than a wrong one that does. Every one of them is a sealed box
+// containing packs and a promo card, and 'poster-collection' was already in Pokemon Center's
+// own keyword list, so the store had always intended to track them.
 const DEFINITE_SEALED = /(elite trainer box|booster box|booster bundle|booster pack|booster display|build\s*[&and]+\s*battle|premium collection|ultra premium collection|collection box|battle deck|starter deck|structure deck|mini tin|booster tin|checklane)/i;
+const SEALED_COLLECTION_FORMS = /(pin collection|poster collection|sticker collection|special collection|(?:holiday|advent) calendar)/i;
 
 // Accessories — never alert on these even if they name a game
 const ACCESSORY_KEYWORDS = [
@@ -48,6 +58,10 @@ const ACCESSORY_KEYWORDS = [
   'card holder', 'card organizer', 'storage box', 'card storage',
   'pet plastic', 'dice set', 'dice bag', 'coin holder', 'token box', 'token deck',
   'divider', 'accessories', 'card book', 'trading card book',
+  // Play accessories sold as boxed "sets", which is close enough to sealed product wording to
+  // get through on game-name plus form. Found by the Pokemon Center category sweep: these four
+  // were the only in-scope products it ever reported in stock, and all four were dice.
+  'damage counter', 'condition marker', 'counter dice', 'dice and condition',
 ];
 
 // Books ABOUT the hobby. They name a game and use card wording, so game+form alone lets them
@@ -181,6 +195,7 @@ function isInScopeName(name) {
   // here and again via the accessory entries inside isTCGProduct. Best Buy's "Scarlet & Violet
   // (SV7) Stellar Crown Elite Trainer Box 9 packs & accessories" is an ETB, not an accessory.
   if (DEFINITE_SEALED.test(repaired)) return true;
+  if (SEALED_COLLECTION_FORMS.test(repaired)) return true;
 
   if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
   // Naming a game is not enough — it also has to BE a card product. Amazon always applied

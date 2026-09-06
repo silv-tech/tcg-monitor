@@ -6,6 +6,7 @@ const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl } = require('../core/proxy');
 const state = require('../core/state');
 const brightData = require('../utils/brightdata');
+const { isInScopeName } = require('../utils/scope');
 
 // One Redis key for the whole availability cache — written at most once per poll.
 const PC_AVAILABILITY_KEY = 'tcg:pokemoncenter:availability';
@@ -23,6 +24,15 @@ const PC_UNFETCHABLE_KEY = 'tcg:pokemoncenter:unfetchable';
 const UNFETCHABLE_AFTER = 2;
 const UNFETCHABLE_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
+// The parent TCG category. Its listing pages carry ~32 products each and support a real
+// server-side in-stock filter, so the whole in-stock set is five requests rather than 1,195.
+const CATEGORY_URL = 'https://www.pokemoncenter.com/en-ca/category/trading-card-game';
+// 137 in stock at 32 a page is five; the ceiling is a runaway guard, not an expected value.
+const CATEGORY_MAX_PAGES = 12;
+// Pages are independent, so they overlap; the cap keeps a sweep from looking like a burst.
+const CATEGORY_CONCURRENCY = 3;
+const CATEGORY_PAGE_ATTEMPTS = 2;
+
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
@@ -30,7 +40,12 @@ class PokemonCenterAdapter extends BaseAdapter {
     this.domain = 'www.pokemoncenter.com';
     this.seedUrl = 'https://www.pokemoncenter.com/en-ca/';
 
-    // TCG sealed product keywords for filtering sitemap URLs
+    // A cheap slug prefilter ONLY. This is not the scope rule: it admits card sleeves,
+    // playmats, zip binders, deck boxes, bag tags and backpacks, because every one of those
+    // carries '-tcg-' in its slug. The authoritative gate is isInScopeName() from utils/scope,
+    // the same rule the other 17 stores use. Pokemon Center was the last store still deciding
+    // scope on its own, and it was tracking 413 accessories the client explicitly excluded —
+    // every product it had marked in stock was one of them.
     this.tcgKeywords = [
       'pokemon-tcg-', '-tcg-',
       'booster-box', 'booster-bundle', 'elite-trainer-box',
@@ -79,6 +94,13 @@ class PokemonCenterAdapter extends BaseAdapter {
     this._consecutiveFailures = 0;
     this._failStreak = new Map();     // sku -> consecutive total failures
     this._unfetchable = new Map();    // sku -> { until } while parked
+
+    // SKUs the last COMPLETE category sweep reported in stock. Only these can be cleared by a
+    // later sweep, which keeps the absent-means-out-of-stock inference to products the sweep
+    // is actually authoritative for.
+    this._categoryInStock = new Set();
+    this._lastCategorySweepAt = 0;
+    this._categorySweepRunning = false;
   }
 
   _deriveTiming() {
@@ -90,6 +112,10 @@ class PokemonCenterAdapter extends BaseAdapter {
     // mean ~32,000 ScraperAPI calls a day at 25 credits each. This is the only thing standing
     // between a fast poll loop and the entire monthly budget.
     this.paidCheckIntervalMs = this.timingValue('paidCheckIntervalMs', 5 * 60 * 1000, 60 * 1000);
+    // The category sweep costs ~5 requests and refreshes the WHOLE in-stock set, so it is the
+    // cheapest coverage available here — but it is still billed per request, hence a wall-clock
+    // gate of its own rather than riding the ~8s poll loop.
+    this.categorySweepIntervalMs = this.timingValue('categorySweepIntervalMs', 5 * 60 * 1000, 60 * 1000);
   }
 
   /**
@@ -410,6 +436,19 @@ class PokemonCenterAdapter extends BaseAdapter {
       }
     }
 
+    // Bulk in-stock sweep. Runs alongside the per-product checks rather than replacing them:
+    // the sweep gives broad, cheap coverage of WHICH products are in stock, the per-product
+    // checks give precision on the watchlist and on anything the listing does not carry.
+    // Also not awaited — a poll must never wait on a paid path.
+    if (Date.now() - this._lastCategorySweepAt >= this.categorySweepIntervalMs && !this._categorySweepRunning) {
+      this._lastCategorySweepAt = Date.now();
+      this._categorySweepRunning = true;
+      this._sweepCategories()
+        .then(() => this._saveAvailability())
+        .catch(err => logger.warn(`Pokemon Center: category sweep failed: ${err.message}`))
+        .finally(() => { this._categorySweepRunning = false; });
+    }
+
     // Phase 3: Build the product list from cached availability.
     //
     // The paid checks are asynchronous now, so this poll reports what is KNOWN rather than
@@ -545,6 +584,133 @@ class PokemonCenterAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Bulk in-stock sweep from the category listing.
+   *
+   * Per-product checks are the only precise source, but they cost one Bright Data request each
+   * against a 1,195-product catalogue, so coverage accumulates over days and roughly a quarter
+   * of the catalogue is unreachable behind expect_element. This path reads the same fact for
+   * the whole category in about five requests.
+   *
+   * What is and is not trustworthy on these pages was measured, not assumed:
+   *   - ld+json `availability` is a CONSTANT here. Across 101 products on three different
+   *     category pages it said OutOfStock every single time, including for products whose own
+   *     product page said InStock. It is never read.
+   *   - `?availability=true` IS a real server-side filter. It drops totalResults from 973 to
+   *     137, matching the page's own availability_status facet count exactly.
+   *   - sku (in `mpn`, since `sku` ships empty), name and price ARE accurate: the price for
+   *     10-10320-101 matched its product page to the cent.
+   * So membership of the filtered listing is the stock signal; the ld+json availability field
+   * beside it is ignored.
+   */
+  async _sweepCategories() {
+    if (!brightData.isConfigured()) return;
+
+    const fresh = new Map();  // sku -> { price, name }
+    let complete = true;
+
+    // Page 1 first and alone: it carries the availability facet, which says how many products
+    // there are to collect and therefore how many pages to ask for.
+    const first = await this._fetchCategoryPage(1);
+    if (!first) {
+      logger.info('Pokemon Center: category sweep — page 1 unavailable, nothing swept');
+      return;
+    }
+    for (const r of this._parseCategoryHtml(first)) fresh.set(r.sku, r);
+
+    const facet = first.match(/"availability_status":\s*\[\s*\{\s*"name":\s*"IN_STOCK",\s*"count":\s*(\d+)/);
+    const expected = facet ? Number(facet[1]) : null;
+    const perPage = Math.max(fresh.size, 1);
+    const pages = expected
+      ? Math.min(Math.ceil(expected / perPage), CATEGORY_MAX_PAGES)
+      : 1;
+
+    // The remaining pages are independent, and each one takes 40-100s against this site.
+    // Fetched sequentially a five-page sweep outlives its own interval, so they go in parallel
+    // with a small cap. A page that fails only costs completeness — never a false clear.
+    const rest = [];
+    for (let p = 2; p <= pages; p++) rest.push(p);
+    for (let i = 0; i < rest.length; i += CATEGORY_CONCURRENCY) {
+      const batch = rest.slice(i, i + CATEGORY_CONCURRENCY);
+      const htmls = await Promise.all(batch.map((p) => this._fetchCategoryPage(p)));
+      for (const html of htmls) {
+        if (!html) { complete = false; continue; }
+        for (const r of this._parseCategoryHtml(html)) fresh.set(r.sku, r);
+      }
+    }
+
+    // The facet tells us how many in-stock products there should be, so a short sweep is
+    // detectable rather than silently looking like "everything sold out".
+    if (expected === null || fresh.size < expected) complete = false;
+
+    let marked = 0;
+    for (const [sku, row] of fresh) {
+      if (!this.sitemapProducts.has(sku)) continue;  // out of scope or not in our catalogue
+      const prev = this.availabilityCache.get(sku) || {};
+      this.availabilityCache.set(sku, {
+        inStock: true,
+        price: row.price != null ? row.price : (prev.price ?? null),
+        image: prev.image || '',
+      });
+      marked++;
+    }
+
+    // The absent-means-gone half is applied ONLY to SKUs a previous COMPLETE sweep reported in
+    // stock, and only when this sweep is also complete. That is the same rule the EB Games deep
+    // crawl needed: a partial read that is treated as authoritative deletes a live catalogue in
+    // one step and fires a burst of false out-of-stock transitions.
+    let cleared = 0;
+    if (complete) {
+      for (const sku of this._categoryInStock) {
+        if (fresh.has(sku)) continue;
+        if (!this.sitemapProducts.has(sku)) continue;
+        const prev = this.availabilityCache.get(sku);
+        if (!prev || !prev.inStock) continue;
+        this.availabilityCache.set(sku, { ...prev, inStock: false });
+        cleared++;
+      }
+      this._categoryInStock = new Set(fresh.keys());
+    }
+
+    logger.info(`Pokemon Center: category sweep — ${fresh.size} listed in stock` +
+      `${expected !== null ? `/${expected} expected` : ''}, ${marked} matched our catalogue` +
+      `${complete ? `, ${cleared} cleared` : ', PARTIAL (no clearing)'}`);
+  }
+
+  /**
+   * One category listing page. These render slowly enough that a single unlock attempt is not
+   * a fair test — a page measured 43s, 50s and 52s on success but also returned empty after
+   * 98s with networkidle_event_timeout, so one extra attempt is worth it before giving up.
+   */
+  async _fetchCategoryPage(page) {
+    const url = `${CATEGORY_URL}?availability=true${page > 1 ? `&page=${page}` : ''}`;
+    for (let attempt = 1; attempt <= CATEGORY_PAGE_ATTEMPTS; attempt++) {
+      const { html } = await brightData.unlock(url, { label: `category-p${page}`, url });
+      if (html) return html;
+    }
+    return null;
+  }
+
+  /** SKU, name and price from a category listing. Availability here is deliberately ignored. */
+  _parseCategoryHtml(html) {
+    const out = [];
+    for (const m of html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/g)) {
+      let json;
+      try { json = JSON.parse(m[1].trim()); } catch { continue; }
+      if (json['@type'] !== 'Product') continue;
+      const offer = Array.isArray(json.offers) ? json.offers[0] : json.offers;
+      // `sku` is present but empty on these pages; mpn carries the real id, and the product
+      // URL is the fallback. The carousel cells have neither and drop out here.
+      const sku = json.mpn
+        || (String((offer && offer.url) || json.url || '').match(/\/product\/([^/]+)\//) || [])[1]
+        || null;
+      if (!sku) continue;
+      const price = offer && offer.price != null ? Number(offer.price) : null;
+      out.push({ sku, name: json.name || '', price: Number.isFinite(price) && price > 0 ? price : null });
+    }
+    return out;
+  }
+
   _parseSitemap(xml) {
     const urlMatches = xml.match(/<loc>([^<]+)<\/loc>/g) || [];
     const newProducts = new Map();
@@ -562,6 +728,9 @@ class PokemonCenterAdapter extends BaseAdapter {
       if (!this.tcgKeywords.some(kw => lowerSlug.includes(kw))) continue;
 
       const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      // The shared scope rule, applied to the exact name an alert would carry.
+      if (!isInScopeName(name)) continue;
+
       const caUrl = url.replace(/\/en-[a-z]{2}\/product\//, '/en-ca/product/')
         .replace(/^(https?:\/\/[^/]+)\/product\//, '$1/en-ca/product/');
 
@@ -596,7 +765,7 @@ class PokemonCenterAdapter extends BaseAdapter {
         logger.info(`Pokemon Center: sitemap parsed — ${newProducts.size} TCG products (${urlMatches.length} total URLs)${appeared.length ? `, ${appeared.length} newly listed` : ''}`);
       }
     } else if (urlMatches.length > 0) {
-      logger.warn(`Pokemon Center: sitemap had ${urlMatches.length} URLs but 0 matched TCG keywords`);
+      logger.warn(`Pokemon Center: sitemap had ${urlMatches.length} URLs but 0 passed the scope rule`);
     }
   }
 
