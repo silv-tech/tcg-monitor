@@ -29,15 +29,53 @@ const LIMITS = {
   pokemoncenter: 15,
 };
 
+/**
+ * The ceiling scales with catalogue size, because a flat count means opposite things at
+ * opposite ends of the shop list.
+ *
+ * Measured against the live catalogues: 12/min is 0.05% of pokejeux (24,471 products, 17,824
+ * of them in stock) but 46% of London Drugs (26 products). So the flat number was strangling
+ * exactly the large Shopify shops where a genuine sale most often fires many alerts at once —
+ * it muted a real sale at remicardtrader (4,497 products, 1,970 in stock) — while being loose
+ * on the small catalogues where a regression would be most obvious.
+ *
+ * Share of catalogue is the signal that actually separates the two cases: a real sale touches
+ * a small slice, a parser or cache regression flips a large one.
+ *
+ * This can only ever RAISE a retailer's ceiling. limitFor() takes the max of the explicit
+ * override and the scaled value, so no store becomes easier to mute than it is today.
+ */
+const CATALOGUE_SHARE = 0.02;
+const MIN_LIMIT = 15;
+// A true runaway is still contained: past this it is systemic whatever the catalogue size.
+const MAX_LIMIT = 120;
+
+const catalogueSizes = new Map();  // retailerId → last known product count
+
+/** Called after each poll with that retailer's catalogue size. */
+function setCatalogueSize(retailerId, count) {
+  if (Number.isFinite(count) && count > 0) catalogueSizes.set(retailerId, count);
+}
+
+// Names of suppressed products, so a mute is never fully invisible. Capped: the point is to
+// show the admin WHAT was dropped, not to replay a flood.
+const SUPPRESS_SAMPLE = 25;
+
 const windows = new Map();   // retailerId → { count, startedAt }
 const muted = new Map();     // retailerId → { until, suppressed, reason }
 
 let onTrip = null;
+let onRecover = null;
 /** Register a callback fired once when a retailer is muted (used to ping the admin). */
 function setTripHandler(fn) { onTrip = fn; }
+/** Register a callback fired once when a retailer unmutes, with what was dropped. */
+function setRecoverHandler(fn) { onRecover = fn; }
 
 function limitFor(retailerId) {
-  return LIMITS[retailerId] || DEFAULT_MAX_PER_WINDOW;
+  const explicit = LIMITS[retailerId] || DEFAULT_MAX_PER_WINDOW;
+  const size = catalogueSizes.get(retailerId) || 0;
+  const scaled = size > 0 ? Math.ceil(size * CATALOGUE_SHARE) : 0;
+  return Math.min(MAX_LIMIT, Math.max(MIN_LIMIT, explicit, scaled));
 }
 
 /**
@@ -55,9 +93,19 @@ function allow(event) {
   if (mute) {
     if (now < mute.until) {
       mute.suppressed++;
+      const name = event.product?.name;
+      if (name && mute.products.length < SUPPRESS_SAMPLE) mute.products.push(name);
       return { allowed: false, suppressed: mute.suppressed };
     }
     logger.warn(`ALERT LIMITER: ${retailerId} unmuted after ${Math.round(COOLDOWN_MS / 60000)}min — ${mute.suppressed} alert(s) were suppressed`);
+    // Report what was dropped. Suppressed alerts are deliberately not replayed — by now they
+    // are stale and replaying them is a second flood — but they must not vanish without
+    // anyone being able to see which products were affected.
+    if (onRecover) {
+      try {
+        onRecover(retailerId, { suppressed: mute.suppressed, products: mute.products.slice(), reason: mute.reason });
+      } catch (err) { logger.warn(`Alert limiter recover handler failed: ${err.message}`); }
+    }
     muted.delete(retailerId);
     windows.delete(retailerId);
   }
@@ -72,7 +120,7 @@ function allow(event) {
   const limit = limitFor(retailerId);
   if (w.count > limit) {
     const reason = `${w.count} alerts in ${Math.round((now - w.startedAt) / 1000)}s (limit ${limit}/min)`;
-    muted.set(retailerId, { until: now + COOLDOWN_MS, suppressed: 1, reason });
+    muted.set(retailerId, { until: now + COOLDOWN_MS, suppressed: 1, reason, products: [event.product?.name].filter(Boolean) });
     logger.error(`ALERT LIMITER: muting ${retailerId} for ${Math.round(COOLDOWN_MS / 60000)}min — ${reason}`);
     if (onTrip) {
       try { onTrip(retailerId, reason); } catch (err) { logger.warn(`Alert limiter trip handler failed: ${err.message}`); }
@@ -99,4 +147,7 @@ function reset(retailerId) {
   muted.clear(); windows.clear();
 }
 
-module.exports = { allow, getStatus, reset, setTripHandler, LIMITS, DEFAULT_MAX_PER_WINDOW };
+module.exports = {
+  allow, getStatus, reset, setTripHandler, setRecoverHandler, setCatalogueSize, limitFor,
+  LIMITS, DEFAULT_MAX_PER_WINDOW, MIN_LIMIT, MAX_LIMIT, CATALOGUE_SHARE,
+};

@@ -318,6 +318,24 @@ async function main() {
         description: `**${retailerId}** exceeded its alert rate limit and is muted for 10 minutes.\n\n${reason}\n\nAlerts from other retailers are unaffected. This usually means a parser change or stale cached state — check the diff before unmuting.`,
       }).catch(() => {});
     });
+
+    // Say WHAT was dropped once the mute lifts. Suppressed alerts are deliberately never
+    // replayed — they are stale by then, and replaying them is a second flood — but a mute
+    // that silently swallows a genuine sale is the failure this limiter is most likely to
+    // cause, so the products involved have to be visible somewhere.
+    alertLimiter.setRecoverHandler((retailerId, info) => {
+      const client = getClient();
+      const sample = info.products.length
+        ? `\n\n**Products affected** (first ${info.products.length}):\n` +
+          info.products.map((n) => `• ${String(n).slice(0, 80)}`).join('\n')
+        : '';
+      sendAdminNotice(client, {
+        title: '🔔 Alert limiter recovered',
+        description: `**${retailerId}** is unmuted. **${info.suppressed}** alert(s) were dropped while muted.\n\n` +
+          `Trip reason: ${info.reason}\n\nIf these look like genuine restocks rather than a flood, ` +
+          `the ceiling for this retailer is too low — it scales with catalogue size.${sample}`,
+      }).catch(() => {});
+    });
   }
 
   // 5. Start scheduler
