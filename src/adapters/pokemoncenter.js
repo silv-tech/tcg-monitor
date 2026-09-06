@@ -199,9 +199,22 @@ class PokemonCenterAdapter extends BaseAdapter {
     if (targets.length > 0) this._lastPaidCheckAt = Date.now();
     const batchSize = targets.length;
 
+    // The paid checks run under a HARD time budget, because they are now slow enough to kill
+    // the poll. Bright Data averages ~50s per page and the scheduler aborts an adapter at
+    // 120s, so three sequential checks with retries timed the whole poll out — 4 consecutive
+    // "Adapter timeout after 120000ms", and nothing was ever saved. The sitemap phase above
+    // is the part that must always complete; availability is cached and can finish next poll.
+    const CHECK_BUDGET_MS = Number(process.env.PC_CHECK_BUDGET_MS) || 70000;
+    const checkDeadline = Date.now() + CHECK_BUDGET_MS;
+
     let checked = 0;
     const failureCounts = {};
     for (let i = 0; i < batchSize; i++) {
+      if (Date.now() >= checkDeadline) {
+        // Whatever is left keeps its place in the rotation and is picked up next poll.
+        logger.info(`Pokemon Center: check budget spent after ${i}/${batchSize} — remaining deferred`);
+        break;
+      }
       const sku = targets[i];
       const meta = this.sitemapProducts.get(sku);
       if (!meta) continue;

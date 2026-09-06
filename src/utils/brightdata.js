@@ -22,7 +22,9 @@ const ZONE = process.env.BRIGHTDATA_ZONE || '';
 
 // Measured worst case was 44s; the ceiling is generous because a slow success is still far
 // cheaper than a retry, and the caller is a background rotation rather than a drop race.
-const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 90000;
+// Fits inside the caller's check budget: a 90s ceiling plus a retry exceeded the
+// scheduler's 120s adapter timeout and killed the whole poll.
+const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 55000;
 
 // 2 of 5 first attempts came back HTTP 200 with a ZERO-length body — not a block, just
 // nothing. Both succeeded on the next try, so one retry is the difference between a 60% and
