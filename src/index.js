@@ -16,6 +16,7 @@ const WalmartAdapter = require('./adapters/walmart');
 const AmazonAdapter = require('./adapters/amazon');
 const ShopifyAdapter = require('./adapters/shopify');
 const BestBuyAdapter = require('./adapters/bestbuy');
+const LondonDrugsAdapter = require('./adapters/londondrugs');
 const { scanSitemaps, SCAN_INTERVAL_MS } = require('./core/sitemap-scanner');
 let closeBrowser;
 try { closeBrowser = require('./utils/browser').closeBrowser; } catch { closeBrowser = null; }
@@ -28,6 +29,7 @@ const ADAPTER_MAP = {
   amazon: AmazonAdapter,
   shopify: ShopifyAdapter,
   bestbuy: BestBuyAdapter,
+  londondrugs: LondonDrugsAdapter,
 };
 
 /**

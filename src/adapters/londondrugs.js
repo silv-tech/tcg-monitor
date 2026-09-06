@@ -1,0 +1,289 @@
+const BaseAdapter = require('./base');
+const logger = require('../monitoring/logger');
+const scraperApi = require('../utils/scraper-api');
+
+/**
+ * London Drugs — Next.js App Router storefront behind DataDome.
+ *
+ * Everything we need (price, availability, stock level, fulfilment) is server-rendered
+ * into the RSC flight payload, so no JS execution is required — a plain GET is enough.
+ *
+ * Access, measured rather than assumed:
+ *   direct / ISP proxy   403 (DataDome rejects datacenter IPs outright)
+ *   residential          7/10 success, median 3.4s, ~44KB wire — but $12/GB
+ *   ScraperAPI standard  10/10 success, median 6.2s, 1 credit per call
+ * ScraperAPI standard is the primary because it is both more reliable and effectively
+ * free against an idle 1M-credit budget; residential is the fallback. Every London Drugs
+ * TCG item is InStorePickup with no DirectShip, so this is a reserve-for-pickup store
+ * rather than a checkout race and the extra 1.5s of latency buys nothing worth $43/mo.
+ */
+
+// The Pokemon category carries every sealed TCG product the store lists, verified against a
+// full 176-sitemap sweep of all 29,775 products: 41 card hits, 41 of them inside this category.
+const FAST_PATH = '/category/pokemon/c/1622?pageSize=200';
+// Wider net, polled slowly: catches anything card-related that lands outside the Pokemon
+// category (One Piece, say — London Drugs lists none today, and this is how we'd find out).
+const SWEEP_PATH = '/category/trading-cards-and-collectibles/c/977?pageSize=200';
+
+const SWEEP_INTERVAL_DEFAULT = 15 * 60 * 1000;
+const SWEEP_INTERVAL_FLOOR = 5 * 60 * 1000;
+
+// pageSize is honoured server-side (16 default -> 200); `sort=`, `Price=` and `categoryId=`
+// are all Disallow'd in robots.txt, and `/search*` with them, so discovery uses categories
+// and the sitemap only — never search.
+const SCRAPER_OPTS = { render: false, premium: false, ultraPremium: false };
+
+const GAME_NAMES = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
+const PRODUCT_FORMS = [
+  'tcg', 'trading card game', 'booster', 'elite trainer', 'etb', 'collection box',
+  'premium collection', 'ex box', 'card game', 'tin', 'blister', 'battle deck',
+  'build & battle', 'build and battle', 'booster bundle',
+];
+// Pokemon-branded storage carries a game name and a card form but is never the drop
+// anyone is waiting on. Costco needed the same split.
+const ACCESSORY_TERMS = [
+  'card book', 'portfolio', 'binder', 'sleeve', 'deck protector', 'pocket pages',
+  'card case', 'playmat', 'toploader', 'deck box',
+];
+
+function decodeEntities(str) {
+  return String(str || '')
+    .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Next.js streams its data as self.__next_f.push([1,"<escaped chunk>"]).
+ * Concatenating the decoded chunks reconstructs the RSC flight payload.
+ */
+function flightOf(html) {
+  let out = '';
+  const re = /self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g;
+  let m;
+  while ((m = re.exec(html))) {
+    try { out += JSON.parse(m[1]); } catch { /* a truncated chunk is not fatal */ }
+  }
+  return out;
+}
+
+/**
+ * The payload is newline-separated "<hexid>:<json>" rows whose values may be "$<hexid>"
+ * pointers into other rows, so it has to be resolved before products make sense.
+ */
+function parseFlightProducts(html) {
+  const flight = flightOf(html);
+  const rows = new Map();
+  const re = /^([0-9a-f]+):([[{"].*)$/gm;
+  let m;
+  while ((m = re.exec(flight))) {
+    try { rows.set(m[1], JSON.parse(m[2])); } catch { /* not every row is JSON */ }
+  }
+
+  const memo = new Map();
+  function resolve(value, depth = 0) {
+    if (depth > 12) return value;
+    if (typeof value === 'string') {
+      if (value === '$undefined') return undefined;
+      const id = value.startsWith('$') ? value.slice(1) : null;
+      if (id && rows.has(id)) {
+        if (memo.has(id)) return memo.get(id);
+        memo.set(id, undefined); // cycle guard
+        const out = resolve(rows.get(id), depth + 1);
+        memo.set(id, out);
+        return out;
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map((v) => resolve(v, depth + 1));
+    if (value && typeof value === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(value)) out[k] = resolve(v, depth + 1);
+      return out;
+    }
+    return value;
+  }
+
+  const seen = new Set();
+  const products = [];
+  for (const [, raw] of rows) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    if (!raw.productCode || !('isAvailable' in raw)) continue;
+    const p = resolve(raw);
+    if (!p || seen.has(p.productCode)) continue;
+    seen.add(p.productCode);
+    products.push(p);
+  }
+  return products;
+}
+
+/** Product objects carry no URL, so the slugs are recovered from the surrounding HTML. */
+function slugMap(html) {
+  const map = new Map();
+  for (const m of String(html || '').matchAll(/\/products\/([a-z0-9-]{3,120})\/p\/(L\d+)/gi)) {
+    if (!map.has(m[2])) map.set(m[2], m[1]);
+  }
+  return map;
+}
+
+function isTrackedCardProduct(name) {
+  const t = String(name || '').toLowerCase();
+  if (!GAME_NAMES.some((g) => t.includes(g))) return false;
+  if (ACCESSORY_TERMS.some((a) => t.includes(a))) return false;
+  return PRODUCT_FORMS.some((f) => t.includes(f));
+}
+
+class LondonDrugsAdapter extends BaseAdapter {
+  constructor(config) {
+    super(config);
+    this._known = new Map(); // sku -> classified product
+    this._lastSweepAt = 0;
+    this._sweepRunning = false;
+    this._deriveTiming();
+  }
+
+  _deriveTiming() {
+    this.sweepIntervalMs = this.timingValue('sweepIntervalMs', SWEEP_INTERVAL_DEFAULT, SWEEP_INTERVAL_FLOOR);
+  }
+
+  applyTiming(timing) {
+    super.applyTiming(timing);
+    this._deriveTiming();
+  }
+
+  /**
+   * ScraperAPI first (reliable and effectively free), residential second. Residential is
+   * only reached when ScraperAPI is unconfigured, budget-paused or errors, so the $12/GB
+   * meter stays near zero in normal operation.
+   */
+  async _fetchCategory(path) {
+    const url = `${this.url}${path}`;
+    let scraperErr = null;
+
+    if (scraperApi.isConfigured()) {
+      try {
+        const html = await scraperApi.scraperFetch(url, {
+          ...SCRAPER_OPTS,
+          retailerId: this.id,
+          // The shared 5-minute floor exists to protect a 100K credit budget on
+          // 25-credit calls. These are 1-credit calls, so the poll interval governs.
+          minIntervalMs: 0,
+          timeoutMs: 45000,
+        });
+        // null means rate-limited or budget-paused, not a failure — fall through to residential
+        if (html && html.length > 5000) return html;
+        if (html) throw new Error(`short response (${html.length} bytes)`);
+      } catch (err) {
+        scraperErr = err;
+        logger.debug(`${this.name}: ScraperAPI failed (${err.message}), trying residential`);
+      }
+    }
+
+    const html = await this.stealthFetch(url, { timeoutMs: 45000, maxRetries: 2, retryDelayMs: 800 });
+    if (!html || html.length < 5000) {
+      throw new Error(`residential returned ${html ? `${html.length} bytes` : 'nothing'}` +
+        (scraperErr ? ` (ScraperAPI: ${scraperErr.message})` : ''));
+    }
+    return html;
+  }
+
+  _toProducts(html) {
+    const slugs = slugMap(html);
+    const out = [];
+    for (const p of parseFlightProducts(html)) {
+      const name = decodeEntities(p.productName);
+      if (!isTrackedCardProduct(name)) continue;
+
+      const price = p.price || {};
+      const value = price.salePrice ?? price.price ?? price.listPrice ?? 0;
+      const listPrice = price.listPrice ?? null;
+      const fulfilment = Array.isArray(p.supportedFulfilmentTypes) ? p.supportedFulfilmentTypes : [];
+      const slug = slugs.get(p.productCode);
+      const stockLevel = p.inventory && typeof p.inventory.onlineStockLevel === 'number'
+        ? p.inventory.onlineStockLevel
+        : null;
+
+      out.push(this.classify({
+        sku: p.productCode,
+        name,
+        price: Number(value) || 0,
+        listPrice: listPrice !== null ? Number(listPrice) : undefined,
+        currency: 'CAD',
+        url: slug
+          ? `${this.url}/products/${slug}/p/${p.productCode}`
+          : `${this.url}/products/p/${p.productCode}`,
+        image: '',
+        inStock: !!p.isAvailable,
+        canAddToCart: !!p.isAvailable,
+        // London Drugs does not ship TCG — every item is pickup-only. Saying otherwise
+        // in an embed would be a wrong field, which is worse than a missing one.
+        shipsToHome: fulfilment.includes('DirectShip'),
+        pickupOnly: fulfilment.length > 0 && !fulfilment.includes('DirectShip'),
+        stockLevel,
+        maxOrderQty: p.maxOrderableQuantity ?? null,
+        seller: 'London Drugs',
+        isPreorderable: /pre-?order/i.test(name),
+      }));
+    }
+    return out;
+  }
+
+  /** Wide sweep — replaces the catalogue so delisted products actually disappear. */
+  async _sweep() {
+    this._sweepRunning = true;
+    const start = Date.now();
+    try {
+      const html = await this._fetchCategory(SWEEP_PATH);
+      const found = this._toProducts(html);
+      if (found.length === 0) throw new Error('sweep parsed 0 in-scope products');
+
+      const fresh = new Map(found.map((p) => [p.sku, p]));
+      // A fast-poll observation is newer than a sweep that started before it; keep it.
+      for (const [sku, old] of this._known) {
+        const next = fresh.get(sku);
+        if (next && old.lastSeen > next.lastSeen) fresh.set(sku, old);
+      }
+      const added = found.filter((p) => !this._known.has(p.sku)).length;
+      const dropped = [...this._known.keys()].filter((sku) => !fresh.has(sku)).length;
+      this._known = fresh;
+      this._lastSweepAt = Date.now();
+      logger.info(`${this.name}: SWEEP — ${fresh.size} products` +
+        `${added ? `, ${added} new` : ''}${dropped ? `, ${dropped} delisted` : ''}, ${Date.now() - start}ms`);
+    } finally {
+      this._sweepRunning = false;
+    }
+  }
+
+  async fetchProducts() {
+    const start = Date.now();
+
+    if (!this._sweepRunning && Date.now() - this._lastSweepAt >= this.sweepIntervalMs) {
+      // Backgrounded so a slow sweep can't blow the scheduler's adapter timeout.
+      this._sweep().catch((err) => logger.warn(`${this.name}: sweep failed: ${err.message}`));
+    }
+
+    const html = await this._fetchCategory(FAST_PATH);
+    const found = this._toProducts(html);
+
+    // A parse that suddenly yields nothing means the page shape changed or we were served
+    // a challenge — not that London Drugs delisted its entire Pokemon catalogue. Throwing
+    // leaves the previous state intact instead of firing an out-of-stock alert for everything.
+    if (found.length === 0 && this._known.size > 0) {
+      throw new Error(`fast poll parsed 0 in-scope products (had ${this._known.size})`);
+    }
+
+    for (const p of found) this._known.set(p.sku, p);
+    this.reportFreshness(found.length, Math.max(found.length, this._known.size ? found.length : 0));
+
+    const inStock = found.filter((p) => p.inStock).length;
+    logger.info(`${this.name}: FAST — ${found.length} tracked products (${inStock} in stock), ${Date.now() - start}ms`);
+
+    return Object.fromEntries(this._known);
+  }
+}
+
+module.exports = LondonDrugsAdapter;
+module.exports.parseFlightProducts = parseFlightProducts;
+module.exports.isTrackedCardProduct = isTrackedCardProduct;
+module.exports.slugMap = slugMap;
+module.exports.decodeEntities = decodeEntities;

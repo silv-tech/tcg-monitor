@@ -351,5 +351,20 @@
       "tcg",
       "trading card"
     ]
+  },
+  {
+    "_phase": 2,
+    "id": "londondrugs",
+    "name": "London Drugs",
+    "url": "https://www.londondrugs.com",
+    "adapter": "londondrugs",
+    "intervalMs": 30000,
+    "proxyTier": "residential",
+    "enabled": true,
+    "color": "#0b5fa5",
+    "timing": {
+      "sweepIntervalMs": 900000
+    },
+    "watchlist": []
   }
 ]

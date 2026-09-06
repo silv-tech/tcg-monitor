@@ -106,6 +106,10 @@ async function scraperFetch(targetUrl, opts = {}) {
     country = 'us',
     timeoutMs = 60000,
     retailerId = 'unknown',
+    // The 5-minute floor below is sized for 25-credit ultra_premium calls against a 100K
+    // budget. A caller making 1-credit standard calls is governed by its own poll interval
+    // instead, so it can lower this — the budget guard above still applies either way.
+    minIntervalMs = MIN_INTERVAL_MS,
   } = opts;
 
   await restoreBudget();
@@ -119,8 +123,8 @@ async function scraperFetch(targetUrl, opts = {}) {
   // Rate limit: skip if called too recently for this retailer
   const now = Date.now();
   const lastCall = lastCallByRetailer.get(retailerId) || 0;
-  if (now - lastCall < MIN_INTERVAL_MS) {
-    const waitSec = Math.round((MIN_INTERVAL_MS - (now - lastCall)) / 1000);
+  if (now - lastCall < minIntervalMs) {
+    const waitSec = Math.round((minIntervalMs - (now - lastCall)) / 1000);
     logger.debug(`ScraperAPI: rate-limited for ${retailerId}, next call in ${waitSec}s`);
     return null;
   }
