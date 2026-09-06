@@ -245,7 +245,15 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     for (const sku of this.watchlist) {
       if (!this.sitemapProducts.has(sku)) continue;
-      if (now - (this._watchlistCheckedAt.get(sku) || 0) < this.watchlistIntervalMs) continue;
+      // Same persistence problem the rotation had, one level up. _watchlistCheckedAt is
+      // in-memory, so every deploy made all 57 watchlist SKUs "due" again; they always sort
+      // ahead of rotation, so the same handful were re-checked forever and the catalogue
+      // never advanced past them. The availability cache is persisted and records checkedAt,
+      // so it is the authority on when a product was last actually read.
+      const cached = this.availabilityCache.get(sku);
+      const lastChecked = Math.max(cached && cached.checkedAt ? cached.checkedAt : 0,
+        this._watchlistCheckedAt.get(sku) || 0);
+      if (now - lastChecked < this.watchlistIntervalMs) continue;
       targets.push(sku);
     }
 
