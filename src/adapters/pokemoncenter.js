@@ -253,7 +253,18 @@ class PokemonCenterAdapter extends BaseAdapter {
       for (const sku of this.sitemapProducts.keys()) {
         if (targets.includes(sku)) continue;
         if (this._isUnfetchable(sku, now)) continue;   // don't spend the budget on a page nobody can fetch
-        candidates.push([sku, this._rotationCheckedAt.get(sku) || 0]);
+        // Rotation progress has to survive a restart, or the sweep begins from the same
+        // products every deploy and never advances. That is exactly what happened: ~10
+        // deploys in one evening kept re-checking the same 17 products while the other
+        // 1,178 were never looked at once, which is why the priced count froze at 17
+        // even though the fetching itself was working.
+        //
+        // The availability cache is already persisted and already records checkedAt, so it
+        // IS the rotation clock. A product with no cache entry has never been checked
+        // successfully and sorts first, which is the order we want anyway.
+        const cached = this.availabilityCache.get(sku);
+        const lastChecked = (cached && cached.checkedAt) || this._rotationCheckedAt.get(sku) || 0;
+        candidates.push([sku, lastChecked]);
       }
       candidates.sort((a, b) => a[1] - b[1]); // never-checked (0) first, then stalest
       for (const [sku] of candidates) {

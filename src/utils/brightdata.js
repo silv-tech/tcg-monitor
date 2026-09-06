@@ -37,7 +37,13 @@ const TIMEOUT_MS = Number(process.env.BRIGHTDATA_TIMEOUT_MS) || 110000;
 // timeout is not — repeating it produces the same timeout and doubles the wait for nothing.
 // This is only affordable because these checks now run off the poll path, so a slow retry
 // delays nothing, and because Bright Data bills successful responses only.
+// Retry only what a retry can actually change.
+//   dd_hardblock  — the exit peer is blocked; an immediate retry reuses the same situation
+//   expect_element — a selector that page never renders will not appear on a second try
+//   resolve_failed_* — the captcha solver already failed on this page
+// Retrying those burns time for a guaranteed identical failure. Transient shapes still retry.
 const RETRYABLE = new Set(['empty_body', 'short_body', 'network_error']);
+const NEVER_RETRY = new Set(['dd_hardblock', 'expect_element']);
 
 // 2 of 5 first attempts came back HTTP 200 with a ZERO-length body — not a block, just
 // nothing. Both succeeded on the next try, so one retry is the difference between a 60% and
@@ -94,10 +100,23 @@ async function unlock(url, opts = {}) {
       // An empty 200 is the known transient. Anything else is a real failure, but both are
       // worth one more try since neither is billed.
       const ms = Date.now() - started;
+      // Bright Data explains itself in HEADERS, not the body. Reading only the body turned
+      // three named, individually actionable causes into one "empty response" mystery that
+      // cost hours. Observed on this target: expect_element (waiting for a "#product"
+      // selector that some product templates never render), dd_hardblock (the exit peer was
+      // hard-blocked by DataDome) and resolve_failed_new_geetest_captcha.
+      const brdError = res.headers.get('x-brd-error');
+      const brdCode = res.headers.get('x-brd-error-code');
+      const brdStatus = res.headers.get('x-brd-status-code');
+
       if (!body || body.length === 0) {
         usage.empties++;
-        lastReason = 'empty_body';
-        noteFailure('empty_body', { status: res.status, ms, label, url: String(targetUrl).slice(-60) });
+        lastReason = brdCode || 'empty_body';
+        noteFailure(lastReason, {
+          status: res.status, upstream: brdStatus, ms, label,
+          brdError: brdError || null,
+          url: String(targetUrl).slice(-60),
+        });
       } else if (!res.ok) {
         usage.failures++;
         // The body of a non-200 is Bright Data telling us why; keep a slice of it.
@@ -120,7 +139,7 @@ async function unlock(url, opts = {}) {
       noteFailure(reason, { ms, label, message: String(err.message).slice(0, 120) });
       logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} failed after ${ms}ms: ${err.message}`);
     }
-    if (attempt < attempts && RETRYABLE.has(lastReason)) {
+    if (attempt < attempts && RETRYABLE.has(lastReason) && !NEVER_RETRY.has(lastReason)) {
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       continue;
     }
