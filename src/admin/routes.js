@@ -2,7 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const state = require('../core/state');
-const { checkHealth } = require('../monitoring/health');
+const { checkHealth, getCompositionState } = require('../monitoring/health');
 const { getStats: getProxyStats, reloadProxies, getProxyPoolStats } = require('../core/proxy');
 const { getEgressStats } = require('../utils/stealth-http');
 const scheduler = require('../core/scheduler');
@@ -286,6 +286,15 @@ router.get('/stats/budget', async (req, res) => {
 // Circuit breaker status
 router.get('/stats/autotune', (req, res) => {
   res.json(require('../core/autotune').getState());
+});
+
+// Composition canary state.
+//
+// The canary is silent when everything is fine, which is indistinguishable from it being
+// broken. This exposes what it has actually learned per store, so "no alerts" can be told
+// apart from "not working".
+router.get('/stats/composition', (req, res) => {
+  res.json(getCompositionState());
 });
 
 router.get('/stats/circuits', (req, res) => {

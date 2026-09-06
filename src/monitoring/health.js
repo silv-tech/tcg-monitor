@@ -237,6 +237,25 @@ function recordComposition(retailerId, products) {
   composition.set(retailerId, entry);
 }
 
+/**
+ * Everything the canary has learned, for the admin API. A canary that only speaks when
+ * something is wrong gives you no way to tell "all clear" from "never ran", so this reports
+ * the baseline it is holding for each store and whether that baseline is mature enough to
+ * judge a disappearance.
+ */
+function getCompositionState() {
+  const out = { baselinePolls: BASELINE_POLLS, missingThreshold: MISSING_THRESHOLD, retailers: {} };
+  for (const [id, games] of composition) {
+    out.retailers[id] = Object.fromEntries(Object.entries(games).map(([game, g]) => [game, {
+      pollsSeenWith: g.seen,
+      typical: g.typical,
+      armed: g.seen >= BASELINE_POLLS,   // enough history to call a disappearance
+      missingStreak: g.missingStreak,
+    }]));
+  }
+  return out;
+}
+
 /** @returns {object} retailerId → [{ game, missingPolls, typical }] for categories now missing */
 function getComposition() {
   const out = {};
@@ -298,5 +317,5 @@ module.exports = {
   recordProductCount, getZeroProductPolls,
   recordFreshness, getZeroFreshPolls,
   recordParseQuality, getParseQuality,
-  recordComposition, getComposition, loadComposition, persistComposition,
+  recordComposition, getComposition, getCompositionState, loadComposition, persistComposition,
 };
