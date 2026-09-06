@@ -53,7 +53,7 @@ const ADAPTER_MAP = {
  *   2.5 req/sec  all 37 circuits closed
  *   3.1 req/sec  all 37 closed, 0 x 429, 0 strikes
  *   3.6 req/sec  all 37 closed — all 24 fast-tier shops under 10s
- *   4.2 req/sec  all 37 closed, 0 x 429, 0 strikes — ALL 31 shops under 10s  <- current
+ *   4.2 req/sec  looked clean for 5 min, then 429s returned ~1h later — NOT sustainable
  *   5.0 req/sec  all 31 shop circuits reopened within minutes
  *
  * Note the 5.0 failure was measured BEFORE the fast-poll path, the startup-burst fix and the
@@ -262,7 +262,7 @@ async function main() {
   // and sweeps draw from the same budget instead of spiking on top of it.
   const shopCount = retailers.filter(r => r.adapter === 'shopify' && r.enabled).length;
   if (shopCount > 0) {
-    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 4.2), 5);
+    rateBudget.configure('shopify', Number(process.env.SHOPIFY_RATE || 2.5), 5);
   }
 
   const clamped = retailers.filter(r => r._clampedFrom);
