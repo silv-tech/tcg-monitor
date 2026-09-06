@@ -177,6 +177,13 @@ class PokemonCenterAdapter extends BaseAdapter {
     return true;
   }
 
+  /** Park immediately, for causes already known to be permanent for this URL. */
+  _parkNow(sku, reason) {
+    if (this._unfetchable.has(sku)) return;
+    this._unfetchable.set(sku, { until: Date.now() + UNFETCHABLE_COOLDOWN_MS, reason });
+    logger.info(`Pokemon Center: parking ${sku} for ${UNFETCHABLE_COOLDOWN_MS / 3600000}h — ${reason}`);
+  }
+
   _noteCheckOutcome(sku, ok) {
     if (ok) {
       if (this._failStreak.delete(sku)) this._unfetchable.delete(sku);
@@ -635,7 +642,12 @@ class PokemonCenterAdapter extends BaseAdapter {
     if (brightData.isConfigured()) {
       // meta carries {url, name} and no sku, so the label was always 'pc' and a failure
       // could not be traced back to a product. The sku is passed explicitly now.
-      const html = await brightData.unlock(meta.url, { label: sku, url: meta.url });
+      const { html, reason } = await brightData.unlock(meta.url, { label: sku, url: meta.url });
+      // expect_element is documented as not improving on retry, and measured 6/6 persistent
+      // on the same URLs across two networks. Park it on the FIRST occurrence: at 45-139s a
+      // go, waiting for a second confirmation burns minutes of the checker for no new
+      // information, and a run of same-template products can stall a whole batch.
+      if (reason && /^expect_element/.test(reason)) this._parkNow(sku, reason);
       if (html) {
         // Parse FIRST. A page that yields real price and availability is a real page,
         // whatever scripts it happens to reference — that ordering is what stops a

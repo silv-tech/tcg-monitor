@@ -75,10 +75,12 @@ function isConfigured() {
 
 /**
  * Fetch a URL through Web Unlocker.
- * @returns {Promise<string|null>} the page HTML, or null if it could not be retrieved
+ * @returns {Promise<{html: string|null, reason: string|null}>} the page, plus WHY it failed.
+ * The caller needs the reason: expect_element is documented as not improving with retries,
+ * so a product that returns it should be parked immediately rather than re-attempted.
  */
 async function unlock(url, opts = {}) {
-  if (!isConfigured()) return null;
+  if (!isConfigured()) return { html: null, reason: 'not_configured' };
   const { timeoutMs = TIMEOUT_MS, attempts = MAX_ATTEMPTS, label = 'brightdata', url: targetUrl = url } = opts;
 
   usage.calls++;
@@ -102,7 +104,7 @@ async function unlock(url, opts = {}) {
       if (res.ok && body && body.length > 1000) {
         usage.successes++;
         usage.callSuccesses++;
-        return body;
+        return { html: body, reason: null };
       }
       // An empty 200 is the known transient. Anything else is a real failure, but both are
       // worth one more try since neither is billed.
@@ -153,7 +155,7 @@ async function unlock(url, opts = {}) {
     }
     break;
   }
-  return null;
+  return { html: null, reason: lastReason };
 }
 
 /** For the admin API, so spend and success rate are visible rather than assumed. */
