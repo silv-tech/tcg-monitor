@@ -13,6 +13,29 @@ const { isTCGProduct } = require('./helpers');
 
 const GAME_NAMES = ['pokemon', 'pokémon', 'one piece'];
 
+/**
+ * Set names count as naming the game, because retailers routinely drop the franchise word.
+ *
+ * Walmart lists the Prismatic Evolutions ETB — its own watchlist item, and the product behind
+ * the biggest drop this monitor has covered — as "Scarlet & Violet—Prismatic Evolutions Elite
+ * Trainer Box", with no "Pokemon" anywhere in it. Amazon's aria-labels do the same thing.
+ * Requiring the franchise word alone would silently discard exactly the products that matter
+ * most, so a recognised set name is accepted as equivalent evidence.
+ *
+ * These only ADD evidence; a match still has to clear isTCGProduct, so a board game or a
+ * video game named after a set is still rejected.
+ */
+const SET_NAMES = [
+  'scarlet & violet', 'scarlet and violet', 'sword & shield', 'sword and shield',
+  'prismatic evolution', 'mega evolution', 'paldea', 'obsidian flames', 'paradox rift',
+  'paradox clash', 'temporal forces', 'twilight masquerade', 'shrouded fable',
+  'stellar crown', 'surging sparks', 'journey together', 'destined rivals',
+  'white flare', 'black bolt', 'phantasmal flames', 'chaos rising', 'pitch black',
+  'ascended heroes', 'perfect order', 'evolving skies', 'lost origin', 'silver tempest',
+  'crown zenith', 'astral radiance', 'brilliant stars', 'fusion strike', 'vivid voltage',
+  'celebrations', 'first partner', 'poke ball tin', 'pokeball tin',
+];
+
 // Accessories — never alert on these even if they name a game
 const ACCESSORY_KEYWORDS = [
   'deck box', 'deckbox', 'playmat', 'play mat', 'sleeves', 'card sleeves',
@@ -88,7 +111,8 @@ function isInScopeName(name) {
   if (/^sponsored ad\b/.test(lower)) return false;
   if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
   if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
-  if (!GAME_NAMES.some(g => lower.includes(g))) return false;
+  const namesGame = GAME_NAMES.some(g => lower.includes(g)) || SET_NAMES.some(k => lower.includes(k));
+  if (!namesGame) return false;
   // Naming a game is not enough — it also has to BE a card product. Amazon always applied
   // this as a separate step and Walmart never did, which is how "Pokémon™ Violet (Nintendo
   // Switch)" and a shelf of UNO variants stayed in scope after the first cleanup.
@@ -97,6 +121,7 @@ function isInScopeName(name) {
 
 module.exports = {
   GAME_NAMES,
+  SET_NAMES,
   ACCESSORY_KEYWORDS,
   PRINT_KEYWORDS,
   repairMojibake,

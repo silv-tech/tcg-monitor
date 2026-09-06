@@ -530,7 +530,12 @@ class WalmartAdapter extends BaseAdapter {
     for (const [sku, p] of Object.entries(products || {})) {
       if (!p) continue;
       const name = repairMojibake(p.name);
-      if (!isInScopeName(name)) { dropped++; continue; }
+      // A watchlist SKU was chosen by hand; no title heuristic outranks that. Walmart lists
+      // its watchlist item as "Scarlet & Violet—Prismatic Evolutions Elite Trainer Box",
+      // with no franchise word at all, so a name-only rule would have discarded the single
+      // most important product this monitor tracks.
+      const watched = p._watchlist || this.watchlist.has(String(sku));
+      if (!watched && !isInScopeName(name)) { dropped++; continue; }
       kept[sku] = name === p.name ? p : { ...p, name };
     }
     if (dropped > 0) logger.debug(`Walmart: ${dropped} out-of-scope products filtered`);

@@ -313,7 +313,10 @@ class BaseAdapter {
     const entries = Object.entries(all || {});
     if (entries.length === 0) return { purged: 0, kept: 0, aborted: false };
 
-    const doomed = entries.filter(([, p]) => p && p.name && !isInScopeName(p.name));
+    // A watchlist SKU is a hand-picked product; no name heuristic gets to delete it.
+    const watched = this.watchlist instanceof Set ? this.watchlist : new Set();
+    const doomed = entries.filter(([sku, p]) =>
+      p && p.name && !watched.has(String(sku)) && !p._watchlist && !isInScopeName(p.name));
     if (doomed.length === 0) return { purged: 0, kept: entries.length, aborted: false };
 
     const kept = entries.length - doomed.length;
