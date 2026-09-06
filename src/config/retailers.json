@@ -80,7 +80,7 @@
     "enabled": true,
     "color": "#ffcb05",
     "timing": {
-      "checksPerPoll": 1,
+      "checksPerPoll": 4,
       "watchlistIntervalMs": 7200000,
       "sitemapIntervalMs": 8000,
       "paidCheckIntervalMs": 60000,
