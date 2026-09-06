@@ -297,6 +297,12 @@ router.get('/stats/composition', (req, res) => {
   res.json(getCompositionState());
 });
 
+// Bright Data spend and success rate. Billing is success-only, so billableRequests is the
+// real cost; requests includes retries that cost nothing.
+router.get('/stats/brightdata', (req, res) => {
+  res.json(require('../utils/brightdata').getUsage());
+});
+
 router.get('/stats/circuits', (req, res) => {
   res.json(scheduler.getCircuitStatus());
 });

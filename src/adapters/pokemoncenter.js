@@ -5,6 +5,7 @@ const { FAILURE_REASONS, classifyError } = require('../core/failure-reasons');
 const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl } = require('../core/proxy');
 const state = require('../core/state');
+const brightData = require('../utils/brightdata');
 
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
@@ -448,7 +449,31 @@ class PokemonCenterAdapter extends BaseAdapter {
       }
     }
 
-    // Method 2: protectedFetch (browser → ScraperAPI) — expensive fallback
+    // Method 2: Bright Data Web Unlocker.
+    //
+    // Placed ABOVE ScraperAPI deliberately. Pokemon Center stacks DataDome and Imperva, and
+    // ScraperAPI cannot get through either tier: measured 2026-09-06, it returns 500 after
+    // ~55s at standard, premium and ultra_premium, with and without rendering, and its Async
+    // Scraper spent 5.8 minutes retrying before returning a DataDome block page. Leaving it
+    // first would burn ~55s per check to always fail. Bright Data returned real stock fields
+    // on 5/5 with one retry, so it is the paid path that actually works here.
+    //
+    // Still second overall: the free stealth attempt above runs first, so a request that can
+    // be served for nothing never reaches a billed provider.
+    if (brightData.isConfigured()) {
+      const html = await brightData.unlock(meta.url, { label: meta.sku || 'pc' });
+      if (html && !this.isChallengePage(html)) {
+        const data = this._parseProductHtml(html);
+        if (data) return { data, failReason: null };
+        return { data: null, failReason: FAILURE_REASONS.NO_MARKERS };
+      }
+      // Fall through only when Bright Data itself could not deliver, so a genuine block is
+      // still visible rather than silently swallowed.
+      if (!html) return { data: null, failReason: FAILURE_REASONS.EMPTY_RESPONSE };
+      return { data: null, failReason: FAILURE_REASONS.BOT_CHALLENGE };
+    }
+
+    // Method 3: protectedFetch (browser → ScraperAPI) — only when Bright Data is unavailable
     try {
       const html = await this.protectedFetch(meta.url, {
         timeoutMs: 30000,

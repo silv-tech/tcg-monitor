@@ -83,8 +83,8 @@
       "checksPerPoll": 3,
       "watchlistIntervalMs": 7200000,
       "sitemapIntervalMs": 8000,
-      "paidCheckIntervalMs": 300000,
-      "dailyRotationChecks": 60
+      "paidCheckIntervalMs": 60000,
+      "dailyRotationChecks": 400
     },
     "parseCanary": false,
     "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked",
