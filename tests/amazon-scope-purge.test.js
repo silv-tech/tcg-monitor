@@ -66,8 +66,11 @@ describe('amazon scope purge: guards against deleting the catalogue', () => {
     assert.strictEqual(plan(entries).aborted, true);
   });
 
-  test('the real production ratio (75 of 371) is under the abort threshold', () => {
-    assert.ok(75 / 371 < PURGE_SAFETY_LIMIT, 'the observed cleanup must be allowed to run');
+  test('the real production ratio (159 of 371) is under the abort threshold', () => {
+    // 43%. Most of the junk DID name a game and was caught as an accessory or a book, so
+    // the true ratio was far above the 20% a "missing game name" count suggested. Anything
+    // stricter than 0.5 would have aborted a legitimate cleanup.
+    assert.ok(159 / 371 < PURGE_SAFETY_LIMIT, 'the observed cleanup must be allowed to run');
   });
 
   test('the threshold leaves real headroom rather than sitting on the observed value', () => {

@@ -33,7 +33,11 @@ const PRINT_KEYWORDS = [
 ];
 
 // If more than this share of the stored catalogue looks out of scope, the scope test is the
-// thing that is wrong. Measured when this shipped: 75 of 371, or 20%.
+// thing that is wrong. The real run removed 159 of 371 — 43%, much closer to this ceiling
+// than the 20% a "missing game name" count suggested, because most of the junk DID name a
+// game and was caught as an accessory or a book instead. Anything stricter than 0.5 would
+// have aborted the legitimate cleanup, so raise the threshold rather than tighten it if a
+// future purge trips this.
 const PURGE_SAFETY_LIMIT = 0.5;
 
 /**
