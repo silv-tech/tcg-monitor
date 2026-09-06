@@ -41,6 +41,17 @@ const RETRY_DELAY_MS = 1500;
 
 const usage = { calls: 0, callSuccesses: 0, requests: 0, successes: 0, empties: 0, failures: 0, msTotal: 0 };
 
+// WHY a call failed, not just that it did. Production sat at ~50% while the identical key,
+// zone and URLs returned 6/6 from a developer machine, and without a reason breakdown there
+// was nothing to act on but guesses.
+const failReasons = Object.create(null);
+const recentFailures = [];   // last few, with status and duration, for the admin API
+function noteFailure(reason, detail) {
+  failReasons[reason] = (failReasons[reason] || 0) + 1;
+  recentFailures.unshift({ reason, ...detail, at: new Date().toISOString() });
+  if (recentFailures.length > 8) recentFailures.pop();
+}
+
 function isConfigured() {
   return Boolean(API_KEY && ZONE);
 }
@@ -75,12 +86,28 @@ async function unlock(url, opts = {}) {
       }
       // An empty 200 is the known transient. Anything else is a real failure, but both are
       // worth one more try since neither is billed.
-      if (!body || body.length === 0) usage.empties++; else usage.failures++;
-      logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} — HTTP ${res.status}, ${body.length}b`);
+      const ms = Date.now() - started;
+      if (!body || body.length === 0) {
+        usage.empties++;
+        noteFailure('empty_body', { status: res.status, ms, label });
+      } else if (!res.ok) {
+        usage.failures++;
+        // The body of a non-200 is Bright Data telling us why; keep a slice of it.
+        noteFailure('http_' + res.status, { status: res.status, ms, label, body: body.slice(0, 160) });
+      } else {
+        usage.failures++;
+        noteFailure('short_body', { status: res.status, ms, label, bytes: body.length });
+      }
+      logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} — HTTP ${res.status}, ${body.length}b in ${ms}ms`);
     } catch (err) {
-      usage.msTotal += Date.now() - started;
+      const ms = Date.now() - started;
+      usage.msTotal += ms;
       usage.failures++;
-      logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} failed: ${err.message}`);
+      // A TimeoutError here is OUR deadline, not Bright Data refusing — worth separating,
+      // because the fix for one is a longer ceiling and for the other is a different vendor.
+      const reason = /timeout|aborted/i.test(err.message || '') ? 'our_timeout' : 'network_error';
+      noteFailure(reason, { ms, label, message: String(err.message).slice(0, 120) });
+      logger.debug(`Bright Data: ${label} attempt ${attempt}/${attempts} failed after ${ms}ms: ${err.message}`);
     }
     // Only retry a FAST failure. A slow one is a timeout, and repeating it would burn the
     // caller's entire budget to fail a second time in exactly the same way.
@@ -108,6 +135,8 @@ function getUsage() {
     avgMs: usage.successes ? Math.round(usage.msTotal / usage.requests) : null,
     // Bright Data bills successful responses only, so this is the real spend.
     billableRequests: usage.successes,
+    failReasons,
+    recentFailures,
   };
 }
 
