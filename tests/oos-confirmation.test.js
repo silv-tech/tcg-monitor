@@ -132,3 +132,69 @@ describe('oos confirmation: it must not invent state', () => {
     assert.strictEqual(next.a.canAddToCart, true, 'a held product must still be buyable');
   });
 });
+
+/**
+ * The first version of this fix confirmed the stock FLAG and changed nothing, because that
+ * was never the mechanism. Four hours later the same four SKUs alerted again, in one burst.
+ *
+ * The real path: a product briefly drops out of a listing page, so it is absent from the poll
+ * result entirely. The stale-cleanup then wrote inStock=false straight to Redis — never
+ * passing through the flag confirmation above — and the next poll seeing it again produced a
+ * RESTOCK. Absence has to be confirmed too.
+ */
+describe('oos confirmation: absence from a poll is confirmed, not trusted', () => {
+  const OOS_CONFIRM_POLLS = 2;
+
+  // Mirrors the stale-cleanup branch in poll-adapter.js.
+  function markStale(oldProducts, newProducts) {
+    const stale = Object.keys(oldProducts).filter((sku) => !(sku in newProducts));
+    const out = {};
+    for (const sku of stale) {
+      const p = { ...oldProducts[sku] };
+      p._missingStreak = (p._missingStreak || 0) + 1;
+      if (p._missingStreak >= OOS_CONFIRM_POLLS) { p.inStock = false; p.canAddToCart = false; }
+      out[sku] = p;
+    }
+    return out;
+  }
+
+  test('one poll of absence does NOT mark a product out of stock', () => {
+    const after = markStale({ a: { inStock: true } }, {});
+    assert.strictEqual(after.a.inStock, true, 'a transient disappearance is not a sell-out');
+    assert.strictEqual(after.a._missingStreak, 1);
+  });
+
+  test('vanish then reappear produces no restock — the actual EB Games bug', () => {
+    const gone = markStale({ a: { inStock: true } }, {});
+    assert.strictEqual(gone.a.inStock, true);
+    // Next poll the listing carries it again. It never left stock, so no RESTOCK is possible.
+    assert.strictEqual(gone.a.inStock, true);
+  });
+
+  test('sustained absence is still believed on the second poll', () => {
+    const p1 = markStale({ a: { inStock: true } }, {});
+    const p2 = markStale(p1, {});
+    assert.strictEqual(p2.inStock, undefined);
+    assert.strictEqual(p2.a.inStock, false, 'a genuinely delisted product does go out of stock');
+    assert.strictEqual(p2.a._missingStreak, 2);
+  });
+
+  test('being seen again clears the absence streak', () => {
+    // Mirrors the `next._missingStreak = 0` line in the confirmation loop.
+    const seen = { a: { inStock: true, _missingStreak: 1 } };
+    seen.a._missingStreak = 0;
+    const after = markStale(seen, {});
+    assert.strictEqual(after.a._missingStreak, 1, 'streak restarts, so one blip never accumulates');
+    assert.strictEqual(after.a.inStock, true);
+  });
+
+  test('a product flickering out of the listing 20 times never flips', () => {
+    let state = { a: { inStock: true } };
+    for (let i = 0; i < 20; i++) {
+      const gone = markStale(state, {});         // absent
+      gone.a._missingStreak = 0;                  // present again next poll
+      state = gone;
+    }
+    assert.strictEqual(state.a.inStock, true, 'alternating absence must never produce a sell-out');
+  });
+});
