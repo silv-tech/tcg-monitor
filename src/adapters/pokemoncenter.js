@@ -9,6 +9,19 @@ const brightData = require('../utils/brightdata');
 
 // One Redis key for the whole availability cache — written at most once per poll.
 const PC_AVAILABILITY_KEY = 'tcg:pokemoncenter:availability';
+const PC_UNFETCHABLE_KEY = 'tcg:pokemoncenter:unfetchable';
+
+// Some Pokemon Center pages cannot be fetched at all. Verified directly: three SKUs failed
+// six times out of six from two different networks, each returning HTTP 200 with a ZERO-byte
+// body after 55-106 seconds. Not a timeout of ours and not a block — Bright Data simply
+// cannot render those particular pages.
+//
+// Left alone, the rotation retries them forever at roughly 160s a product, which starves the
+// products that DO work: at ~400 checks a day, every slot spent on an unfetchable page is a
+// fetchable one that never gets looked at. After this many consecutive failures a SKU is
+// parked, and re-tried once the cooldown expires in case the vendor improves.
+const UNFETCHABLE_AFTER = 2;
+const UNFETCHABLE_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
@@ -64,6 +77,8 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     // Track consecutive full-poll failures to avoid noisy error logging
     this._consecutiveFailures = 0;
+    this._failStreak = new Map();     // sku -> consecutive total failures
+    this._unfetchable = new Map();    // sku -> { until } while parked
   }
 
   _deriveTiming() {
@@ -127,20 +142,67 @@ class PokemonCenterAdapter extends BaseAdapter {
         if (data) {
           data.checkedAt = Date.now();
           this.availabilityCache.set(sku, data);
+          this._noteCheckOutcome(sku, true);
           checked++;
         } else if (failReason) {
           failureCounts[failReason] = (failureCounts[failReason] || 0) + 1;
+          this._noteCheckOutcome(sku, false);
         }
       } catch (err) {
         const reason = classifyError(err);
         failureCounts[reason] = (failureCounts[reason] || 0) + 1;
+        this._noteCheckOutcome(sku, false);
       }
       await sleep(500 + Math.floor(Math.random() * 1000));
     }
     if (checked > 0) await this._saveAvailability();
+    await this._saveUnfetchable();
     const failSummary = Object.entries(failureCounts).map(([k, v]) => `${k}=${v}`).join(' ');
     logger.info(`Pokemon Center: background checks — ${checked}/${targets.length} succeeded` +
       `${failSummary ? ` (${failSummary})` : ''}, ${this.availabilityCache.size} products with known stock`);
+  }
+
+  /** A SKU parked after repeated total failures, so the rotation stops paying for it. */
+  _isUnfetchable(sku, now = Date.now()) {
+    const entry = this._unfetchable.get(sku);
+    if (!entry) return false;
+    if (now >= entry.until) { this._unfetchable.delete(sku); return false; }
+    return true;
+  }
+
+  _noteCheckOutcome(sku, ok) {
+    if (ok) {
+      if (this._failStreak.delete(sku)) this._unfetchable.delete(sku);
+      return;
+    }
+    const streak = (this._failStreak.get(sku) || 0) + 1;
+    this._failStreak.set(sku, streak);
+    if (streak >= UNFETCHABLE_AFTER && !this._unfetchable.has(sku)) {
+      this._unfetchable.set(sku, { until: Date.now() + UNFETCHABLE_COOLDOWN_MS });
+      logger.info(`Pokemon Center: parking ${sku} for ${UNFETCHABLE_COOLDOWN_MS / 3600000}h — ` +
+        `${streak} total failures, the page cannot be fetched`);
+    }
+  }
+
+  async _loadUnfetchable() {
+    if (this._unfetchableLoaded) return;
+    this._unfetchableLoaded = true;
+    try {
+      const raw = await state.getRedis().get(PC_UNFETCHABLE_KEY);
+      if (!raw) return;
+      const now = Date.now();
+      for (const [sku, entry] of Object.entries(JSON.parse(raw))) {
+        if (entry && entry.until > now) this._unfetchable.set(sku, entry);
+      }
+      if (this._unfetchable.size) logger.info(`Pokemon Center: ${this._unfetchable.size} SKUs still parked as unfetchable`);
+    } catch { /* non-critical */ }
+  }
+
+  async _saveUnfetchable() {
+    try {
+      await state.getRedis().set(PC_UNFETCHABLE_KEY,
+        JSON.stringify(Object.fromEntries(this._unfetchable)), 'EX', 86400 * 7);
+    } catch { /* non-critical */ }
   }
 
   async _loadAvailability() {
@@ -190,6 +252,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       const candidates = [];
       for (const sku of this.sitemapProducts.keys()) {
         if (targets.includes(sku)) continue;
+        if (this._isUnfetchable(sku, now)) continue;   // don't spend the budget on a page nobody can fetch
         candidates.push([sku, this._rotationCheckedAt.get(sku) || 0]);
       }
       candidates.sort((a, b) => a[1] - b[1]); // never-checked (0) first, then stalest
@@ -281,6 +344,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     // thing that spots a NEW listing — returns immediately with whatever availability is
     // cached. The paid check updates that cache whenever it finishes, however long it takes.
     await this._loadAvailability();
+    await this._loadUnfetchable();
 
     const paidDue = Date.now() - this._lastPaidCheckAt >= this.paidCheckIntervalMs;
     if (paidDue && !this._checkRunning) {
