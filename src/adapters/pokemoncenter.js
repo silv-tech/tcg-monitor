@@ -242,6 +242,7 @@ class PokemonCenterAdapter extends BaseAdapter {
   _selectCheckTargets() {
     const now = Date.now();
     const targets = [];
+    const dueWatchlist = [];
 
     for (const sku of this.watchlist) {
       if (!this.sitemapProducts.has(sku)) continue;
@@ -254,8 +255,14 @@ class PokemonCenterAdapter extends BaseAdapter {
       const lastChecked = Math.max(cached && cached.checkedAt ? cached.checkedAt : 0,
         this._watchlistCheckedAt.get(sku) || 0);
       if (now - lastChecked < this.watchlistIntervalMs) continue;
-      targets.push(sku);
+      dueWatchlist.push([sku, lastChecked]);
     }
+    // STALEST first. The batch is sliced to checksPerPoll, so pushing in Set order meant the
+    // same few SKUs at the front of the config were selected every time while the rest never
+    // came up — the cache sat at 17 while checks kept reporting success, because those
+    // successes were re-reading products already in it.
+    dueWatchlist.sort((a, b) => a[1] - b[1]);
+    for (const [sku] of dueWatchlist) targets.push(sku);
 
     while (this._newSkuQueue.length > 0 && targets.length < this.checksPerPoll) {
       const sku = this._newSkuQueue.shift();
