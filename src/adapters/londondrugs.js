@@ -199,7 +199,10 @@ class LondonDrugsAdapter extends BaseAdapter {
       const listPrice = price.listPrice ?? null;
       const fulfilment = Array.isArray(p.supportedFulfilmentTypes) ? p.supportedFulfilmentTypes : [];
       const slug = slugs.get(p.productCode);
-      const stockLevel = p.inventory && typeof p.inventory.onlineStockLevel === 'number'
+      // Named stockCount because that is the field the embed reads. It was called stockLevel,
+      // which nothing outside this file has ever looked at, so every London Drugs alert showed
+      // "Stock: 1+" while the exact quantity sat in the payload we had already paid to fetch.
+      const stockCount = p.inventory && typeof p.inventory.onlineStockLevel === 'number'
         ? p.inventory.onlineStockLevel
         : null;
 
@@ -219,7 +222,7 @@ class LondonDrugsAdapter extends BaseAdapter {
         // in an embed would be a wrong field, which is worse than a missing one.
         shipsToHome: fulfilment.includes('DirectShip'),
         pickupOnly: fulfilment.length > 0 && !fulfilment.includes('DirectShip'),
-        stockLevel,
+        stockCount,
         maxOrderQty: p.maxOrderableQuantity ?? null,
         seller: 'London Drugs',
         isPreorderable: /pre-?order/i.test(name),

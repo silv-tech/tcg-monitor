@@ -191,6 +191,20 @@ function buildAlertEmbed(event, tier) {
       embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
     }
 
+    // Fulfilment — only when the retailer will NOT ship it.
+    //
+    // London Drugs lists every TCG item as InStorePickup with no DirectShip, so an alert that
+    // says nothing invites the reader to assume it ships. The adapter has always computed this
+    // and nothing ever displayed it. On a pickup-only retailer it is the field that decides
+    // whether the alert is actionable: otherwise you learn something is in stock, not that you
+    // have to drive to a store to get it.
+    //
+    // Stated only when true. "Ships to home" on every other alert would be noise, and this
+    // stays silent for retailers that report no fulfilment data rather than guessing.
+    if (product.pickupOnly === true) {
+      embed.addFields({ name: 'Fulfilment', value: '\u{1F3EA} In-store pickup only', inline: true });
+    }
+
     if (product._cartLimit) {
       embed.addFields({ name: 'Cart Limit', value: String(product._cartLimit), inline: true });
     }
