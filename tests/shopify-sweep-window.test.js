@@ -72,12 +72,16 @@ describe('the window rotates until the whole catalogue is covered', () => {
     }
   });
 
-  test('it wraps back to the start after the end', async () => {
-    const a = makeAdapter(13750, 14000);
-    for (let sweep = 0; sweep < 6; sweep++) await a.fetchAllProducts({});
+  test('the sequential explorer wraps once it reaches the end', async () => {
+    // The explorer moves one page per sweep and is what guarantees a page that has only ever
+    // been empty is re-checked eventually. Discovery fills the rest of the budget, so the
+    // catalogue is still mapped quickly — that is asserted in the test above.
+    const a = makeAdapter(1000, 1000);      // exactly 4 pages
+    // One page per sweep: after four sweeps the explorer has walked 1,2,3,4 and wrapped.
+    for (let sweep = 0; sweep < 4; sweep++) await a.fetchAllProducts({});
     a.requested = [];
     await a.fetchAllProducts({});
-    assert.strictEqual(a.requested[0], 1, 'after the end the cursor returns to page 1');
+    assert.strictEqual(a.requested[0], 1, 'the explorer returns to page 1 after the end');
   });
 
   test('maxProducts is honoured instead of being overridden by a hard cap', async () => {
@@ -148,16 +152,18 @@ describe('the window position survives a restart', () => {
       // The record carries the handle index alongside the cursor, so keyword search can start
       // straight after a deploy instead of waiting for a sweep to rebuild it.
       const saved = JSON.parse(store['tcg:sweepcursor:testshop']);
-      assert.strictEqual(saved.cursor, 11, 'the next window position must be persisted');
+      assert.strictEqual(saved.cursor, 2, 'the explorer advanced one page');
       assert.ok('handles' in saved, 'the handle index travels with it');
+      assert.ok(Object.keys(saved.yield || {}).length > 0,
+        'which pages hold product must survive a deploy, or the sweep relearns the catalogue');
 
       // A new instance stands in for the process after a deploy.
       const b = makeAdapter(13750, 14000);
       b._cursorLoaded = false; delete b._saveSweepCursor;
       b.requested = [];
       await b.fetchAllProducts({});
-      assert.strictEqual(b.requested[0], 11,
-        'a restart must resume where the rotation left off, not restart at page 1');
+      assert.strictEqual(b.requested[0], 2,
+        'a restart resumes where the explorer left off, not at page 1');
     } finally { restore(); }
   });
 
@@ -304,5 +310,44 @@ describe('the older bare-number cursor still loads', () => {
       await a._loadSweepCursor();
       assert.strictEqual(a._sweepCursor, 37);
     } finally { state.getRedis = orig; }
+  });
+});
+
+describe('the sweep spends its budget where the product is', () => {
+  // Hobbiesville's Mega Set 7 Booster Box read in-stock for over an hour after the shop sold
+  // out. Nothing was broken: the fast poll reads page 1, search only refreshes the ten
+  // products a query surfaces, and a blind rotation gave page 40 the same priority as the
+  // pages holding everything we track. Prioritising by yield is what closes that.
+
+  test('once mapped, the budget goes to pages that held product', async () => {
+    const a = makeAdapter(13750, 14000);
+    // Pretend the catalogue is mapped: pages 3 and 7 hold product, everything else is empty.
+    for (let p = 1; p <= 55; p++) a._pageYield.set(String(p), { n: 0, at: 1000 });
+    a._pageYield.set('3', { n: 12, at: 1000 });
+    a._pageYield.set('7', { n: 5, at: 1000 });
+    a._sweepCursor = 20;
+
+    a.requested = [];
+    await a.fetchAllProducts({});
+    assert.ok(a.requested.includes(3), 'a productive page must be re-read');
+    assert.ok(a.requested.includes(7), 'and so must the other one');
+    assert.ok(a.requested.includes(20), 'the explorer still gets its slot');
+  });
+
+  test('unread pages still take priority while the shop is being mapped', async () => {
+    const a = makeAdapter(13750, 14000);
+    a._pageYield.set('3', { n: 12, at: 1000 });   // one page known, the rest unread
+    a.requested = [];
+    await a.fetchAllProducts({});
+    const unread = a.requested.filter((p) => p !== 3);
+    assert.ok(unread.length >= 8, 'discovery must not stall behind a single known page');
+  });
+
+  test('a page that stops yielding is dropped from the priority set', async () => {
+    const a = makeAdapter(0, 14000);              // every page comes back empty
+    a._pageYield.set('3', { n: 12, at: 1000 });
+    a._sweepCursor = 3;
+    await a.fetchAllProducts({});
+    assert.strictEqual(a._pageYield.get('3').n, 0, 'yield is re-measured, not assumed');
   });
 });

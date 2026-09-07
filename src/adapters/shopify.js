@@ -68,7 +68,11 @@ const SEARCH_TERMS_PER_TICK = Number(process.env.SHOP_SEARCH_TERMS_PER_TICK) || 
 // steady state almost every search result is already known and this stays at zero; it only
 // works hard while a shop is first being mapped.
 const SEARCH_DISCOVERY_PER_TICK = Number(process.env.SHOP_SEARCH_DISCOVERY_PER_TICK) || 2;
-const SWEEP_MS_WITH_SEARCH = Number(process.env.SHOP_SWEEP_BACKSTOP_MS) || 45 * 60 * 1000;
+// The sweep is no longer a blind rotation — it spends its ten pages on the ones known to hold
+// product — so this interval is now the refresh rate for everything we track, not just the
+// slice that happened to come round. 45 minutes was chosen when it was a blind backstop and
+// left Hobbiesville's sold-out Booster Box reading in-stock for over an hour.
+const SWEEP_MS_WITH_SEARCH = Number(process.env.SHOP_SWEEP_BACKSTOP_MS) || 20 * 60 * 1000;
 // Search prices are only believed once they have been shown to agree with prices read from
 // products.json, which is the path whose cent/dollar unit is already established.
 const PRICE_AGREEMENTS_REQUIRED = 5;
@@ -207,6 +211,7 @@ class ShopifyAdapter extends BaseAdapter {
     // in-scope products reach it, so it stays small — on the order of a hundred per shop.
     this.searchTerms = config.searchTerms || SEARCH_TERMS;
     this._handleToSku = new Map();
+    this._pageYield = new Map();   // page -> { n: in-scope found there, at: when }
     this._lastSearchAt = 0;
     this._searchRateLimited = false;
     this._searchPriceAgreements = 0;
@@ -732,16 +737,60 @@ class ShopifyAdapter extends BaseAdapter {
    * @returns {boolean} true only if this run read the catalogue from page 1 through to its
    *   end, which is the only case where the caller may treat the result as a complete view.
    */
+  /**
+   * Which pages this sweep should spend its budget on.
+   *
+   * Plain rotation gives every page equal time, and most pages hold nothing we track — so a
+   * product we DO track waits for the whole catalogue to come round. Hobbiesville's Mega Set 7
+   * Booster Box sat in-stock in our data for over an hour after the shop had sold out, because
+   * nothing re-read its page: the fast poll only reads page 1, search only refreshes the ten
+   * products a query surfaces, and the backstop sweep was rotating 56 pages at 45 minutes a
+   * turn. Every part was working; nothing was actually looking at it.
+   *
+   * The budget therefore splits:
+   *   - one slot always walks sequentially, so unread pages are still discovered and a page
+   *     that has only ever been empty is eventually re-checked
+   *   - the rest go to pages last seen holding in-scope product, stalest first
+   *
+   * Unread pages take priority over that second group while a shop is still being mapped, so
+   * a cold start behaves exactly like the plain rotation it replaces.
+   */
+  _selectSweepPages(maxPages, budget) {
+    const pages = [];
+    const explore = Math.min(Math.max(this._sweepCursor || 1, 1), maxPages);
+    pages.push(explore);
+
+    // Discovery: anything never read yet.
+    for (let p = 1; p <= maxPages && pages.length < budget; p++) {
+      if (this._pageYield.has(String(p))) continue;
+      if (!pages.includes(p)) pages.push(p);
+    }
+
+    // Exploitation: pages that actually hold product, oldest-checked first.
+    if (pages.length < budget) {
+      const productive = [];
+      for (const [p, info] of this._pageYield) {
+        const page = Number(p);
+        if (page <= maxPages && info && info.n > 0) productive.push({ page, at: info.at || 0 });
+      }
+      productive.sort((a, b) => a.at - b.at);
+      for (const { page } of productive) {
+        if (pages.length >= budget) break;
+        if (!pages.includes(page)) pages.push(page);
+      }
+    }
+    return { pages, explore };
+  }
+
   async fetchAllProducts(products) {
     await this._loadSweepCursor();
     this._sweepRateLimited = false;   // describes THIS run only
     const maxPages = Math.max(1, Math.ceil(this.maxProducts / this.pageLimit));
-    const startPage = Math.min(this._sweepCursor || 1, maxPages);
-    let page = startPage;
+    const { pages: plan, explore } = this._selectSweepPages(maxPages, this._sweepPages);
     let pagesRead = 0;
     let reachedEnd = false;
 
-    while (pagesRead < this._sweepPages && page <= maxPages) {
+    for (const page of plan) {
       const url = `${this.url}/products.json?limit=${this.pageLimit}&page=${page}`;
       let data;
       try {
@@ -786,14 +835,18 @@ class ShopifyAdapter extends BaseAdapter {
       }
 
       if (!data.products || data.products.length === 0) {
-        reachedEnd = true;
-        break;
+        // Only the sequential explorer proves where the catalogue ends. A productive page
+        // coming back empty just means its contents shifted.
+        if (page === explore) reachedEnd = true;
+        this._pageYield.set(String(page), { n: 0, at: Date.now() });
+        continue;
       }
 
       // Judge the store's price unit on the UNFILTERED page — the keyword filter can leave
       // too few prices to read the distribution from.
       this._detectPriceUnit(data.products);
 
+      const before = Object.keys(products).length;
       for (const item of data.products) {
         // Filter by keywords if configured
         if (this.searchKeywords.length > 0) {
@@ -803,14 +856,17 @@ class ShopifyAdapter extends BaseAdapter {
         }
         this.parseShopifyProduct(item, products);
       }
+      // Remember what this page was worth, so the next sweep spends its budget where the
+      // product actually is instead of treating all 56 pages as equally interesting.
+      this._pageYield.set(String(page), { n: Object.keys(products).length - before, at: Date.now() });
 
       pagesRead++;
-      // A short page is the last one Shopify has.
-      if (data.products.length < this.pageLimit) { reachedEnd = true; break; }
-      page++;
+      // A short page is the last one the shop has.
+      if (page === explore && data.products.length < this.pageLimit) reachedEnd = true;
     }
 
-    if (page > maxPages) reachedEnd = true;   // reached the configured ceiling
+    // The explorer advances one page per sweep and wraps at the end.
+    this._sweepCursor = (reachedEnd || explore >= maxPages) ? 1 : explore + 1;
 
     // A clean run earns one page back, so a shop that was briefly busy returns to full speed
     // instead of being punished forever by one bad minute. The flag is reset at the START of
@@ -821,10 +877,17 @@ class ShopifyAdapter extends BaseAdapter {
       logger.info(`${this.name}: sweep widened back to ${this._sweepPages} page(s) per run`);
     }
 
-    this._sweepCursor = reachedEnd ? 1 : page;
     await this._saveSweepCursor();
-    // Complete only when this single run spanned the entire catalogue.
-    return reachedEnd && startPage === 1;
+
+    // Complete only when this ONE run read every page the shop has — true for a small shop
+    // whose whole catalogue fits in the budget, false for a large one, where the caller must
+    // treat the result as partial or the pages outside this sweep look like products that
+    // vanished.
+    const planned = new Set(plan);
+    for (let p = 1; p <= maxPages; p++) {
+      if (!planned.has(p)) return false;
+    }
+    return true;
   }
 
   /**
@@ -855,6 +918,11 @@ class ShopifyAdapter extends BaseAdapter {
         for (const [h, sku] of Object.entries(saved.handles)) this._handleToSku.set(h, sku);
       }
       if (Number.isFinite(saved.priceAgreements)) this._searchPriceAgreements = saved.priceAgreements;
+      // Which pages hold product. Without this the sweep relearns the whole catalogue after
+      // every deploy, spending its budget on empty pages while tracked products go stale.
+      if (saved.yield && typeof saved.yield === 'object') {
+        for (const [p, info] of Object.entries(saved.yield)) this._pageYield.set(p, info);
+      }
     } catch { /* first sweep just starts at page 1 with no history */ }
   }
 
@@ -862,9 +930,14 @@ class ShopifyAdapter extends BaseAdapter {
     try {
       const handles = {};
       for (const [h, sku] of this._handleToSku) handles[h] = sku;
+      // Only pages that actually yielded product are worth carrying — a shop with a hundred
+      // empty pages should not rewrite a hundred zeroes on every sweep.
+      const productive = {};
+      for (const [p, info] of this._pageYield) if (info && info.n > 0) productive[p] = info;
       const payload = JSON.stringify({
         cursor: this._sweepCursor,
         handles,
+        yield: productive,
         priceAgreements: Number.isFinite(this._searchPriceAgreements) ? this._searchPriceAgreements : 0,
       });
       await withRedisTimeout(state.getRedis().set(`tcg:sweepcursor:${this.id}`, payload));
