@@ -7,7 +7,7 @@ const { recordProductCount } = require('../monitoring/health');
 const { pollAdapterOnce } = require('./poll-adapter');
 const autotune = require('./autotune');
 const speedGuard = require('../monitoring/speed-guard');
-const { isSelfSkip } = require('../utils/stealth-http');
+const { isSelfSkip, isRateLimited } = require('../utils/stealth-http');
 const { recordRestock, recordPrice } = require('./state');
 
 // Circuit breaker thresholds
@@ -128,7 +128,18 @@ class Scheduler {
       // stopped complaining: 429 -> we set a cooldown -> the next poll is refused BY US ->
       // counted as an error -> five of those trip the breaker -> the breaker's recovery
       // probes land inside the same cooldown -> the circuit never closes.
-      if (isSelfSkip(err)) {
+      // The same reasoning covers a 429 the retailer actually sent. Throttling means we asked
+      // too often, not that the store is broken, and stealth-http already answers it with an
+      // escalating per-host cooldown. Stacking the circuit breaker on top turned one burst of
+      // throttling into a total blackout: five 429s tripped the breaker, the breaker stayed
+      // open ten minutes, its recovery probe landed inside the cooldown and was refused, and
+      // it reopened. Kanzen Games spent hours in that loop while the shop itself was fine
+      // between cooldowns — it answered 174 products on every poll that got through.
+      //
+      // A persistently throttled retailer is still reported: no poll succeeds, so staleness
+      // flags it once the silence outlives the cooldown. What it no longer does is add ten
+      // minutes of enforced blackout to a thirty-second backoff.
+      if (isSelfSkip(err) || isRateLimited(err)) {
         logger.debug(`${adapter.name}: poll skipped — ${err.message}`);
         return;
       }
