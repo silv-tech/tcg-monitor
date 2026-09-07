@@ -185,7 +185,8 @@
       "one piece",
       "dragon ball",
       "sealed"
-    ]
+    ],
+    "maxProducts": 25000
   },
   {
     "_phase": 2,
@@ -252,7 +253,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#1e3a5f"
+    "color": "#1e3a5f",
+    "maxProducts": 25000
   },
   {
     "_phase": 2,
@@ -263,7 +265,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#e63946"
+    "color": "#e63946",
+    "maxProducts": 25000
   },
   {
     "_phase": 2,
@@ -274,7 +277,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#27ae60"
+    "color": "#27ae60",
+    "maxProducts": 5500
   },
   {
     "_phase": 2,
@@ -285,7 +289,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#9b59b6"
+    "color": "#9b59b6",
+    "maxProducts": 3600
   },
   {
     "_phase": 2,
@@ -296,7 +301,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#2980b9"
+    "color": "#2980b9",
+    "maxProducts": 25000
   },
   {
     "_phase": 2,
@@ -307,7 +313,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#e67e22"
+    "color": "#e67e22",
+    "maxProducts": 25000
   },
   {
     "_phase": 2,
@@ -318,7 +325,8 @@
     "intervalMs": 16000,
     "proxyTier": "isp",
     "enabled": false,
-    "color": "#c0392b"
+    "color": "#c0392b",
+    "maxProducts": 3800
   },
   {
     "_phase": 2,
