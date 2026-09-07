@@ -337,14 +337,13 @@
     "name": "Kanzen Games",
     "url": "https://kanzengames.com",
     "adapter": "shopify",
-    "intervalMs": 16000,
+    "intervalMs": 30000,
     "proxyTier": "isp",
     "enabled": true,
     "color": "#1a1a2e",
     "maxProducts": 4000,
     "collections": [
-      "pokemon-sealed-in-stock",
-      "one-piece-sealed"
+      "pokemon-sealed-in-stock"
     ],
     "searchKeywords": [
       "pokemon",
