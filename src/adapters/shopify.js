@@ -27,6 +27,48 @@ const SWEEP_PAGES_PER_RUN = 10;
 // slowly; dropping to zero would stall the rotation permanently.
 const MIN_SWEEP_PAGES = 2;
 
+/**
+ * Keyword search — the same approach the big seven already use, finally applied to the shops.
+ *
+ * Walmart, Amazon, Best Buy and Costco do not walk their catalogues; they send the shared
+ * query list from config/products.json to each retailer's own search engine. The shops were
+ * the odd ones out, paginating up to a hundred pages to find the same products.
+ *
+ * Measured against the live stores, Shopify's predictive-search endpoint finds 118 in-scope
+ * products at hobbiesville from 18 queries where pagination needs 56 page requests for ~130 —
+ * 91% of the coverage for a third of the requests, and ~31KB per response instead of ~150KB.
+ *
+ * The terms come from the SAME shared file the big seven use, so a change there moves every
+ * store at once. The list is wider than their four queries only because Shopify hard-caps
+ * predictive search at ten results per query however large a limit you ask for, so coverage
+ * has to come from more terms rather than deeper pages.
+ */
+const sharedProducts = require('../config/products.json');
+const SEARCH_TERMS = [...new Set([
+  ...(sharedProducts.searchQueries || []),
+  ...(sharedProducts.setQueries || []),
+  ...(sharedProducts.keywords || []),
+].map((t) => String(t).trim().toLowerCase()).filter(Boolean))];
+
+// Shopify's own cap. Asking for more is silently ignored — verified against three shops.
+const SEARCH_RESULT_LIMIT = 10;
+// Search refreshes stock for the in-scope set; the pagination sweep becomes the slower
+// backstop that discovers what search misses, which is why it can drop to 45 minutes. The two
+// together land within a few percent of the request rate this adapter had before search
+// existed, because these shops 429 readily and the budget had to come from somewhere.
+//
+// ONE term per tick, not the whole list at once. Firing all fourteen together would put a
+// fifteen-request burst on a fast poll, which is the shape that produced the 429s in the first
+// place — the aggregate rate was never the problem, the clustering was. Spread this way the
+// search costs about one extra request every 90 seconds per shop, and the full in-scope set is
+// refreshed roughly every 21 minutes.
+const SEARCH_INTERVAL_MS = Number(process.env.SHOP_SEARCH_MS) || 90 * 1000;
+const SEARCH_TERMS_PER_TICK = Number(process.env.SHOP_SEARCH_TERMS_PER_TICK) || 1;
+const SWEEP_MS_WITH_SEARCH = Number(process.env.SHOP_SWEEP_BACKSTOP_MS) || 45 * 60 * 1000;
+// Search prices are only believed once they have been shown to agree with prices read from
+// products.json, which is the path whose cent/dollar unit is already established.
+const PRICE_AGREEMENTS_REQUIRED = 5;
+
 // The sweep cursor is an optimisation, so waiting on Redis for it must never stall a sweep.
 // A disconnected ioredis client QUEUES commands rather than rejecting, so without this a
 // blip would hang every shop poll until the adapter timeout rather than costing one
@@ -155,6 +197,16 @@ class ShopifyAdapter extends BaseAdapter {
     this.maxProducts = Number(config.maxProducts) > 0 ? Number(config.maxProducts) : 2500;
     this._sweepCursor = 1;   // rotating window position
     this._sweepPages = SWEEP_PAGES_PER_RUN;  // narrowed on 429, widened again on success
+
+    // Search state. The handle index is what lets a search result be matched to a product
+    // pagination has already identified, instead of inventing a second key for it. Only
+    // in-scope products reach it, so it stays small — on the order of a hundred per shop.
+    this.searchTerms = config.searchTerms || SEARCH_TERMS;
+    this._handleToSku = new Map();
+    this._lastSearchAt = 0;
+    this._searchRateLimited = false;
+    this._searchPriceAgreements = 0;
+    this._searchTermCursor = 0;
     this._sweepRateLimited = false;
     // Conditional-request state, keyed by page URL. Both survive across polls: the ETag is what
     // earns the 304, and the cached page is what lets us skip parsing when we get one.
@@ -197,7 +249,21 @@ class ShopifyAdapter extends BaseAdapter {
       // apart). Polls before then are fast ones, which still catch every new listing.
       this._lastFullSweep = now - FULL_SWEEP_MS + this._sweepOffset;
     }
-    return now - this._lastFullSweep >= FULL_SWEEP_MS;
+    // Once keyword search is carrying the stock refresh, the pagination sweep becomes a
+    // backstop for what search cannot see, and can run far less often. That is what keeps the
+    // combined request rate per shop within a couple of percent of what it was before search
+    // existed — these shops 429 readily, so the budget had to come from somewhere.
+    const interval = this._searchActive() ? SWEEP_MS_WITH_SEARCH : FULL_SWEEP_MS;
+    return now - this._lastFullSweep >= interval;
+  }
+
+  /** Search only carries the load once pagination has identified something for it to update. */
+  _searchActive() {
+    return this.collections.length === 0 && this.searchTerms.length > 0 && this._handleToSku.size > 0;
+  }
+
+  _isSearchDue(now = Date.now()) {
+    return this._searchActive() && (now - this._lastSearchAt) >= SEARCH_INTERVAL_MS;
   }
 
   async fetchProducts() {
@@ -245,6 +311,24 @@ class ShopifyAdapter extends BaseAdapter {
               if (!this.searchKeywords.some(kw => text.includes(kw.toLowerCase()))) continue;
             }
             this.parseShopifyProduct(item, products);
+          }
+        }
+
+        // Keyword search rides the fast poll rather than the sweep, because refreshing stock
+        // for the whole in-scope set is the thing detection latency actually depends on.
+        // Rotating pages had pushed a product on page 5 from a 15-minute check to a 2.5-hour
+        // one; this brings the whole set back to one refresh per SEARCH_INTERVAL_MS.
+        if (this._isSearchDue()) {
+          this._lastSearchAt = Date.now();
+          this._searchRateLimited = false;
+          try {
+            const n = await this._searchProducts(products);
+            logger.info(`${this.name}: keyword search refreshed ${n} product(s) across ` +
+              `${this.searchTerms.length} term(s)`);
+          } catch (err) {
+            // Search is an accelerator, never a dependency — the sweep still covers everything
+            // it would have found, so a failure here must not fail the poll.
+            logger.warn(`${this.name}: keyword search failed: ${err.message}`);
           }
         }
         return products;
@@ -392,10 +476,104 @@ class ShopifyAdapter extends BaseAdapter {
     this._anyPageChanged = true;
     let data;
     try { data = JSON.parse(res.body); } catch { return { products: [], changed: false }; }
-    const list = data.products || [];
+    // products.json puts the list at .products; predictive search nests it under
+    // .resources.results.products. Handling both here keeps one fetch path — and therefore
+    // one budget, one proxy, one cooldown and one ETag cache — for every Shopify request.
+    const list = data.products || data?.resources?.results?.products || [];
     if (res.headers.etag) this._etags.set(url, res.headers.etag);
     this._pageCache.set(url, list);
     return { products: list, changed: true };
+  }
+
+  /**
+   * Refresh stock for known products using the shop's own search engine.
+   *
+   * This deliberately does NOT create products. Shopify's predictive search omits
+   * variant.sku, while products.json supplies it and most shops populate it for real —
+   * "POKE10-10311-114", "PKM-S-CI-053-RH-R-149076-3". Minting a key here would therefore
+   * invent a second identity for a product we already track, and every one of those would
+   * surface as a brand new listing. So search updates what pagination has already identified,
+   * matched on the product handle, and anything unknown is left for the sweep to discover.
+   * Nothing is lost by that: a genuinely new listing appears on page 1, which the fast poll
+   * reads every poll.
+   *
+   * @returns {number} how many known products were refreshed
+   */
+  async _searchProducts(products) {
+    if (!this._handleToSku.size) return 0;   // nothing identified yet; sweep runs first
+    let refreshed = 0;
+
+    // Take the next few terms and remember where we stopped, so successive polls walk the
+    // whole list instead of repeating its head.
+    const terms = [];
+    for (let i = 0; i < Math.min(SEARCH_TERMS_PER_TICK, this.searchTerms.length); i++) {
+      terms.push(this.searchTerms[this._searchTermCursor % this.searchTerms.length]);
+      this._searchTermCursor = (this._searchTermCursor + 1) % this.searchTerms.length;
+    }
+
+    for (const term of terms) {
+      const url = `${this.url}/search/suggest.json?q=${encodeURIComponent(term)}`
+        + `&resources[type]=product&resources[limit]=${SEARCH_RESULT_LIMIT}`
+        + '&resources[options][unavailable_products]=show';
+      let results;
+      try {
+        results = (await this._fetchPage(url)).products;
+      } catch (err) {
+        if (!isRateLimited(err)) throw err;
+        logger.warn(`${this.name}: search rate limited on "${term}" — keeping ${refreshed} refreshed`);
+        this._searchRateLimited = true;
+        break;
+      }
+      if (!Array.isArray(results)) continue;
+
+      for (const item of results) {
+        const sku = this._handleToSku.get(item.handle);
+        if (!sku) continue;                       // not identified yet — the sweep owns that
+        const existing = products[sku];
+        const price = this._searchPrice(item, existing);
+        products[sku] = {
+          ...(existing || {}),
+          sku,
+          name: item.title,
+          url: existing?.url || `${this.url}/products/${item.handle}`,
+          image: existing?.image || item.featured_image?.url || item.image || '',
+          price,
+          currency: 'CAD',
+          inStock: item.available === true,
+          canAddToCart: item.available === true,
+          shipsToHome: true,
+        };
+        refreshed++;
+      }
+    }
+    return refreshed;
+  }
+
+  /**
+   * Price from a search result, but only once it has earned trust.
+   *
+   * The two endpoints do not agree on units. products.json quotes hobbiesville in cents
+   * (696/696 prices exact multiples of 100) while predictive search returns the formatted
+   * "579.95" for the same catalogue. Applying the store's cent divisor to a search price
+   * would report a $579.95 booster box as $5.79.
+   *
+   * So a search price is compared against the price pagination already established for the
+   * same product, and is only adopted after enough of those comparisons agree. Until then
+   * the known price is kept and only availability is taken — a missing price costs one field,
+   * a wrong one pollutes price history and can fire a false price-drop alert.
+   */
+  _searchPrice(item, existing) {
+    const parsed = normalizePrice(String(item.price ?? ''));
+    const known = existing && typeof existing.price === 'number' ? existing.price : null;
+
+    if (Number.isFinite(parsed) && parsed > 0 && known !== null) {
+      const agrees = Math.abs(parsed - known) / known < 0.01;
+      if (agrees) this._searchPriceAgreements++;
+      else this._searchPriceAgreements = -Infinity;   // one disagreement disqualifies the shop
+    }
+    const trusted = this._searchPriceAgreements >= PRICE_AGREEMENTS_REQUIRED;
+    if (trusted && Number.isFinite(parsed) && parsed > 0) return parsed;
+    return known;
   }
 
   async fetchCollection(handle, products) {
@@ -572,14 +750,30 @@ class ShopifyAdapter extends BaseAdapter {
     this._cursorLoaded = true;
     try {
       const raw = await withRedisTimeout(state.getRedis().get(`tcg:sweepcursor:${this.id}`));
-      const n = Number(raw);
-      if (Number.isFinite(n) && n >= 1) this._sweepCursor = n;
-    } catch { /* first sweep just starts at page 1 */ }
+      if (!raw) return;
+      // Earlier deployments stored a bare page number, so accept both shapes.
+      if (/^\d+$/.test(raw)) { this._sweepCursor = Number(raw); return; }
+      const saved = JSON.parse(raw);
+      if (Number.isFinite(saved.cursor) && saved.cursor >= 1) this._sweepCursor = saved.cursor;
+      // Without the handle index, search would sit idle after every deploy until a sweep had
+      // rebuilt it — up to 45 minutes of doing nothing.
+      if (saved.handles && typeof saved.handles === 'object') {
+        for (const [h, sku] of Object.entries(saved.handles)) this._handleToSku.set(h, sku);
+      }
+      if (Number.isFinite(saved.priceAgreements)) this._searchPriceAgreements = saved.priceAgreements;
+    } catch { /* first sweep just starts at page 1 with no history */ }
   }
 
   async _saveSweepCursor() {
     try {
-      await withRedisTimeout(state.getRedis().set(`tcg:sweepcursor:${this.id}`, String(this._sweepCursor)));
+      const handles = {};
+      for (const [h, sku] of this._handleToSku) handles[h] = sku;
+      const payload = JSON.stringify({
+        cursor: this._sweepCursor,
+        handles,
+        priceAgreements: Number.isFinite(this._searchPriceAgreements) ? this._searchPriceAgreements : 0,
+      });
+      await withRedisTimeout(state.getRedis().set(`tcg:sweepcursor:${this.id}`, payload));
     } catch { /* position is an optimisation, never worth failing a poll for */ }
   }
 
@@ -623,6 +817,13 @@ class ShopifyAdapter extends BaseAdapter {
     for (const variant of item.variants) {
       const inStock = variant.available === true;
       const sku = variant.sku || `${item.id}-${variant.id}`;
+      // Remember which product this handle belongs to. Predictive search returns a handle but
+      // no variant.sku, so this index is the only safe way for a search result to update THIS
+      // product rather than register itself as a new one. First variant wins, which matches
+      // how search reports a product it has only one entry for.
+      if (item.handle && !this._handleToSku.has(item.handle)) {
+        this._handleToSku.set(item.handle, sku);
+      }
       const image = item.images?.[0]?.src || item.image?.src || '';
 
       let price = typeof variant.price === 'number'

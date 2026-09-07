@@ -144,8 +144,11 @@ describe('the window position survives a restart', () => {
       const a = makeAdapter(13750, 14000);
       a._cursorLoaded = false; delete a._saveSweepCursor;
       await a.fetchAllProducts({});
-      assert.strictEqual(store['tcg:sweepcursor:testshop'], '11',
-        'the next window position must be persisted');
+      // The record carries the handle index alongside the cursor, so keyword search can start
+      // straight after a deploy instead of waiting for a sweep to rebuild it.
+      const saved = JSON.parse(store['tcg:sweepcursor:testshop']);
+      assert.strictEqual(saved.cursor, 11, 'the next window position must be persisted');
+      assert.ok('handles' in saved, 'the handle index travels with it');
 
       // A new instance stands in for the process after a deploy.
       const b = makeAdapter(13750, 14000);
@@ -283,5 +286,22 @@ describe('page 1 stays the freshness anchor', () => {
   test('if page 1 is refused too, the shop really is down and it propagates', async () => {
     const a = makeDeepThrottled(false);
     await assert.rejects(() => a.fetchAllProducts({}), /rate limited/i);
+  });
+});
+
+describe('the older bare-number cursor still loads', () => {
+  // A running deployment has the old format in Redis. Refusing to read it would silently
+  // restart every shop's rotation at page 1 on the deploy that changes the format.
+  const state = require('../src/core/state');
+
+  test('a legacy value is accepted', async () => {
+    const orig = state.getRedis;
+    state.getRedis = () => ({ get: async () => '37', set: async () => {} });
+    try {
+      const a = makeAdapter(13750, 14000);
+      a._cursorLoaded = false;
+      await a._loadSweepCursor();
+      assert.strictEqual(a._sweepCursor, 37);
+    } finally { state.getRedis = orig; }
   });
 });

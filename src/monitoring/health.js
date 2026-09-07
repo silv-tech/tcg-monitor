@@ -66,7 +66,18 @@ async function checkHealth() {
     // as unhealthy: it needs a human to judge whether the store stopped stocking it or we
     // stopped seeing it, and flipping the store unhealthy would mute nothing and help nobody.
     const lostCategories = (composedLost[retailer.id] || []).map(c => c.game);
-    const healthy = status.healthy && !isStale
+    // Extending the stale window was only half the path. A throttled shop also accumulates
+    // consecutive errors, and status.healthy goes false on its own — which is why Infinity
+    // Cards kept alerting with "Errors: 5" after the staleness grace was in place.
+    //
+    // A shop whose ONLY complaint is that we are currently backing off it is not unhealthy.
+    // This is bounded by isStale, which is still evaluated normally below: once the silence
+    // outlives the cooldown the shop goes unhealthy regardless, so a permanently refused shop
+    // is still reported rather than excused forever.
+    const throttledOnly = !isStale && throttledForMs > 0
+      && /rate.?limit|429/i.test(String(status.lastError || ''));
+
+    const healthy = (status.healthy || throttledOnly) && !isStale
       && zeroCount < ZERO_PRODUCT_THRESHOLD
       && staleDataCount < ZERO_FRESH_THRESHOLD
       && quality.emptyPolls < QUALITY_THRESHOLD;

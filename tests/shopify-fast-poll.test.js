@@ -134,8 +134,14 @@ describe('shopify fast poll: reads only page 1', () => {
     };
 
     const products = await a.fetchProducts();
-    assert.strictEqual(urls.length, 1, 'ten paged requests became one');
-    assert.match(urls[0], /page=1/);
+    // What this guards is that a fast poll never PAGES — ten paged requests became one.
+    // Keyword search may add at most one more request on its own 90s cadence, which is a
+    // different budget and is asserted in the keyword-search suite.
+    const pageRequests = urls.filter((u) => /\/products\.json/.test(u));
+    assert.strictEqual(pageRequests.length, 1, 'ten paged requests became one');
+    assert.match(pageRequests[0], /page=1/);
+    assert.ok(urls.filter((u) => /suggest\.json/.test(u)).length <= 1,
+      'search must never burst — one term per tick');
     assert.strictEqual(a._partialPoll, true, 'and it declares itself partial');
     assert.strictEqual(Object.keys(products).length, 1);
   });
