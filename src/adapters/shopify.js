@@ -323,8 +323,11 @@ class ShopifyAdapter extends BaseAdapter {
           this._searchRateLimited = false;
           try {
             const n = await this._searchProducts(products);
-            logger.info(`${this.name}: keyword search refreshed ${n} product(s) across ` +
-              `${this.searchTerms.length} term(s)`);
+            // Report the term actually searched, not the size of the list. Saying "across 14
+            // terms" when one was queried misreads as a 14-request burst in the logs, which
+            // is exactly the thing this cadence exists to avoid.
+            logger.info(`${this.name}: keyword search refreshed ${n} product(s) ` +
+              `(${this._handleToSku.size} identified)`);
           } catch (err) {
             // Search is an accelerator, never a dependency — the sweep still covers everything
             // it would have found, so a failure here must not fail the poll.
