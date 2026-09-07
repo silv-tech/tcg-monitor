@@ -60,3 +60,21 @@ describe('a collection-based shop is not required to set depth', () => {
       'chimeragaming reads a collection, so the catalogue-wide cap does not apply to it');
   });
 });
+
+describe('poll cadence matches what the shop path actually costs', () => {
+  // 8s is safe for a collection shop, whose poll is a few hundred pre-filtered products.
+  // It is NOT safe on the catalogue path, where every poll pulls page 1 of a 13,750-25,000
+  // product catalogue: within minutes of trying it, 401games, pokejeux and infinitycards were
+  // taking escalating 429 strikes while the two collection shops took none.
+  const shops = list.filter((r) => r.adapter === 'shopify');
+
+  for (const shop of shops) {
+    const usesCollections = (shop.collections || []).length > 0;
+    test(`${shop.id} polls at ${usesCollections ? '8s (collections)' : '16s (catalogue)'}`, () => {
+      assert.strictEqual(shop.intervalMs, usesCollections ? 8000 : 16000,
+        usesCollections
+          ? 'a collection shop can afford the fast cadence'
+          : 'a catalogue-path shop cannot — this is what caused the 429 strikes');
+    });
+  }
+});
