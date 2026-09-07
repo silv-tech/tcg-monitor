@@ -199,7 +199,10 @@
     "enabled": true,
     "color": "#ff6600",
     "maxProducts": 14000,
-    "collections": [],
+    "collections": [
+      "pokemon-trading-cards",
+      "one-piece-booster-boxes"
+    ],
     "searchKeywords": [
       "pokemon",
       "pokémon",
@@ -339,7 +342,10 @@
     "enabled": true,
     "color": "#1a1a2e",
     "maxProducts": 4000,
-    "collections": [],
+    "collections": [
+      "pokemon-sealed-all",
+      "one-piece-sealed"
+    ],
     "searchKeywords": [
       "pokemon",
       "pokémon",
