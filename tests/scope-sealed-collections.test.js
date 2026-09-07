@@ -85,3 +85,38 @@ describe('boxed play accessories are not sealed product', () => {
     assert.strictEqual(isInScopeName('Pokemon Tcg Scarlet And Violet Surging Sparks Booster Bundle'), true);
   });
 });
+
+describe('merchandise that names a game is not TCG product', () => {
+  // Nine of these were in scope across the shops, and the $15 alert floor was the only thing
+  // keeping most quiet — the pokejeux Plamo kit at $41.99 was above it and would have alerted.
+  // Plamo is Bandai's plastic model line; "playing cards" is a poker deck.
+  const MERCH = [
+    'Pokemon Plamo Collection 021 Kyurem',
+    'Pokémon PLAMO COLLECTION 64 SELECT SERIES Mega Dragonite (Pre-Order)',
+    'Pokemon Plamo Collection Quick!! 08 Mimikyu',
+    'Paladone One Piece Jolly Rogers Playing Cards for Poker',
+    'Pokemon Model Kit Pikachu',
+    'Pokemon TCG Jigsaw Puzzle Charizard',
+  ];
+  for (const name of MERCH) {
+    test(`drops: ${name.slice(0, 50)}`, () => {
+      assert.strictEqual(isInScopeName(name), false);
+    });
+  }
+
+  // The exclusion runs BEFORE the sealed shortcut, because "Plamo Collection" reads as a
+  // collection. These confirm it did not take real sealed product with it.
+  const SEALED = [
+    'Pokemon TCG Scarlet And Violet Surging Sparks Booster Bundle',
+    'Pokemon TCG: Mewtwo & Mew Premium Collection',
+    'One Piece OP-09 Booster Box',
+    'Pokemon TCG Crown Zenith Pin Collection Rillaboom',
+    'Pokemon TCG Unova Poster Collection',
+    'Pokemon Celebrations Ultra Premium Collection',
+  ];
+  for (const name of SEALED) {
+    test(`keeps: ${name.slice(0, 50)}`, () => {
+      assert.strictEqual(isInScopeName(name), true);
+    });
+  }
+});

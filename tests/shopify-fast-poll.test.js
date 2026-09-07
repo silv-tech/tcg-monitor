@@ -425,3 +425,50 @@ describe('shopify: a partly-failed sweep must not fake out-of-stock', () => {
     await assert.rejects(() => a.fetchProducts(), /rate limited/i);
   });
 });
+
+describe('a collection with more than one page is followed', () => {
+  // Stopping at page 1 left 137 of Hobbiesville's 587 in-scope products outside the 8s poll.
+  // Only collections that returned a FULL page are followed, so a shop pays a request per page
+  // that exists rather than a fixed multiple of its collection count.
+  function collectionAdapter(sizes) {
+    const a = makeAdapter({ collections: Object.keys(sizes) });
+    a._lastFullSweep = Date.now();
+    a._sweepOffset = 0;
+    a.requested = [];
+    a._fetchPage = async (url) => {
+      const handle = (url.match(/\/collections\/([^/]+)\//) || [])[1];
+      const page = Number((url.match(/[?&]page=(\d+)/) || [])[1] || 1);
+      a.requested.push(`${handle}#${page}`);
+      const total = sizes[handle] || 0;
+      const start = (page - 1) * 250;
+      const n = Math.max(0, Math.min(250, total - start));
+      return { products: Array.from({ length: n }, (_, i) => product(start + i + page * 100000, `Pokemon Booster Box ${i}`, '49.99')), changed: true };
+    };
+    return a;
+  }
+
+  test('a short collection costs exactly one request', async () => {
+    const a = collectionAdapter({ small: 57 });
+    await a.fetchProducts();
+    assert.deepStrictEqual(a.requested, ['small#1']);
+  });
+
+  test('a full first page earns a second request', async () => {
+    const a = collectionAdapter({ big: 341 });
+    await a.fetchProducts();
+    assert.deepStrictEqual(a.requested, ['big#1', 'big#2']);
+  });
+
+  test('only the collections that are actually deep are followed', async () => {
+    const a = collectionAdapter({ big: 341, small: 57 });
+    await a.fetchProducts();
+    assert.ok(a.requested.includes('big#2'), 'the deep one is followed');
+    assert.ok(!a.requested.includes('small#2'), 'the short one is not');
+  });
+
+  test('following is bounded — a huge collection does not page forever', async () => {
+    const a = collectionAdapter({ huge: 2667 });
+    await a.fetchProducts();
+    assert.strictEqual(a.requested.length, 2, 'capped at FAST_COLLECTION_PAGES');
+  });
+});

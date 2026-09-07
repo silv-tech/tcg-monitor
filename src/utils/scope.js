@@ -50,6 +50,22 @@ const SET_NAMES = [
 const DEFINITE_SEALED = /(elite trainer box|booster box|booster bundle|booster pack|booster display|build\s*[&and]+\s*battle|premium collection|ultra premium collection|collection box|battle deck|starter deck|structure deck|mini tin|booster tin|checklane)/i;
 const SEALED_COLLECTION_FORMS = /(pin collection|poster collection|sticker collection|special collection|(?:holiday|advent) calendar)/i;
 
+/**
+ * Merchandise that names a game but is not a trading card product at all.
+ *
+ * Checked EARLY, before the sealed-form shortcut, because these carry sealed-sounding wording:
+ * "Pokemon Plamo Collection 64 Select Series Mega Dragonite" reads as a collection, and Plamo
+ * is Bandai's plastic model line. Nine such products were in scope across the shops, and the
+ * $15 alert floor was the only thing keeping most of them quiet — the pokejeux Plamo kit at
+ * $41.99 was above it and would have alerted.
+ *
+ * "Playing cards" is a poker deck, not a TCG product, however much the words overlap.
+ */
+const NON_TCG_MERCH = [
+  'plamo', 'model kit', 'plastic model', 'figure kit',
+  'playing cards', 'poker', 'jigsaw',
+];
+
 // Accessories — never alert on these even if they name a game
 const ACCESSORY_KEYWORDS = [
   'deck box', 'deckbox', 'playmat', 'play mat', 'sleeves', 'card sleeves',
@@ -203,6 +219,7 @@ function isInScopeName(name) {
   if (!lower) return false;
   if (/^sponsored ad/.test(lower)) return false;
   if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
+  if (NON_TCG_MERCH.some(k => lower.includes(k))) return false;
 
   // Checked BEFORE the sealed shortcut below, so a single named after the box it came from
   // is still rejected ("Eevee (173) - Prismatic Evolutions Pokemon Center ETB - Promo").

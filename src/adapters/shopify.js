@@ -151,6 +151,12 @@ function hostOfProxy(proxyUrl) {
  */
 const FAST_PAGE_LIMIT = 250;
 
+// How deep a fast poll follows a collection that has more than one page. Bounded, because each
+// page is a request on EVERY poll: at 8s a third page costs another 450 requests an hour per
+// collection. Two pages cover a 500-product collection completely, which is every collection
+// configured except kanzengames' pokemon-sealed-all (2,667) — that tail stays with the sweep.
+const FAST_COLLECTION_PAGES = Number(process.env.SHOP_FAST_COLLECTION_PAGES) || 2;
+
 /**
  * Non-TCG filter, shared by every shop.
  *
@@ -351,6 +357,25 @@ class ShopifyAdapter extends BaseAdapter {
           for (const { products: page } of pages) {
             this._detectPriceUnit(page);
             for (const item of page) this.parseShopifyProduct(item, products);
+          }
+
+          // A FULL page means the collection has more, and stopping at 250 is what left 137
+          // of Hobbiesville's 587 in-scope products outside the 8s poll. Only collections that
+          // actually returned a full page are followed, so a shop pays a request per page that
+          // exists rather than a fixed multiple of its collection count.
+          let more = this.collections
+            .map((handle, i) => ((pages[i].products || []).length === FAST_PAGE_LIMIT ? handle : null))
+            .filter(Boolean);
+          for (let pageNo = 2; pageNo <= FAST_COLLECTION_PAGES && more.length; pageNo++) {
+            const extra = await Promise.all(more.map(handle => this._fetchPage(
+              `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=${pageNo}`,
+            )));
+            const stillMore = [];
+            extra.forEach(({ products: page }, i) => {
+              for (const item of page) this.parseShopifyProduct(item, products);
+              if ((page || []).length === FAST_PAGE_LIMIT) stillMore.push(more[i]);
+            });
+            more = stillMore;
           }
         } else {
           const { products: page } = await this._fetchPage(
