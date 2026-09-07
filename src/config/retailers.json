@@ -337,7 +337,7 @@
     "name": "Kanzen Games",
     "url": "https://kanzengames.com",
     "adapter": "shopify",
-    "intervalMs": 30000,
+    "intervalMs": 8000,
     "proxyTier": "isp",
     "enabled": true,
     "color": "#1a1a2e",
