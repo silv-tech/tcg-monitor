@@ -62,16 +62,20 @@ describe('a collection-based shop is not required to set depth', () => {
 });
 
 describe('no shop is polled faster than it tolerates', () => {
-  // What a shop objects to is the request RATE, not the interval. Hobbiesville and Kanzen
-  // Games ran two collections at 8s — 0.25 req/s — and began refusing within minutes:
-  // production logged "Cooling down 111s after 429" on their collection URLs and the poll
-  // failed outright, returning nothing at all. Chimera Gaming polls at the same 8s and is
-  // perfectly healthy, because it reads ONE collection: 0.125 req/s.
+  // What a shop objects to is the request RATE, not the interval — Chimera Gaming polls at 8s
+  // perfectly happily because it reads ONE collection.
   //
-  // So the ceiling is expressed as a rate. 0.125 req/s is the highest figure observed running
-  // clean, and pinning it here is what stops the interval being optimistically lowered again
-  // without accounting for how many requests each poll actually makes.
-  const MAX_REQ_PER_SEC = 0.125;
+  // This test was briefly worse than useless. It computed the rate from intervalMs in this
+  // file, while every shop's interval is overridden to 8000 in Redis (verified by diffing
+  // /api/retailers against the file; AUTOTUNE is off, so they are standing manual overrides).
+  // It therefore passed while asserting a cadence nothing was running: the file said 16000,
+  // production polled at 8000, and the "safe rate" it certified was fiction. The file has since
+  // been realigned to 8000 so the number here is the number in use.
+  //
+  // 0.25 req/s is a CEILING, not a safe value. Hobbiesville sustains it; the catalogue-path
+  // shops took escalating 429 strikes at it once keyword search began running every poll and
+  // doubled their requests. Anything above it has failed outright in production.
+  const MAX_REQ_PER_SEC = 0.25;
   const shops = list.filter((r) => r.adapter === 'shopify');
 
   for (const shop of shops) {
