@@ -1,4 +1,5 @@
 const fs = require('fs');
+const { cooldownRemaining } = require('../utils/stealth-http');
 const path = require('path');
 const state = require('../core/state');
 const logger = require('../monitoring/logger');
@@ -42,7 +43,21 @@ async function checkHealth() {
     const lastCheck = await state.getLastCheck(retailer.id);
     const now = Date.now();
 
-    const staleThreshold = getStaleThreshold(retailer);
+    // A retailer we are DELIBERATELY not polling is not a retailer that is down.
+    //
+    // The rate-limit backoff ladder runs 30s, 60s, 2m, 5m, 15m while the stale threshold
+    // floors at 5 minutes, so any shop reaching strike four was guaranteed to be declared
+    // stale — the monitor was alerting on its own backoff. Over eight hours that produced 33
+    // admin alerts for Infinity Cards and 18 for Hobbiesville, each a Monitor Alert, a Still
+    // down reminder and a Recovery for a shop that was never actually broken.
+    //
+    // Extending the threshold by the remaining cooldown is self-limiting rather than a mute:
+    // lastCheck only advances on a SUCCESSFUL poll, so a shop that is genuinely unreachable
+    // still crosses the line once its silence outlives the cooldown, and the cooldown itself
+    // is capped at 15 minutes. Transient throttling goes quiet; a real outage still alerts,
+    // roughly 20 minutes in instead of 5.
+    const throttledForMs = retailer.url ? cooldownRemaining(retailer.url) : 0;
+    const staleThreshold = getStaleThreshold(retailer) + throttledForMs;
     const isStale = lastCheck && (now - lastCheck) > staleThreshold;
     const zeroCount = zeroProductPolls.get(retailer.id) || 0;
     const staleDataCount = zeroFreshPolls.get(retailer.id) || 0;
@@ -61,6 +76,7 @@ async function checkHealth() {
       name: retailer.name,
       healthy,
       stale: isStale,
+      throttledForMs,   // >0 means we are backing off on purpose, not that the shop is down
       lastCheck: lastCheck ? new Date(lastCheck).toISOString() : null,
       consecutiveErrors: status.errors,
       lastError: status.lastError,
