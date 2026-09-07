@@ -35,6 +35,7 @@ function makeAdapter(overrides = {}) {
   // process open after the assertions finish, so the runner never exits — these tests are
   // about the fast-poll path, not about cursor persistence, which has its own suite.
   a._cursorLoaded = true;
+  a._handlesLoaded = true;   // no Redis in unit tests
   a._saveSweepCursor = async () => {};
   return a;
 }

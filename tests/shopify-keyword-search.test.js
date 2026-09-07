@@ -26,6 +26,7 @@ function makeAdapter(overrides = {}) {
     adapter: 'shopify', collections: [], searchKeywords: [], maxProducts: 2500, ...overrides,
   });
   a._cursorLoaded = true;
+  a._handlesLoaded = true;   // no Redis in unit tests
   a._saveSweepCursor = async () => {};
   return a;
 }

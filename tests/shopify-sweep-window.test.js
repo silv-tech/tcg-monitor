@@ -43,6 +43,7 @@ function makeAdapter(total, maxProducts) {
   // No Redis in unit tests: the cursor is an optimisation, and leaving it live makes every
   // sweep test wait on a connection that will never come.
   a._cursorLoaded = true;
+  a._handlesLoaded = true;   // no Redis in unit tests
   a._saveSweepCursor = async () => {};
   a.parseShopifyProduct = (item, out) => { out[String(item.id)] = { sku: String(item.id) }; };
   return a;

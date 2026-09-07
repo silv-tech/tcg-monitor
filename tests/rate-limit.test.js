@@ -71,6 +71,13 @@ describe('rate limit: scheduler phase spread', () => {
 
 describe('rate limit: a throttled shop is not an empty shop', () => {
   const ShopifyAdapter = require('../src/adapters/shopify');
+// These suites exercise pacing and proxying, not persistence. The cursor and handle index
+// live in Redis, and opening that connection here holds the test process open after the
+// assertions finish, so the runner never exits. Their own suites cover them.
+ShopifyAdapter.prototype._loadSweepCursor = async function () {};
+ShopifyAdapter.prototype._saveSweepCursor = async function () {};
+ShopifyAdapter.prototype._loadHandleIndex = async function () {};
+
 
   function makeAdapter() {
     return new ShopifyAdapter({

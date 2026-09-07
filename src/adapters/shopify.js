@@ -257,6 +257,38 @@ class ShopifyAdapter extends BaseAdapter {
     return now - this._lastFullSweep >= interval;
   }
 
+  /**
+   * Seed the handle index from the catalogue already in Redis.
+   *
+   * Without this, search can only refresh what the current process has happened to parse, and
+   * a fast poll reads page 1 only — three in-scope products at Hobbiesville, none at all at
+   * Kanzen Games, whose page 1 is KPop and Yu-Gi-Oh. The index would then fill at the pace of
+   * a 45-minute backstop sweep, leaving search almost useless for hours after every deploy.
+   *
+   * Every product we already track carries its handle inside its URL, so the whole in-scope
+   * set can be indexed at startup for one Redis read. Nothing is invented: these are SKUs
+   * pagination established, which is exactly the identity rule search must respect.
+   */
+  async _loadHandleIndex() {
+    if (this._handlesLoaded) return;
+    this._handlesLoaded = true;
+    try {
+      const cached = await withRedisTimeout(state.getAllProducts(this.id));
+      for (const [sku, product] of Object.entries(cached || {})) {
+        const handle = String(product && product.url || '').split('/products/')[1];
+        if (!handle) continue;
+        const clean = handle.split(/[?#]/)[0];
+        if (clean && !this._handleToSku.has(clean)) this._handleToSku.set(clean, sku);
+      }
+      if (this._handleToSku.size) {
+        logger.info(`${this.name}: seeded ${this._handleToSku.size} handles for keyword search`);
+      }
+    } catch (err) {
+      // Search simply stays idle until sweeps rebuild the index — degraded, not broken.
+      logger.debug(`${this.name}: handle index seed failed: ${err.message}`);
+    }
+  }
+
   /** Search only carries the load once pagination has identified something for it to update. */
   _searchActive() {
     return this.collections.length === 0 && this.searchTerms.length > 0 && this._handleToSku.size > 0;
@@ -271,6 +303,9 @@ class ShopifyAdapter extends BaseAdapter {
     // Reset per poll. If every page comes back 304 we can tell the scheduler that nothing
     // moved, and it can skip the diff and the Redis round-trips entirely.
     this._anyPageChanged = false;
+    // One Redis read on the first poll of the process, so search is useful immediately rather
+    // than after a sweep cycle.
+    await this._loadHandleIndex();
 
     // A fast poll reads only the newest page, so it is a PARTIAL view of the catalogue.
     // Say so explicitly rather than leaving the poll layer to infer it from counts — the

@@ -12,6 +12,13 @@ const { test, describe, afterEach } = require('node:test');
 const assert = require('node:assert');
 
 const ShopifyAdapter = require('../src/adapters/shopify');
+// These suites exercise pacing and proxying, not persistence. The cursor and handle index
+// live in Redis, and opening that connection here holds the test process open after the
+// assertions finish, so the runner never exits. Their own suites cover them.
+ShopifyAdapter.prototype._loadSweepCursor = async function () {};
+ShopifyAdapter.prototype._saveSweepCursor = async function () {};
+ShopifyAdapter.prototype._loadHandleIndex = async function () {};
+
 const rateBudget = require('../src/utils/rate-budget');
 
 afterEach(() => rateBudget._reset());
