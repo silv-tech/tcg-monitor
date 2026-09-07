@@ -121,16 +121,47 @@ function hostOf(url) {
   } catch { return url; }
 }
 
-function cooldownRemaining(url) {
-  const until = hostCooldowns.get(hostOf(url));
-  if (!until) return 0;
-  const left = until - Date.now();
-  if (left <= 0) { hostCooldowns.delete(hostOf(url)); return 0; }
-  return left;
+// Cooldowns are keyed by host AND exit IP.
+//
+// Keying by host alone meant one 429 from one proxy benched the target from EVERY proxy. All
+// ten ISP addresses are allocated to the big four in retailerPools, so the eleven shops share
+// them; when one of those addresses was rate limited by kanzengames.com, the shop became
+// unreachable from all ten for up to fifteen minutes. No request went out, so none could
+// succeed, so clearStrikes never ran and the ladder only ever climbed. Hobbiesville was
+// identical in configuration and simply never had an address limited — that was the whole
+// difference between the two shops.
+function cooldownKey(url, proxyUrl) {
+  return `${hostOf(url)}|${exitLabel(proxyUrl)}`;
 }
 
-function setCooldown(url, retryAfterMs) {
-  const host = hostOf(url);
+/**
+ * Remaining cooldown. With an exit specified this is that exact route; without one it is the
+ * BEST route known — zero if any exit is free — because the caller is asking whether the host
+ * can be reached at all, not whether one particular address is benched.
+ */
+function cooldownRemaining(url, proxyUrl) {
+  const now = Date.now();
+  if (proxyUrl !== undefined) {
+    const k = cooldownKey(url, proxyUrl);
+    const until = hostCooldowns.get(k);
+    if (!until) return 0;
+    const left = until - now;
+    if (left <= 0) { hostCooldowns.delete(k); return 0; }
+    return left;
+  }
+  const prefix = `${hostOf(url)}|`;
+  let best = Infinity;
+  for (const [k, until] of hostCooldowns) {
+    if (!k.startsWith(prefix)) continue;
+    const left = until - now;
+    if (left <= 0) { hostCooldowns.delete(k); return 0; }
+    best = Math.min(best, left);
+  }
+  return best === Infinity ? 0 : best;
+}
+
+function setCooldown(url, retryAfterMs, proxyUrl) {
+  const host = cooldownKey(url, proxyUrl);
   const strikes = (hostStrikes.get(host) || 0) + 1;
   hostStrikes.set(host, strikes);
 
@@ -145,8 +176,8 @@ function setCooldown(url, retryAfterMs) {
 }
 
 /** A host answered normally — it is no longer throttling us, so forget the strikes. */
-function clearStrikes(url) {
-  const host = hostOf(url);
+function clearStrikes(url, proxyUrl) {
+  const host = cooldownKey(url, proxyUrl);
   if (hostStrikes.has(host)) hostStrikes.delete(host);
   if (hostCooldowns.has(host)) hostCooldowns.delete(host);
 }
@@ -236,7 +267,8 @@ async function stealthGet(url, opts = {}) {
 
   // The host asked us to back off and the window has not expired. Do not spend a request
   // finding that out again.
-  const cooling = cooldownRemaining(url);
+  // This exact route only — another exit may be perfectly welcome at the same host.
+  const cooling = cooldownRemaining(url, proxyUrl);
   if (cooling > 0) throw new Error(`Cooling down ${Math.round(cooling / 1000)}s after 429: ${url}`);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -274,7 +306,7 @@ async function stealthGet(url, opts = {}) {
         const retryAfter = Math.max(parseInt(response.headers.get('retry-after') || '5') * 1000, 2000);
         // Record it before deciding whether to retry, so that even a no-retry caller
         // (maxRetries: 1) still stops the NEXT poll from walking into the same wall.
-        const { strikes, ms } = setCooldown(url, retryAfter);
+        const { strikes, ms } = setCooldown(url, retryAfter, proxyUrl);
         logger.warn(`Stealth: rate limited on ${hostOf(url)} (strike ${strikes}) — quiet for ${Math.round(ms / 1000)}s`);
         if (attempt >= maxRetries) throw new Error(`Rate limited (429): ${url}`);
         await sleep(retryAfter);
@@ -294,7 +326,7 @@ async function stealthGet(url, opts = {}) {
 
       // Answered normally — the host is no longer throttling us, so reset its backoff ladder.
       // Without this a shop that recovered would keep its escalated cooldown forever.
-      clearStrikes(url);
+      clearStrikes(url, proxyUrl);
 
       // Conditional requests: a 304 has no body, and the caller needs the status to know
       // nothing changed. Only returned when explicitly asked for, so existing callers that
