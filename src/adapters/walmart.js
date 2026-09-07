@@ -528,6 +528,20 @@ class WalmartAdapter extends BaseAdapter {
         proxyUrl,
         lane,
         maxRetries: 1,
+        // Send impit's own Chrome headers, not stealthGet's hand-written navigation block.
+        //
+        // This, not the proxy and not the rate, is why search returned 0/4 all day. impit
+        // spoofs Chrome's TLS fingerprint AND emits the headers real Chrome sends with it;
+        // overwriting them with a hand-assembled dict leaves the ClientHello saying Chrome
+        // while the headers do not match, and PerimeterX answers the mismatch with its
+        // 7,545-byte /blocked page. Measured on one address minutes apart: impit's own
+        // headers returned 200 with 46 items, the default block returned /blocked, and
+        // dropping only Cache-Control from that block did NOT help — it is the whole set.
+        // Confirmed through this function at 30s spacing: 3/3 with rawHeaders, 46 items each.
+        //
+        // Same failure the Amazon monitor hit, where these defaults produced a 3.7KB
+        // "continue shopping" interstitial that looked like a parse miss.
+        rawHeaders: true,
         // The ISP route answers in 4.0-5.4s, measured across all three addresses, so the
         // old 8s left almost no headroom and a slow response looked identical to a block.
         timeoutMs: 15000,
