@@ -61,20 +61,21 @@ describe('a collection-based shop is not required to set depth', () => {
   });
 });
 
-describe('poll cadence matches what the shop path actually costs', () => {
-  // 8s is safe for a collection shop, whose poll is a few hundred pre-filtered products.
-  // It is NOT safe on the catalogue path, where every poll pulls page 1 of a 13,750-25,000
-  // product catalogue: within minutes of trying it, 401games, pokejeux and infinitycards were
-  // taking escalating 429 strikes while the two collection shops took none.
+describe('every shop polls at 16s', () => {
+  // 8s was tried and both collection shops began refusing us within minutes — production
+  // logged "Cooling down 111s after 429" on their collection URLs and the poll failed
+  // outright, returning nothing at all. Two collections at 8s is 0.25 req/s, which is above
+  // what Hobbiesville and Kanzen Games tolerate; the catalogue-path shops took escalating
+  // strikes at the same cadence.
+  //
+  // A poll that succeeds at 16s beats a poll that 429s at 8s, so the cadence is pinned here
+  // rather than left as a value someone can optimistically lower again.
   const shops = list.filter((r) => r.adapter === 'shopify');
 
   for (const shop of shops) {
-    const usesCollections = (shop.collections || []).length > 0;
-    test(`${shop.id} polls at ${usesCollections ? '8s (collections)' : '16s (catalogue)'}`, () => {
-      assert.strictEqual(shop.intervalMs, usesCollections ? 8000 : 16000,
-        usesCollections
-          ? 'a collection shop can afford the fast cadence'
-          : 'a catalogue-path shop cannot — this is what caused the 429 strikes');
+    test(`${shop.id} polls at 16s`, () => {
+      assert.strictEqual(shop.intervalMs, 16000,
+        'faster than this produced 429s and failed the poll outright');
     });
   }
 });
