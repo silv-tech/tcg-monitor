@@ -201,10 +201,7 @@
     "maxProducts": 14000,
     "collections": [
       "pokemon-trading-cards",
-      "one-piece-booster-boxes",
-      "pokemon-booster-packs",
-      "pokemon-elite-trainer-boxes",
-      "pokemon-premium-collection"
+      "one-piece-booster-boxes"
     ],
     "searchKeywords": [
       "pokemon",
@@ -347,10 +344,7 @@
     "maxProducts": 4000,
     "collections": [
       "pokemon-sealed-all",
-      "one-piece-sealed",
-      "pokemon-sealed-in-stock",
-      "pokemon-tins",
-      "pokemon-booster-box-1"
+      "one-piece-sealed"
     ],
     "searchKeywords": [
       "pokemon",

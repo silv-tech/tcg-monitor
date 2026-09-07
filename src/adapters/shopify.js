@@ -155,7 +155,7 @@ const FAST_PAGE_LIMIT = 250;
 // page is a request on EVERY poll: at 8s a third page costs another 450 requests an hour per
 // collection. Two pages cover a 500-product collection completely, which is every collection
 // configured except kanzengames' pokemon-sealed-all (2,667) — that tail stays with the sweep.
-const FAST_COLLECTION_PAGES = Number(process.env.SHOP_FAST_COLLECTION_PAGES) || 2;
+const FAST_COLLECTION_PAGES = Number(process.env.SHOP_FAST_COLLECTION_PAGES) || 1;
 
 /**
  * Non-TCG filter, shared by every shop.
@@ -226,6 +226,13 @@ class ShopifyAdapter extends BaseAdapter {
     this.searchTerms = config.searchTerms || SEARCH_TERMS;
     this._handleToSku = new Map();
     this._pageYield = new Map();   // page -> { n: in-scope found there, at: when }
+    // How deep the fast poll follows a multi-page collection, per shop. Default 1 — following
+    // is off unless a shop is known to tolerate the extra request per poll. Hobbiesville and
+    // Kanzen Games both started returning 429s on their collection URLs at ~0.75 req/s, so
+    // depth is opt-in per shop rather than global.
+    this.fastCollectionPages = Number(config.fastCollectionPages) > 0
+      ? Number(config.fastCollectionPages)
+      : FAST_COLLECTION_PAGES;
     this._lastSearchAt = 0;
     this._searchRateLimited = false;
     this._searchPriceAgreements = 0;
@@ -366,7 +373,7 @@ class ShopifyAdapter extends BaseAdapter {
           let more = this.collections
             .map((handle, i) => ((pages[i].products || []).length === FAST_PAGE_LIMIT ? handle : null))
             .filter(Boolean);
-          for (let pageNo = 2; pageNo <= FAST_COLLECTION_PAGES && more.length; pageNo++) {
+          for (let pageNo = 2; pageNo <= this.fastCollectionPages && more.length; pageNo++) {
             const extra = await Promise.all(more.map(handle => this._fetchPage(
               `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=${pageNo}`,
             )));

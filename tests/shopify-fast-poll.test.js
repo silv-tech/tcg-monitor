@@ -431,7 +431,8 @@ describe('a collection with more than one page is followed', () => {
   // Only collections that returned a FULL page are followed, so a shop pays a request per page
   // that exists rather than a fixed multiple of its collection count.
   function collectionAdapter(sizes) {
-    const a = makeAdapter({ collections: Object.keys(sizes) });
+    // Depth is opt-in per shop; these tests exercise the mechanism, so ask for it.
+    const a = makeAdapter({ collections: Object.keys(sizes), fastCollectionPages: 2 });
     a._lastFullSweep = Date.now();
     a._sweepOffset = 0;
     a.requested = [];
