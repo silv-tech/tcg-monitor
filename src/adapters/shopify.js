@@ -590,7 +590,7 @@ class ShopifyAdapter extends BaseAdapter {
             discovered++;
             try {
               const { products: one } = await this._fetchPage(`${this.url}/products/${item.handle}.js`);
-              for (const full of one) this.parseShopifyProduct(full, products);
+              for (const full of one) this.parseShopifyProduct(this._normaliseAjaxPrices(full), products);
             } catch (err) {
               if (isRateLimited(err)) { this._searchRateLimited = true; return refreshed; }
               logger.debug(`${this.name}: could not resolve "${item.handle}": ${err.message}`);
@@ -616,6 +616,31 @@ class ShopifyAdapter extends BaseAdapter {
       }
     }
     return refreshed;
+  }
+
+  /**
+   * Put a products/<handle>.js product into the SAME price unit as products.json.
+   *
+   * Shopify's Ajax API always quotes cents. products.json does not: hobbiesville quotes cents
+   * there (696/696 prices exact multiples of 100) while kanzengames quotes dollars. Handing a
+   * raw Ajax price to parseShopifyProduct therefore skipped or double-applied the store's
+   * divisor depending on the shop — kanzengames reported a $179.95 Elite Trainer Box as
+   * $17,995, caught by spot-checking live listings against what we had stored.
+   *
+   * When the store's unit is not yet established the price is dropped rather than guessed.
+   * A missing price costs one field on an alert; a price wrong by 100x pollutes price history
+   * and fires a false price-change alert, which is far worse.
+   */
+  _normaliseAjaxPrices(item) {
+    const variants = (item.variants || []).map((v) => {
+      const cents = Number(v.price);
+      if (!Number.isFinite(cents)) return { ...v, price: null };
+      if (!this._priceUnitLocked) return { ...v, price: null };
+      // parseShopifyProduct divides by 100 for a cents store, so hand it cents there and
+      // dollars everywhere else — either way the product ends up in dollars.
+      return { ...v, price: this._pricesAreCents ? cents : cents / 100 };
+    });
+    return { ...item, variants };
   }
 
   /**

@@ -264,3 +264,49 @@ describe('search resolves products pagination has not reached yet', () => {
     assert.strictEqual(a._searchRateLimited, true);
   });
 });
+
+describe('Ajax prices are converted to the store unit, never guessed', () => {
+  // Shopify's products/<handle>.js always quotes cents. products.json does not — hobbiesville
+  // quotes cents there, kanzengames quotes dollars. Passing the raw Ajax price through meant
+  // the store divisor was skipped or double-applied depending on the shop, and kanzengames
+  // reported a $179.95 Elite Trainer Box as $17,995. Caught by spot-checking stored rows
+  // against the live listings, not by any test that existed at the time.
+  const ajax = {
+    id: 1, handle: 'h', title: 'Pokemon TCG Elite Trainer Box', product_type: 'TCG', tags: [],
+    images: [], variants: [{ id: 2, sku: null, price: 17995, available: true }],
+  };
+
+  test('a dollars store ends up at 179.95', () => {
+    const a = makeAdapter();
+    a._priceUnitLocked = true; a._pricesAreCents = false;
+    const out = {};
+    a.parseShopifyProduct(a._normaliseAjaxPrices(ajax), out);
+    assert.strictEqual(Object.values(out)[0].price, 179.95);
+  });
+
+  test('a cents store also ends up at 179.95', () => {
+    const a = makeAdapter();
+    a._priceUnitLocked = true; a._pricesAreCents = true;
+    const out = {};
+    a.parseShopifyProduct(a._normaliseAjaxPrices(ajax), out);
+    assert.strictEqual(Object.values(out)[0].price, 179.95);
+  });
+
+  test('an unestablished unit yields NO price rather than a 100x guess', () => {
+    const a = makeAdapter();
+    a._priceUnitLocked = false;
+    const out = {};
+    a.parseShopifyProduct(a._normaliseAjaxPrices(ajax), out);
+    assert.strictEqual(Object.values(out)[0].price, null,
+      'a missing price costs one field; a wrong one fires a false price-change alert');
+  });
+
+  test('the product is still tracked even without a price', () => {
+    const a = makeAdapter();
+    a._priceUnitLocked = false;
+    const out = {};
+    a.parseShopifyProduct(a._normaliseAjaxPrices(ajax), out);
+    assert.strictEqual(Object.keys(out).length, 1);
+    assert.strictEqual(Object.values(out)[0].inStock, true, 'stock is still accurate');
+  });
+});
