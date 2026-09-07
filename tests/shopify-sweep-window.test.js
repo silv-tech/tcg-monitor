@@ -172,3 +172,75 @@ describe('the window position survives a restart', () => {
     } finally { state.getRedis = orig; }
   });
 });
+
+describe('a shop that pushes back is backed off, not hammered', () => {
+  // Rotating into never-read pages replaced cheap 304s with full 250-product responses. Same
+  // request COUNT, far more work for the origin — admin 429 alerts went from 1 a day to 38,
+  // with Infinity Cards and Hobbiesville worst hit. Fewer pages per sweep is the lever that
+  // actually reduces that load.
+  const rateLimited = () => Object.assign(new Error('Rate limited (429): https://x/products.json'), {});
+
+  function makeThrottling(failFromPage) {
+    const a = makeAdapter(13750, 14000);
+    a.requested = [];
+    a._fetchPage = async (url) => {
+      const page = Number((url.match(/[?&]page=(\d+)/) || [])[1] || 1);
+      a.requested.push(page);
+      if (page >= failFromPage) throw rateLimited();
+      return { products: Array.from({ length: 250 }, (_, i) => ({
+        id: page * 1000 + i, title: `Pokemon TCG Booster Bundle ${page}-${i}`, handle: `h${page}${i}`,
+        product_type: 'TCG', tags: [], variants: [{ id: 1, price: '9.99', available: true }],
+      })) };
+    };
+    return a;
+  }
+
+  test('the window narrows when the shop returns 429', async () => {
+    const a = makeThrottling(4);
+    assert.strictEqual(a._sweepPages, 10);
+    await a.fetchAllProducts({});
+    assert.strictEqual(a._sweepPages, 5, 'the window should halve');
+  });
+
+  test('a 429 does not throw — a deep page being busy must not fail the whole poll', async () => {
+    const a = makeThrottling(4);
+    const out = {};
+    await assert.doesNotReject(() => a.fetchAllProducts(out));
+    assert.ok(Object.keys(out).length > 0, 'pages read before the 429 are still returned');
+  });
+
+  test('the cursor stays on the page that failed, so nothing is skipped', async () => {
+    const a = makeThrottling(4);
+    await a.fetchAllProducts({});
+    assert.strictEqual(a._sweepCursor, 4,
+      'advancing past a page we never read would hide its products forever');
+  });
+
+  test('it never narrows below the floor, so rotation still progresses', async () => {
+    const a = makeThrottling(1);          // every page refused
+    for (let i = 0; i < 8; i++) await a.fetchAllProducts({});
+    assert.strictEqual(a._sweepPages, 2);
+  });
+
+  test('a clean sweep widens the window back toward full speed', async () => {
+    const a = makeThrottling(4);
+    await a.fetchAllProducts({});
+    assert.strictEqual(a._sweepPages, 5);
+    // Shop recovers.
+    a._fetchPage = async (url) => {
+      const page = Number((url.match(/[?&]page=(\d+)/) || [])[1] || 1);
+      return { products: Array.from({ length: 250 }, (_, i) => ({
+        id: page * 1000 + i, title: `Pokemon TCG Booster Bundle ${page}-${i}`, handle: `q${page}${i}`,
+        product_type: 'TCG', tags: [], variants: [{ id: 1, price: '9.99', available: true }],
+      })) };
+    };
+    await a.fetchAllProducts({});
+    assert.strictEqual(a._sweepPages, 6, 'one page earned back per clean run');
+  });
+
+  test('a non-429 error still propagates — only throttling is absorbed', async () => {
+    const a = makeAdapter(13750, 14000);
+    a._fetchPage = async () => { throw new Error('DNS explosion'); };
+    await assert.rejects(() => a.fetchAllProducts({}), /DNS explosion/);
+  });
+});

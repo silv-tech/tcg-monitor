@@ -23,6 +23,9 @@ const { normalizePrice } = require('../utils/helpers');
 // rotates to gain coverage, it does not widen to gain it, so the request burst per sweep
 // is unchanged and cannot reintroduce the 429s that the old cadence experiment caused.
 const SWEEP_PAGES_PER_RUN = 10;
+// Floor for the adaptive window. A shop that keeps refusing still makes progress, just
+// slowly; dropping to zero would stall the rotation permanently.
+const MIN_SWEEP_PAGES = 2;
 
 // The sweep cursor is an optimisation, so waiting on Redis for it must never stall a sweep.
 // A disconnected ioredis client QUEUES commands rather than rejecting, so without this a
@@ -151,6 +154,8 @@ class ShopifyAdapter extends BaseAdapter {
     // products silently received 2,500.
     this.maxProducts = Number(config.maxProducts) > 0 ? Number(config.maxProducts) : 2500;
     this._sweepCursor = 1;   // rotating window position
+    this._sweepPages = SWEEP_PAGES_PER_RUN;  // narrowed on 429, widened again on success
+    this._sweepRateLimited = false;
     // Conditional-request state, keyed by page URL. Both survive across polls: the ETag is what
     // earns the 304, and the cached page is what lets us skip parsing when we get one.
     this._etags = new Map();
@@ -445,15 +450,37 @@ class ShopifyAdapter extends BaseAdapter {
    */
   async fetchAllProducts(products) {
     await this._loadSweepCursor();
+    this._sweepRateLimited = false;   // describes THIS run only
     const maxPages = Math.max(1, Math.ceil(this.maxProducts / this.pageLimit));
     const startPage = Math.min(this._sweepCursor || 1, maxPages);
     let page = startPage;
     let pagesRead = 0;
     let reachedEnd = false;
 
-    while (pagesRead < SWEEP_PAGES_PER_RUN && page <= maxPages) {
+    while (pagesRead < this._sweepPages && page <= maxPages) {
       const url = `${this.url}/products.json?limit=${this.pageLimit}&page=${page}`;
-      const data = { products: (await this._fetchPage(url)).products };
+      let data;
+      try {
+        data = { products: (await this._fetchPage(url)).products };
+      } catch (err) {
+        if (!isRateLimited(err)) throw err;
+        // The shop pushed back. Two things follow, and both matter.
+        //
+        // First, narrow the window. Rotating into pages that have never been read replaced a
+        // decade of cheap 304s with full 250-product responses — the same REQUEST count, far
+        // more work for the origin — and 429s went from 1 a day to 38. Fewer pages per sweep
+        // is the lever that actually reduces that load; the rotation still covers everything,
+        // just more slowly.
+        this._sweepPages = Math.max(MIN_SWEEP_PAGES, Math.floor(this._sweepPages / 2));
+        this._sweepRateLimited = true;
+        logger.warn(`${this.name}: rate limited on page ${page} — narrowing sweep to ` +
+          `${this._sweepPages} page(s) per run`);
+        // Second, do NOT advance past the page we failed to read, or the rotation would
+        // silently skip it and its products would stay invisible.
+        this._sweepCursor = page;
+        await this._saveSweepCursor();
+        return false;
+      }
 
       if (!data.products || data.products.length === 0) {
         reachedEnd = true;
@@ -481,6 +508,15 @@ class ShopifyAdapter extends BaseAdapter {
     }
 
     if (page > maxPages) reachedEnd = true;   // reached the configured ceiling
+
+    // A clean run earns one page back, so a shop that was briefly busy returns to full speed
+    // instead of being punished forever by one bad minute. The flag is reset at the START of
+    // each run, so it describes THIS sweep — leaving it set from the previous one meant the
+    // first clean sweep after a 429 never widened.
+    if (!this._sweepRateLimited && this._sweepPages < SWEEP_PAGES_PER_RUN) {
+      this._sweepPages += 1;
+      logger.info(`${this.name}: sweep widened back to ${this._sweepPages} page(s) per run`);
+    }
 
     this._sweepCursor = reachedEnd ? 1 : page;
     await this._saveSweepCursor();
