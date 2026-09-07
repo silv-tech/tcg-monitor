@@ -526,3 +526,38 @@ describe('a shop that refuses more than one request per poll rotates its collect
     assert.deepStrictEqual(a.requested.sort(), ['x', 'y'], 'rotation must be opt-in');
   });
 });
+
+describe('rotation skips a collection that is being refused', () => {
+  // Kanzen Games lost every second poll: rotation landed on one-piece-sealed-in-stock while
+  // that endpoint was cooling, and the whole poll failed — costing the Pokemon collection too,
+  // even though its own endpoint was answering perfectly. A cooling endpoint should cost that
+  // endpoint, not the shop.
+  const stealth = require('../src/utils/stealth-http');
+
+  test('a cooling collection is skipped in favour of a healthy one', () => {
+    stealth._resetCooldowns();
+    const a = makeAdapter({ collections: ['cooling', 'healthy'], rotateCollections: true });
+    stealth.setCooldown(`${a.url}/collections/cooling/products.json?limit=250&page=1`);
+    assert.strictEqual(a._nextCollection(), 'healthy');
+    assert.strictEqual(a._nextCollection(), 'healthy', 'and stays on it while the other cools');
+    stealth._resetCooldowns();
+  });
+
+  test('with nothing cooling it simply alternates', () => {
+    stealth._resetCooldowns();
+    const a = makeAdapter({ collections: ['a', 'b'], rotateCollections: true });
+    assert.deepStrictEqual([a._nextCollection(), a._nextCollection(), a._nextCollection()],
+      ['a', 'b', 'a']);
+  });
+
+  test('when everything is cooling it still advances rather than freezing', () => {
+    stealth._resetCooldowns();
+    const a = makeAdapter({ collections: ['a', 'b'], rotateCollections: true });
+    for (const h of ['a', 'b']) {
+      stealth.setCooldown(`${a.url}/collections/${h}/products.json?limit=250&page=1`);
+    }
+    const picks = [a._nextCollection(), a._nextCollection()];
+    assert.strictEqual(new Set(picks).size, 2, 'the cursor must not freeze on one handle');
+    stealth._resetCooldowns();
+  });
+});

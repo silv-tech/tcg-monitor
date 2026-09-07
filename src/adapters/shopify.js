@@ -1,7 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { isInScopeName } = require('../utils/scope');
-const { stealthGet, isRateLimited } = require('../utils/stealth-http');
+const { stealthGet, isRateLimited, cooldownRemaining } = require('../utils/stealth-http');
 const { markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const state = require('../core/state');
 
@@ -323,6 +323,23 @@ class ShopifyAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * The next collection to read, preferring one that is not being refused right now.
+   *
+   * Falls back to advancing normally when every collection is cooling: the request will fail
+   * either way, and skipping forever would freeze the cursor and starve whichever collection
+   * happens to recover first.
+   */
+  _nextCollection() {
+    const n = this.collections.length;
+    for (let tried = 0; tried < n; tried++) {
+      const handle = this.collections[this._collectionCursor++ % n];
+      const url = `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=1`;
+      if (cooldownRemaining(url) === 0) return handle;
+    }
+    return this.collections[this._collectionCursor++ % n];
+  }
+
   /** Search only carries the load once pagination has identified something for it to update. */
   _searchActive() {
     return this.collections.length === 0 && this.searchTerms.length > 0 && this._handleToSku.size > 0;
@@ -365,8 +382,14 @@ class ShopifyAdapter extends BaseAdapter {
           // collection — each is read every collections.length polls, so at 8s two collections
           // are both seen inside 16 seconds. The alternative was leaving One Piece off the fast
           // path entirely, which is what the emergency fix had accidentally done.
+          // Skip a collection whose endpoint is currently in a rate-limit cooldown. Without
+          // this, rotation lands on the cooling one and the ENTIRE poll fails — Kanzen Games
+          // lost every second poll to "Cooling down 279s after 429" on
+          // one-piece-sealed-in-stock, which cost the Pokemon collection too even though its
+          // own endpoint was answering perfectly. A cooling endpoint should cost that endpoint,
+          // not the shop.
           const due = this.rotateCollections && this.collections.length > 1
-            ? [this.collections[this._collectionCursor++ % this.collections.length]]
+            ? [this._nextCollection()]
             : this.collections;
 
           // In parallel, not in series. These shops pay one request per collection, and
