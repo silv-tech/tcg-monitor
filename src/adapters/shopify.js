@@ -404,7 +404,19 @@ class ShopifyAdapter extends BaseAdapter {
 
     while (hasMore) {
       const url = `${this.url}/collections/${handle}/products.json?limit=${this.pageLimit}&page=${page}`;
-      const data = { products: (await this._fetchPage(url)).products };
+      let data;
+      try {
+        data = { products: (await this._fetchPage(url)).products };
+      } catch (err) {
+        // Chimera Gaming reads a collection rather than the catalogue, and it was hitting 429
+        // on this path while the catalogue path had already learned to back off. Same rule:
+        // keep what we read, let the caller treat the collection as incomplete. Page 1 still
+        // propagates, because a collection we cannot open at all is a real failure.
+        if (!isRateLimited(err) || page === 1) throw err;
+        logger.warn(`${this.name}: rate limited on collection "${handle}" page ${page} — ` +
+          `keeping the ${page - 1} page(s) already read`);
+        break;
+      }
 
       if (!data.products || data.products.length === 0) {
         hasMore = false;
@@ -479,6 +491,25 @@ class ShopifyAdapter extends BaseAdapter {
         // silently skip it and its products would stay invisible.
         this._sweepCursor = page;
         await this._saveSweepCursor();
+
+        // Third, keep page 1 as the freshness anchor. If the window was deep in the catalogue
+        // and got nothing, returning empty would let poll-adapter merge the cache forward and
+        // report a healthy poll on stale data — a shop could be refusing us for hours and
+        // still look fine. Page 1 is the cheapest read there is (usually a 304), so fall back
+        // to it. If page 1 is refused too, the shop really is unreachable and the error
+        // propagates as a failed poll, which is the honest outcome.
+        if (pagesRead === 0 && page !== 1) {
+          const p1 = `${this.url}/products.json?limit=${this.pageLimit}&page=1`;
+          const first = { products: (await this._fetchPage(p1)).products };
+          this._detectPriceUnit(first.products);
+          for (const item of first.products || []) {
+            if (this.searchKeywords.length > 0) {
+              const text = `${item.title} ${item.product_type} ${item.tags?.join(' ')}`.toLowerCase();
+              if (!this.searchKeywords.some((kw) => text.includes(kw.toLowerCase()))) continue;
+            }
+            this.parseShopifyProduct(item, products);
+          }
+        }
         return false;
       }
 

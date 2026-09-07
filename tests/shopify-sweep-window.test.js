@@ -244,3 +244,44 @@ describe('a shop that pushes back is backed off, not hammered', () => {
     await assert.rejects(() => a.fetchAllProducts({}), /DNS explosion/);
   });
 });
+
+describe('page 1 stays the freshness anchor', () => {
+  // If a deep window is throttled and returns nothing, poll-adapter merges the cache forward
+  // and the poll looks healthy — a shop could refuse us for hours while still reporting fine.
+  // Falling back to page 1 keeps at least one page genuinely fresh.
+  function makeDeepThrottled(page1Works) {
+    const a = makeAdapter(13750, 14000);
+    a._sweepCursor = 21;
+    a.requested = [];
+    a._fetchPage = async (url) => {
+      const page = Number((url.match(/[?&]page=(\d+)/) || [])[1] || 1);
+      a.requested.push(page);
+      if (page === 1) {
+        if (!page1Works) throw new Error('Rate limited (429): https://x/products.json');
+        return { products: [{ id: 1, title: 'Pokemon TCG Booster Bundle', handle: 'h1',
+          product_type: 'TCG', tags: [], variants: [{ id: 1, price: '9.99', available: true }] }] };
+      }
+      throw new Error('Rate limited (429): https://x/products.json');
+    };
+    return a;
+  }
+
+  test('a throttled deep window still returns fresh page-1 data', async () => {
+    const a = makeDeepThrottled(true);
+    const out = {};
+    await a.fetchAllProducts(out);
+    assert.ok(a.requested.includes(1), 'page 1 must be read as the fallback');
+    assert.strictEqual(Object.keys(out).length, 1, 'and its products returned');
+  });
+
+  test('the cursor still holds the deep page for the next attempt', async () => {
+    const a = makeDeepThrottled(true);
+    await a.fetchAllProducts({});
+    assert.strictEqual(a._sweepCursor, 21);
+  });
+
+  test('if page 1 is refused too, the shop really is down and it propagates', async () => {
+    const a = makeDeepThrottled(false);
+    await assert.rejects(() => a.fetchAllProducts({}), /rate limited/i);
+  });
+});
