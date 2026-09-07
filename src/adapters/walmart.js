@@ -2,13 +2,33 @@ const crypto = require('crypto');
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { getProxyUrl, getIspProxyForLane } = require('../core/proxy');
+const { getProxyUrl, getIspProxyRoundRobin, ispPoolSize } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const { hashSku } = require('../utils/helpers');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
 const { isInScopeName, repairMojibake } = require('../utils/scope');
 const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
+
+// How many of the search queries go out per poll. Sending all of them every poll is what
+// PerimeterX blocks: measured 2026-09-07, one search request every 16 seconds from a single
+// ISP address (0.061 req/s) is enough to get that address served the /blocked page, while
+// sibling addresses answered 200 normally. Rotating a slice keeps coverage while dividing the
+// rate, which is the same shape as the fix that recovered Amazon.
+//
+// The default is 1, not a faster-looking number, because a lost env var must land on a
+// SAFE configuration rather than the one that caused the outage. That has bitten this project
+// before: SHOP_TIERS and SHOPIFY_RATE defaulted to values production had already proven broken,
+// so any restart that lost its env would have recreated the outage.
+const DEFAULT_QUERIES_PER_POLL = Number(process.env.WALMART_QUERIES_PER_POLL) > 0
+  ? Math.floor(Number(process.env.WALMART_QUERIES_PER_POLL))
+  : 1;
+
+// Per-exit request rate we are willing to run at. The observed blocking point is 0.061 req/s;
+// this leaves roughly a third of that as margin, because the block is not instant and a
+// configuration that only just clears the line will cross it whenever a retry lands.
+const SAFE_PER_EXIT_RPS = 0.04;
+const OBSERVED_BLOCK_RPS = 0.061;
 
 // Persisted-query hash and platform version of the product page's DynamicItemById call.
 // Both rotate with walmart.ca deploys — override via env when the JSON leg starts logging rejections.
@@ -33,6 +53,8 @@ class WalmartAdapter extends BaseAdapter {
     // rate to ~0.78 req/s and driving success down further. Backing off is what recovers it.
     this._successWindow = [];
     this._skipCounter = 0;
+    this._queryCursor = 0;   // rotates the search slice across polls
+    this._rateLogged = false;
     this._walmartOfferIds = new Map(); // product id → Walmart's own offerId (learned from the pinned page)
     this._lastPageProduct = new Map(); // product id → last full product parsed from the pinned page
     this._jsonDisabledUntil = 0;
@@ -430,9 +452,59 @@ class WalmartAdapter extends BaseAdapter {
    *
    * Falls back to residential when no ISP pool is configured, so local runs still work.
    */
-  _searchExit(lane) {
-    const isp = getIspProxyForLane(this.id, lane);
+  _searchExit() {
+    const isp = getIspProxyRoundRobin(this.id);
     return isp ? isp.url : getProxyUrl('residential');
+  }
+
+  /** Queries sent per poll: env default, overridable per store via timing.queriesPerPoll. */
+  get queriesPerPoll() {
+    const raw = Number(this.timing.queriesPerPoll);
+    const n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_QUERIES_PER_POLL;
+    return Math.max(1, Math.min(n, this.searchQueries.length));
+  }
+
+  /**
+   * The next slice of queries, rotating so every query still gets sent, just not all at once.
+   * Full coverage takes ceil(queries / queriesPerPoll) polls.
+   */
+  _nextQueryGroup() {
+    const all = this.searchQueries;
+    if (all.length === 0) return [];
+    const group = [];
+    for (let i = 0; i < Math.min(this.queriesPerPoll, all.length); i++) {
+      group.push(all[this._queryCursor % all.length]);
+      this._queryCursor++;
+    }
+    return group;
+  }
+
+  /**
+   * Say out loud what rate this configuration actually runs at, per exit.
+   *
+   * "Two queries per poll" is not a rate. Divided by a three-address pool it is 0.11 req/s per
+   * address and blocks; divided by twenty it is 0.017 and does not. That division was invisible
+   * in the config and got the pool blocked twice, so it is computed and logged instead.
+   */
+  _logSearchRate() {
+    const exits = ispPoolSize(this.id);
+    const perExit = exits > 0
+      ? (this.queriesPerPoll / (this.intervalMs / 1000)) / exits
+      : null;
+    const coverageS = Math.ceil(this.searchQueries.length / this.queriesPerPoll) * (this.intervalMs / 1000);
+    const base = `Walmart: search — ${this.queriesPerPoll}/${this.searchQueries.length} queries per ` +
+      `${Math.round(this.intervalMs / 1000)}s poll (full coverage ${coverageS}s) over ${exits} ISP exit(s)`;
+    if (perExit === null) {
+      logger.warn(`${base} — no ISP pool configured, search will use the metered residential exit`);
+      return;
+    }
+    const line = `${base} = ${perExit.toFixed(3)} req/s per exit`;
+    if (perExit > SAFE_PER_EXIT_RPS) {
+      logger.warn(`${line} — ABOVE the ${SAFE_PER_EXIT_RPS} target (blocks observed at ${OBSERVED_BLOCK_RPS}). ` +
+        'Lower timing.queriesPerPoll or widen this retailer’s ISP pool.');
+    } else {
+      logger.info(line);
+    }
   }
 
   /**
@@ -446,7 +518,10 @@ class WalmartAdapter extends BaseAdapter {
     // a single address every cycle, which is what drove stealth success from 86% to ~50%.
     // The lane also decides which ISP address this query uses; see _searchExit.
     const lane = `q:${query}`;
-    const proxyUrl = this._searchExit(lane);
+    const proxyUrl = this._searchExit();
+    // Remember the exit this query actually left through. The retry needs to drop THAT
+    // connection; with round-robin, asking again would name a different address.
+    (this._searchExitFor ||= new Map()).set(query, proxyUrl);
 
     try {
       const html = await stealthGet(url, {
@@ -595,7 +670,9 @@ class WalmartAdapter extends BaseAdapter {
         return {};
       }
 
-      const group = this.searchQueries;
+      if (!this._rateLogged) { this._rateLogged = true; this._logSearchRate(); }
+      const group = this._nextQueryGroup();
+      if (group.length === 0) return {};
 
       // Pass 1: all queries in parallel — results returned IMMEDIATELY for alerting
       const start = Date.now();
@@ -657,11 +734,9 @@ class WalmartAdapter extends BaseAdapter {
         // Drop each failed query's own lane so its retry opens a fresh connection, and so a
         // fresh exit IP. Clearing the unlaned key would leave the blocked lanes in place.
         for (const query of failedQueries) {
-          // Ask for the exit by the SAME lane the query used. Exits are chosen per lane now,
-          // so a differently-keyed lookup can name another address and clear a connection this
-          // path never opened.
           const lane = `q:${query}`;
-          _clearCache(this._searchExit(lane), false, lane);
+          const usedExit = this._searchExitFor?.get(query);
+          if (usedExit) _clearCache(usedExit, false, lane);
         }
         const retryResults = await Promise.allSettled(
           failedQueries.map(query =>

@@ -218,42 +218,62 @@ function getNextIspProxy(retailerId) {
 }
 
 /**
- * Pick one ISP exit for a named lane, without the sticky pin.
+ * The exits a retailer may use, in pool order.
  *
- * getNextIspProxy pins a retailer to ONE exit until it breaks, which is right for a poller
- * that sends one request at a time. Walmart's search does not: it fires all of its queries
- * in parallel, and a sticky pin would deliver them to PerimeterX as a simultaneous burst from
- * a single address — the same shape that drove residential stealth success from 86% down to
- * ~50% before lanes were introduced. A lane cannot spread ISP traffic the way it spreads
- * residential traffic, because an ISP exit is one fixed address per proxy URL, so the spread
- * has to happen in the choice of proxy.
+ * Shared with the caller so it can report the rate it is about to run at. A configuration
+ * that looks fine as "queries per poll" is only safe or unsafe once divided by the number of
+ * addresses carrying it, and that division is the whole ballgame against PerimeterX.
+ */
+function ispPoolFor(retailerId) {
+  if (ispPool.proxies.length === 0) return [];
+  const allowed = ispPool.retailerPools[retailerId];
+  return allowed ? allowed.map((i) => ispPool.proxies[i]).filter(Boolean) : sharedPool();
+}
+
+/** How many ISP exits a retailer can spread across. 0 when no pool is configured. */
+function ispPoolSize(retailerId) {
+  return ispPoolFor(retailerId).length;
+}
+
+const rrCursor = new Map(); // retailerId -> next index
+
+/**
+ * Take the next ISP exit for this retailer, round-robin across its whole pool.
  *
- * The lane hashes to a stable index, so a given query keeps returning to the same exit rather
- * than churning addresses, and cooled-down exits are skipped.
+ * Deliberately NOT sticky, and deliberately not hashed to a stable index per caller. Both of
+ * those pin traffic to a subset of the pool, and per-exit rate is the only thing measured to
+ * matter here: walmart.ca answers 200 from these addresses at one request per few minutes and
+ * PerimeterX blocks them at 0.061 req/s — one request every 16 seconds. Measured on
+ * 143.14.233.74 on 2026-09-07, while sibling addresses in the same /16 answered normally, so
+ * the limit is per address and spreading is what buys headroom.
+ *
+ * With a stable per-lane index only as many exits as there are lanes ever get used, so a
+ * larger pool bought nothing. Round-robin divides the rate by the whole pool.
+ *
+ * Cooled-down exits are skipped. If every exit is cooling down the cursor's own choice is
+ * returned rather than nothing, so a poll still goes out; unlike getNextIspProxy this does not
+ * clear the cooldown it is stepping over.
  *
  * @returns {{url: string, proxyObj: object}|null} null when no ISP pool is configured
  */
-function getIspProxyForLane(retailerId, lane) {
-  if (ispPool.proxies.length === 0) return null;
-  const allowedIndices = ispPool.retailerPools[retailerId];
-  const pool = allowedIndices
-    ? allowedIndices.map((i) => ispPool.proxies[i]).filter(Boolean)
-    : sharedPool();
+function getIspProxyRoundRobin(retailerId) {
+  const pool = ispPoolFor(retailerId);
   if (pool.length === 0) return null;
 
-  let h = 0;
-  for (const ch of String(lane || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-
+  const start = rrCursor.get(retailerId) || 0;
   const now = Date.now();
   for (let i = 0; i < pool.length; i++) {
-    const proxy = pool[(h + i) % pool.length];
+    const idx = (start + i) % pool.length;
+    const proxy = pool[idx];
     if (!proxy.healthy && proxy.blockedUntil <= now) proxy.healthy = true;
     if (proxy.blockedUntil > now) continue;
-    if (proxy.healthy) return { url: proxy.url, proxyObj: proxy };
+    if (proxy.healthy) {
+      rrCursor.set(retailerId, (idx + 1) % pool.length);
+      return { url: proxy.url, proxyObj: proxy };
+    }
   }
-  // Every exit is cooling down: use the lane's own choice rather than nothing, so a search
-  // still goes out. Unlike getNextIspProxy this does not clear the cooldown it is ignoring.
-  const proxy = pool[h % pool.length];
+  const proxy = pool[start % pool.length];
+  rrCursor.set(retailerId, (start + 1) % pool.length);
   return { url: proxy.url, proxyObj: proxy };
 }
 
@@ -445,7 +465,8 @@ loadIspProxies();
 module.exports = {
   getProxyUrl,
   getNextIspProxy,
-  getIspProxyForLane,
+  getIspProxyRoundRobin,
+  ispPoolSize,
   assignSharedPools,
   recordRequest,
   recordPollLatency,
