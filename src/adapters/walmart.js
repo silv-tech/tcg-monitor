@@ -422,7 +422,20 @@ class WalmartAdapter extends BaseAdapter {
    */
   async _stealthSearch(query) {
     const url = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
-    const proxyUrl = getProxyUrl('residential');
+    // Search goes through this retailer's ISP pool, not the residential one.
+    //
+    // The residential exit reaches the open internet fine — httpbin answers and reports
+    // 38.21.186.235 — but walmart.ca search does not complete through it at all. Measured
+    // directly: it redirects to /en/search and then times out, still hanging after 25 seconds,
+    // while this method allows 8. Every search therefore returned null and the adapter reported
+    // "search — 0/4 stealth (0% avg), 0 products" on every poll, with no error logged anywhere
+    // because a null is indistinguishable from an empty result.
+    //
+    // The same request over Walmart's own ISP addresses answers HTTP 200 in 4.9-5.4s and parses
+    // 46 items — verified on two of the three addresses in its pool. The watchlist leg was
+    // already using them successfully, which is why product pages kept working while search
+    // returned nothing.
+    const { url: proxyUrl } = this.getProxy();
     // One lane per query. The queries run in parallel, and on a single shared connection the
     // residential pool gives them all the same exit IP — measured: 4 requests, 1 IP. That
     // arrives at PerimeterX as a 4-request burst from one address every cycle, which is what
@@ -435,7 +448,9 @@ class WalmartAdapter extends BaseAdapter {
         proxyUrl,
         lane,
         maxRetries: 1,
-        timeoutMs: 8000,
+        // The ISP route answers in 4.9-5.4s measured against two of the three addresses,
+        // so 8s left almost no headroom and a slow response looked identical to a block.
+        timeoutMs: 15000,
       });
 
       if (!html || html.length < 500 || html.includes('Verify Your Identity')) {
@@ -637,7 +652,9 @@ class WalmartAdapter extends BaseAdapter {
         // Drop each failed query's own lane so its retry opens a fresh connection, and so a
         // fresh exit IP. Clearing the unlaned key would leave the blocked lanes in place.
         for (const query of failedQueries) {
-          _clearCache(getProxyUrl('residential'), false, `q:${query}`);
+          // Same pool the search itself uses; clearing the residential lane cleared a
+          // connection this method never opens.
+          _clearCache(this.getProxy().url, false, `q:${query}`);
         }
         const retryResults = await Promise.allSettled(
           failedQueries.map(query =>
