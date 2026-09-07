@@ -161,3 +161,106 @@ describe('search is an accelerator, never a dependency', () => {
     }
   });
 });
+
+describe('search resolves products pagination has not reached yet', () => {
+  // Both shops asked about returned twenty search results and matched none of them: every
+  // one was a real sealed product (Stellar Crown ETB, Mega Evolution ETB) that the rotation
+  // had not walked deep enough to identify. Discarding those made search useless exactly
+  // where it was most needed.
+  //
+  // Resolution goes through products/<handle>.js, which returns the SAME product id, variant
+  // id and sku that products.json does — so the key derived here is identical to the one
+  // pagination would produce and no second identity can appear.
+  const fullProduct = (handle, title, sku, price, available) => ({
+    id: 9039916433623, handle, title, product_type: 'TCG', tags: [],
+    variants: [{ id: 47185918755031, sku, price, available }],
+    images: [],
+  });
+
+  function stub(a, searchResults, byHandle) {
+    a._fetchPage = async (url) => {
+      if (/suggest\.json/.test(url)) return { products: searchResults, changed: true };
+      const h = (url.match(/\/products\/([^.]+)\.js/) || [])[1];
+      if (byHandle[h]) return { products: [byHandle[h]], changed: true };
+      throw new Error('404');
+    };
+  }
+
+  test('an unknown in-scope product is resolved and keyed exactly as pagination would', async () => {
+    const a = makeAdapter();
+    a._handleToSku.set('seed', 'SEED-SKU');       // makes search active
+    a.searchTerms = ['pokemon tcg'];
+    const handle = 'pokemon-tcg-mega-evolution-elite-trainer-box-mega-lucario';
+    stub(a,
+      [hit(handle, 'Pokemon TCG Mega Evolution Elite Trainer Box', '179.95', true)],
+      { [handle]: fullProduct(handle, 'Pokemon TCG Mega Evolution Elite Trainer Box', null, 17995, true) });
+
+    const products = {};
+    await a._searchProducts(products);
+    // sku is null on this shop, so pagination's fallback key applies.
+    assert.deepStrictEqual(Object.keys(products), ['9039916433623-47185918755031']);
+    assert.strictEqual(products['9039916433623-47185918755031'].inStock, true);
+    assert.strictEqual(a._handleToSku.get(handle), '9039916433623-47185918755031',
+      'and it is indexed so later ticks refresh it without another lookup');
+  });
+
+  test('a real sku from the product endpoint wins, matching pagination', async () => {
+    const a = makeAdapter();
+    a._handleToSku.set('seed', 'SEED-SKU');
+    a.searchTerms = ['pokemon tcg'];
+    const handle = 'poke-box';
+    stub(a, [hit(handle, 'Pokemon TCG Booster Box', '99.99', true)],
+      { [handle]: fullProduct(handle, 'Pokemon TCG Booster Box', 'POKE10-10311-114', 9999, true) });
+
+    const products = {};
+    await a._searchProducts(products);
+    assert.deepStrictEqual(Object.keys(products), ['POKE10-10311-114']);
+  });
+
+  test('an out-of-scope result is never resolved — no wasted request', async () => {
+    const a = makeAdapter();
+    a._handleToSku.set('seed', 'SEED-SKU');
+    a.searchTerms = ['pokemon tcg'];
+    let lookups = 0;
+    a._fetchPage = async (url) => {
+      if (/suggest\.json/.test(url)) {
+        return { products: [hit('sleeves', 'Pokemon TCG Card Sleeves 65ct', '9.99', true)], changed: true };
+      }
+      lookups += 1;
+      return { products: [], changed: true };
+    };
+    await a._searchProducts({});
+    assert.strictEqual(lookups, 0, 'accessories must not cost a lookup');
+  });
+
+  test('discovery is bounded per tick', async () => {
+    const a = makeAdapter();
+    a._handleToSku.set('seed', 'SEED-SKU');
+    a.searchTerms = ['pokemon tcg'];
+    const many = Array.from({ length: 10 }, (_, i) =>
+      hit(`box-${i}`, `Pokemon TCG Booster Box ${i}`, '99.99', true));
+    let lookups = 0;
+    a._fetchPage = async (url) => {
+      if (/suggest\.json/.test(url)) return { products: many, changed: true };
+      lookups += 1;
+      const h = (url.match(/\/products\/([^.]+)\.js/) || [])[1];
+      return { products: [fullProduct(h, `Pokemon TCG Booster Box`, `SKU-${h}`, 9999, true)], changed: true };
+    };
+    await a._searchProducts({});
+    assert.ok(lookups <= 2, `at most two lookups per tick, got ${lookups}`);
+  });
+
+  test('a 429 during resolution stops the tick without throwing', async () => {
+    const a = makeAdapter();
+    a._handleToSku.set('seed', 'SEED-SKU');
+    a.searchTerms = ['pokemon tcg'];
+    a._fetchPage = async (url) => {
+      if (/suggest\.json/.test(url)) {
+        return { products: [hit('box', 'Pokemon TCG Booster Box', '99.99', true)], changed: true };
+      }
+      throw new Error('Rate limited (429): https://example.com/products/box.js');
+    };
+    await assert.doesNotReject(() => a._searchProducts({}));
+    assert.strictEqual(a._searchRateLimited, true);
+  });
+});

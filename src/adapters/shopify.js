@@ -64,6 +64,10 @@ const SEARCH_RESULT_LIMIT = 10;
 // refreshed roughly every 21 minutes.
 const SEARCH_INTERVAL_MS = Number(process.env.SHOP_SEARCH_MS) || 90 * 1000;
 const SEARCH_TERMS_PER_TICK = Number(process.env.SHOP_SEARCH_TERMS_PER_TICK) || 1;
+// Resolving an unknown product costs one small request (~3.5KB), so it is bounded. In
+// steady state almost every search result is already known and this stays at zero; it only
+// works hard while a shop is first being mapped.
+const SEARCH_DISCOVERY_PER_TICK = Number(process.env.SHOP_SEARCH_DISCOVERY_PER_TICK) || 2;
 const SWEEP_MS_WITH_SEARCH = Number(process.env.SHOP_SWEEP_BACKSTOP_MS) || 45 * 60 * 1000;
 // Search prices are only believed once they have been shown to agree with prices read from
 // products.json, which is the path whose cent/dollar unit is already established.
@@ -514,10 +518,14 @@ class ShopifyAdapter extends BaseAdapter {
     this._anyPageChanged = true;
     let data;
     try { data = JSON.parse(res.body); } catch { return { products: [], changed: false }; }
-    // products.json puts the list at .products; predictive search nests it under
-    // .resources.results.products. Handling both here keeps one fetch path — and therefore
-    // one budget, one proxy, one cooldown and one ETag cache — for every Shopify request.
-    const list = data.products || data?.resources?.results?.products || [];
+    // Three Shopify shapes, one fetch path — and therefore one budget, one proxy, one
+    // cooldown and one ETag cache for every request this adapter makes:
+    //   products.json          → .products
+    //   search/suggest.json    → .resources.results.products
+    //   products/<handle>.js   → the product itself
+    const list = data.products
+      || data?.resources?.results?.products
+      || (data && data.id && Array.isArray(data.variants) ? [data] : []);
     if (res.headers.etag) this._etags.set(url, res.headers.etag);
     this._pageCache.set(url, list);
     return { products: list, changed: true };
@@ -540,6 +548,7 @@ class ShopifyAdapter extends BaseAdapter {
   async _searchProducts(products) {
     if (!this._handleToSku.size) return 0;   // nothing identified yet; sweep runs first
     let refreshed = 0;
+    let discovered = 0;   // bounded per tick, see SEARCH_DISCOVERY_PER_TICK
 
     // Take the next few terms and remember where we stopped, so successive polls walk the
     // whole list instead of repeating its head.
@@ -566,7 +575,29 @@ class ShopifyAdapter extends BaseAdapter {
 
       for (const item of results) {
         const sku = this._handleToSku.get(item.handle);
-        if (!sku) continue;                       // not identified yet — the sweep owns that
+        if (!sku) {
+          // An in-scope product search can see but pagination has not reached. Measured at
+          // both shops asked about: every one of twenty results was a real sealed product
+          // — Stellar Crown ETB, Mega Evolution ETB — and all twenty were being discarded,
+          // because the rotation had not walked deep enough to identify them yet.
+          //
+          // Resolving it here rather than waiting for the sweep is what makes search useful
+          // on a shop whose product sits on page 40. It is deliberately NOT keyed from the
+          // search result: products/<handle>.js returns the same product id, variant id and
+          // sku that products.json does, so the key derived below is identical to the one
+          // pagination would produce, and no second identity can appear.
+          if (isInScopeName(item.title) && discovered < SEARCH_DISCOVERY_PER_TICK) {
+            discovered++;
+            try {
+              const { products: one } = await this._fetchPage(`${this.url}/products/${item.handle}.js`);
+              for (const full of one) this.parseShopifyProduct(full, products);
+            } catch (err) {
+              if (isRateLimited(err)) { this._searchRateLimited = true; return refreshed; }
+              logger.debug(`${this.name}: could not resolve "${item.handle}": ${err.message}`);
+            }
+          }
+          continue;
+        }
         const existing = products[sku];
         const price = this._searchPrice(item, existing);
         products[sku] = {
