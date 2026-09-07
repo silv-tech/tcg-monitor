@@ -226,6 +226,10 @@ class ShopifyAdapter extends BaseAdapter {
     this.searchTerms = config.searchTerms || SEARCH_TERMS;
     this._handleToSku = new Map();
     this._pageYield = new Map();   // page -> { n: in-scope found there, at: when }
+    // Read one collection per poll instead of all of them, for shops that refuse more than
+    // one request per poll. Off unless the shop config asks for it.
+    this.rotateCollections = config.rotateCollections === true;
+    this._collectionCursor = 0;
     // How deep the fast poll follows a multi-page collection, per shop. Default 1 — following
     // is off unless a shop is known to tolerate the extra request per poll. Hobbiesville and
     // Kanzen Games both started returning 429s on their collection URLs at ~0.75 req/s, so
@@ -351,12 +355,26 @@ class ShopifyAdapter extends BaseAdapter {
         // the retailer and deliberately does NOT apply the keyword filter; a catalogue-wide
         // shop does. Getting this wrong would let Magic singles through on a Pokemon monitor.
         if (this.collections.length > 0) {
+          // Some shops cannot afford a request per collection on every poll. Kanzen Games
+          // refuses two: it ran clean on one collection and went straight back to
+          // "Cooling down ... after 429" on every poll when a second was added, even though
+          // that second collection is a 20-product response. The limit is the request COUNT,
+          // not the payload.
+          //
+          // Rotating keeps the shop at one request per poll while still covering every
+          // collection — each is read every collections.length polls, so at 8s two collections
+          // are both seen inside 16 seconds. The alternative was leaving One Piece off the fast
+          // path entirely, which is what the emergency fix had accidentally done.
+          const due = this.rotateCollections && this.collections.length > 1
+            ? [this.collections[this._collectionCursor++ % this.collections.length]]
+            : this.collections;
+
           // In parallel, not in series. These shops pay one request per collection, and
           // fetching them one after another put Untouchables at 10.2s and Chimera Gaming at
           // 10.3s while every single-request shop sat comfortably under 9.6s — the only two
           // shops missing the target, purely because their requests were queued end to end.
           // The budget still paces them; this only stops the second waiting on the first.
-          const pages = await Promise.all(this.collections.map(handle => this._fetchPage(
+          const pages = await Promise.all(due.map(handle => this._fetchPage(
             `${this.url}/collections/${handle}/products.json?limit=${FAST_PAGE_LIMIT}&page=1`,
           )));
           // Parse after the fetches so ordering stays deterministic regardless of which
@@ -370,7 +388,7 @@ class ShopifyAdapter extends BaseAdapter {
           // of Hobbiesville's 587 in-scope products outside the 8s poll. Only collections that
           // actually returned a full page are followed, so a shop pays a request per page that
           // exists rather than a fixed multiple of its collection count.
-          let more = this.collections
+          let more = due
             .map((handle, i) => ((pages[i].products || []).length === FAST_PAGE_LIMIT ? handle : null))
             .filter(Boolean);
           for (let pageNo = 2; pageNo <= this.fastCollectionPages && more.length; pageNo++) {

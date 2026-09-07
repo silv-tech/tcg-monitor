@@ -473,3 +473,56 @@ describe('a collection with more than one page is followed', () => {
     assert.strictEqual(a.requested.length, 2, 'capped at FAST_COLLECTION_PAGES');
   });
 });
+
+describe('a shop that refuses more than one request per poll rotates its collections', () => {
+  // Kanzen Games ran clean on one collection and went straight back to "Cooling down ...
+  // after 429" on every poll when a second was added — even though that second collection
+  // is a 20-product response. The limit is the request COUNT, not the payload. Rotating keeps
+  // the shop at one request per poll while still covering every collection, instead of
+  // leaving One Piece off the fast path entirely.
+  function rotatingAdapter(handles) {
+    const a = makeAdapter({ collections: handles, rotateCollections: true });
+    a._lastFullSweep = Date.now();
+    a._sweepOffset = 0;
+    a.requested = [];
+    a._fetchPage = async (url) => {
+      const handle = (url.match(/\/collections\/([^/]+)\//) || [])[1];
+      a.requested.push(handle);
+      return { products: [product(1, 'Pokemon Booster Box', '49.99')], changed: true };
+    };
+    return a;
+  }
+
+  test('only one collection is fetched per poll', async () => {
+    const a = rotatingAdapter(['pokemon-sealed-in-stock', 'one-piece-sealed-in-stock']);
+    await a.fetchProducts();
+    assert.strictEqual(a.requested.length, 1, 'two requests is what the shop refused');
+  });
+
+  test('successive polls cover every collection', async () => {
+    const a = rotatingAdapter(['pokemon-sealed-in-stock', 'one-piece-sealed-in-stock']);
+    await a.fetchProducts();
+    await a.fetchProducts();
+    assert.deepStrictEqual(a.requested, ['pokemon-sealed-in-stock', 'one-piece-sealed-in-stock'],
+      'both games must be seen — that is the point');
+  });
+
+  test('it wraps, so neither game is starved', async () => {
+    const a = rotatingAdapter(['a', 'b']);
+    for (let i = 0; i < 4; i++) await a.fetchProducts();
+    assert.deepStrictEqual(a.requested, ['a', 'b', 'a', 'b']);
+  });
+
+  test('a shop without the flag still fetches all its collections at once', async () => {
+    const a = makeAdapter({ collections: ['x', 'y'] });
+    a._lastFullSweep = Date.now();
+    a._sweepOffset = 0;
+    a.requested = [];
+    a._fetchPage = async (url) => {
+      a.requested.push((url.match(/\/collections\/([^/]+)\//) || [])[1]);
+      return { products: [product(1, 'Pokemon Booster Box', '49.99')], changed: true };
+    };
+    await a.fetchProducts();
+    assert.deepStrictEqual(a.requested.sort(), ['x', 'y'], 'rotation must be opt-in');
+  });
+});
