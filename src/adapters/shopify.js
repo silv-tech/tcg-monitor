@@ -62,7 +62,15 @@ const SEARCH_RESULT_LIMIT = 10;
 // place — the aggregate rate was never the problem, the clustering was. Spread this way the
 // search costs about one extra request every 90 seconds per shop, and the full in-scope set is
 // refreshed roughly every 21 minutes.
-const SEARCH_INTERVAL_MS = Number(process.env.SHOP_SEARCH_MS) || 90 * 1000;
+// One term EVERY poll rather than every 90 seconds. At an 8s poll the fourteen-term list
+// cycles in under two minutes, so a product prominent enough to be surfaced by a query is
+// re-checked on roughly that cadence instead of every 21 minutes.
+//
+// It is still one request, so the burst shape that caused the 429s is unchanged — only how
+// often that single request is made. If a shop objects, the adaptive backoff narrows the sweep
+// and the throttle grace stops it being reported as an outage; SHOP_SEARCH_MS raises this
+// without a deploy.
+const SEARCH_INTERVAL_MS = Number(process.env.SHOP_SEARCH_MS) || 8 * 1000;
 const SEARCH_TERMS_PER_TICK = Number(process.env.SHOP_SEARCH_TERMS_PER_TICK) || 1;
 // Resolving an unknown product costs one small request (~3.5KB), so it is bounded. In
 // steady state almost every search result is already known and this stays at zero; it only
