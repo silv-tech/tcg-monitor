@@ -343,7 +343,7 @@
     "color": "#1a1a2e",
     "maxProducts": 4000,
     "collections": [
-      "pokemon-sealed-all",
+      "pokemon-sealed-in-stock",
       "one-piece-sealed"
     ],
     "searchKeywords": [
