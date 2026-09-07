@@ -61,21 +61,28 @@ describe('a collection-based shop is not required to set depth', () => {
   });
 });
 
-describe('every shop polls at 16s', () => {
-  // 8s was tried and both collection shops began refusing us within minutes — production
-  // logged "Cooling down 111s after 429" on their collection URLs and the poll failed
-  // outright, returning nothing at all. Two collections at 8s is 0.25 req/s, which is above
-  // what Hobbiesville and Kanzen Games tolerate; the catalogue-path shops took escalating
-  // strikes at the same cadence.
+describe('no shop is polled faster than it tolerates', () => {
+  // What a shop objects to is the request RATE, not the interval. Hobbiesville and Kanzen
+  // Games ran two collections at 8s — 0.25 req/s — and began refusing within minutes:
+  // production logged "Cooling down 111s after 429" on their collection URLs and the poll
+  // failed outright, returning nothing at all. Chimera Gaming polls at the same 8s and is
+  // perfectly healthy, because it reads ONE collection: 0.125 req/s.
   //
-  // A poll that succeeds at 16s beats a poll that 429s at 8s, so the cadence is pinned here
-  // rather than left as a value someone can optimistically lower again.
+  // So the ceiling is expressed as a rate. 0.125 req/s is the highest figure observed running
+  // clean, and pinning it here is what stops the interval being optimistically lowered again
+  // without accounting for how many requests each poll actually makes.
+  const MAX_REQ_PER_SEC = 0.125;
   const shops = list.filter((r) => r.adapter === 'shopify');
 
   for (const shop of shops) {
-    test(`${shop.id} polls at 16s`, () => {
-      assert.strictEqual(shop.intervalMs, 16000,
-        'faster than this produced 429s and failed the poll outright');
+    // A collection shop fetches one request per collection and runs no keyword search.
+    // A catalogue shop fetches page 1 plus one search term per poll.
+    const perPoll = (shop.collections || []).length || 2;
+    const rate = perPoll / (shop.intervalMs / 1000);
+
+    test(`${shop.id}: ${perPoll} req / ${shop.intervalMs}ms = ${rate.toFixed(3)} req/s`, () => {
+      assert.ok(rate <= MAX_REQ_PER_SEC + 1e-9,
+        `${shop.id} at ${rate.toFixed(3)} req/s exceeds the ${MAX_REQ_PER_SEC} req/s that ran clean`);
     });
   }
 });
