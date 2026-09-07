@@ -21,7 +21,7 @@ const ShopifyAdapter = require('../src/adapters/shopify');
 const { FULL_SWEEP_MS } = ShopifyAdapter;
 
 function makeAdapter(overrides = {}) {
-  return new ShopifyAdapter({
+  const a = new ShopifyAdapter({
     id: 'testshop',
     name: 'Test Shop',
     url: 'https://testshop.example',
@@ -31,6 +31,12 @@ function makeAdapter(overrides = {}) {
     collections: [],
     ...overrides,
   });
+  // The sweep cursor is persisted in Redis. Opening that connection here would hold the test
+  // process open after the assertions finish, so the runner never exits — these tests are
+  // about the fast-poll path, not about cursor persistence, which has its own suite.
+  a._cursorLoaded = true;
+  a._saveSweepCursor = async () => {};
+  return a;
 }
 
 function product(id, title, price, available = true) {

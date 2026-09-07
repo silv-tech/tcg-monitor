@@ -3,6 +3,7 @@ const logger = require('../monitoring/logger');
 const { isInScopeName } = require('../utils/scope');
 const { stealthGet, isRateLimited } = require('../utils/stealth-http');
 const { markProxyBlocked, markProxySuccess } = require('../core/proxy');
+const state = require('../core/state');
 
 // Shopify prices by the CALLER'S GEOGRAPHY. The app runs from Railway in Virginia, so these
 // Canadian stores were quoting USD while we labelled the result CAD — measured on live stores:
@@ -22,6 +23,21 @@ const { normalizePrice } = require('../utils/helpers');
 // rotates to gain coverage, it does not widen to gain it, so the request burst per sweep
 // is unchanged and cannot reintroduce the 429s that the old cadence experiment caused.
 const SWEEP_PAGES_PER_RUN = 10;
+
+// The sweep cursor is an optimisation, so waiting on Redis for it must never stall a sweep.
+// A disconnected ioredis client QUEUES commands rather than rejecting, so without this a
+// blip would hang every shop poll until the adapter timeout rather than costing one
+// redundant sweep. The timer is unref'd so it cannot hold the process open.
+const CURSOR_REDIS_TIMEOUT_MS = 2000;
+function withRedisTimeout(promise) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error("redis timeout")), CURSOR_REDIS_TIMEOUT_MS);
+      if (t.unref) t.unref();
+    }),
+  ]);
+}
 
 // How often a shop reads its WHOLE catalogue rather than just the newest page. New listings
 // are caught on every poll regardless; this cadence only bounds how quickly a stock or price
@@ -428,6 +444,7 @@ class ShopifyAdapter extends BaseAdapter {
    *   end, which is the only case where the caller may treat the result as a complete view.
    */
   async fetchAllProducts(products) {
+    await this._loadSweepCursor();
     const maxPages = Math.max(1, Math.ceil(this.maxProducts / this.pageLimit));
     const startPage = Math.min(this._sweepCursor || 1, maxPages);
     let page = startPage;
@@ -466,8 +483,37 @@ class ShopifyAdapter extends BaseAdapter {
     if (page > maxPages) reachedEnd = true;   // reached the configured ceiling
 
     this._sweepCursor = reachedEnd ? 1 : page;
+    await this._saveSweepCursor();
     // Complete only when this single run spanned the entire catalogue.
     return reachedEnd && startPage === 1;
+  }
+
+  /**
+   * The rotating window's position, kept in Redis rather than in memory.
+   *
+   * A deep shop needs ten sweeps to cycle — two and a half hours at the current cadence — and
+   * an in-memory cursor restarts at page 1 on every deploy. A shop would then re-read its first
+   * ten pages forever and never reach the pages the rotation exists to cover, which is the
+   * exact bug this change set out to fix. Pokemon Center lost four scheduling maps the same
+   * way earlier, so it is a repeat of a known failure rather than a hypothetical one.
+   *
+   * Redis failures are swallowed: a lost cursor costs one redundant sweep, while a throwing
+   * poll costs the whole store.
+   */
+  async _loadSweepCursor() {
+    if (this._cursorLoaded) return;
+    this._cursorLoaded = true;
+    try {
+      const raw = await withRedisTimeout(state.getRedis().get(`tcg:sweepcursor:${this.id}`));
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 1) this._sweepCursor = n;
+    } catch { /* first sweep just starts at page 1 */ }
+  }
+
+  async _saveSweepCursor() {
+    try {
+      await withRedisTimeout(state.getRedis().set(`tcg:sweepcursor:${this.id}`, String(this._sweepCursor)));
+    } catch { /* position is an optimisation, never worth failing a poll for */ }
   }
 
   /**

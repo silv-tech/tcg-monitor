@@ -40,6 +40,10 @@ function makeAdapter(total, maxProducts) {
     return { products };
   };
   a._detectPriceUnit = () => {};
+  // No Redis in unit tests: the cursor is an optimisation, and leaving it live makes every
+  // sweep test wait on a connection that will never come.
+  a._cursorLoaded = true;
+  a._saveSweepCursor = async () => {};
   a.parseShopifyProduct = (item, out) => { out[String(item.id)] = { sku: String(item.id) }; };
   return a;
 }
@@ -114,5 +118,57 @@ describe('completeness is reported honestly', () => {
     const out = {};
     await a.fetchAllProducts(out);
     assert.strictEqual(Object.keys(out).length, 500);
+  });
+});
+
+describe('the window position survives a restart', () => {
+  // A deep shop needs ten sweeps to cycle. An in-memory cursor restarts at page 1 on every
+  // deploy, so the shop would re-read its first ten pages forever and never reach the pages
+  // the rotation exists to cover — silently undoing the whole fix. Pokemon Center lost four
+  // scheduling maps to exactly this, so it is a repeat, not a hypothetical.
+  const state = require('../src/core/state');
+
+  function withFakeRedis(store) {
+    const orig = state.getRedis;
+    state.getRedis = () => ({
+      get: async (k) => (k in store ? store[k] : null),
+      set: async (k, v) => { store[k] = v; },
+    });
+    return () => { state.getRedis = orig; };
+  }
+
+  test('the cursor is written after a sweep and read back by a fresh instance', async () => {
+    const store = {};
+    const restore = withFakeRedis(store);
+    try {
+      const a = makeAdapter(13750, 14000);
+      a._cursorLoaded = false; delete a._saveSweepCursor;
+      await a.fetchAllProducts({});
+      assert.strictEqual(store['tcg:sweepcursor:testshop'], '11',
+        'the next window position must be persisted');
+
+      // A new instance stands in for the process after a deploy.
+      const b = makeAdapter(13750, 14000);
+      b._cursorLoaded = false; delete b._saveSweepCursor;
+      b.requested = [];
+      await b.fetchAllProducts({});
+      assert.strictEqual(b.requested[0], 11,
+        'a restart must resume where the rotation left off, not restart at page 1');
+    } finally { restore(); }
+  });
+
+  test('a Redis failure costs one redundant sweep, never the poll', async () => {
+    const orig = state.getRedis;
+    state.getRedis = () => ({
+      get: async () => { throw new Error('redis down'); },
+      set: async () => { throw new Error('redis down'); },
+    });
+    try {
+      const a = makeAdapter(13750, 14000);
+      a._cursorLoaded = false; delete a._saveSweepCursor;
+      const out = {};
+      await assert.doesNotReject(() => a.fetchAllProducts(out));
+      assert.ok(Object.keys(out).length > 0, 'the sweep still returns products');
+    } finally { state.getRedis = orig; }
   });
 });
