@@ -343,8 +343,7 @@
     "color": "#1a1a2e",
     "maxProducts": 4000,
     "collections": [
-      "pokemon-sealed-in-stock",
-      "one-piece-sealed-in-stock"
+      "pokemon-sealed-in-stock"
     ],
     "searchKeywords": [
       "pokemon",
@@ -366,8 +365,7 @@
       "sealed",
       "tcg",
       "trading card"
-    ],
-    "rotateCollections": true
+    ]
   },
   {
     "_phase": 2,
