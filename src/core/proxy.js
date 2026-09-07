@@ -217,6 +217,46 @@ function getNextIspProxy(retailerId) {
   return sorted[0];
 }
 
+/**
+ * Pick one ISP exit for a named lane, without the sticky pin.
+ *
+ * getNextIspProxy pins a retailer to ONE exit until it breaks, which is right for a poller
+ * that sends one request at a time. Walmart's search does not: it fires all of its queries
+ * in parallel, and a sticky pin would deliver them to PerimeterX as a simultaneous burst from
+ * a single address — the same shape that drove residential stealth success from 86% down to
+ * ~50% before lanes were introduced. A lane cannot spread ISP traffic the way it spreads
+ * residential traffic, because an ISP exit is one fixed address per proxy URL, so the spread
+ * has to happen in the choice of proxy.
+ *
+ * The lane hashes to a stable index, so a given query keeps returning to the same exit rather
+ * than churning addresses, and cooled-down exits are skipped.
+ *
+ * @returns {{url: string, proxyObj: object}|null} null when no ISP pool is configured
+ */
+function getIspProxyForLane(retailerId, lane) {
+  if (ispPool.proxies.length === 0) return null;
+  const allowedIndices = ispPool.retailerPools[retailerId];
+  const pool = allowedIndices
+    ? allowedIndices.map((i) => ispPool.proxies[i]).filter(Boolean)
+    : sharedPool();
+  if (pool.length === 0) return null;
+
+  let h = 0;
+  for (const ch of String(lane || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+
+  const now = Date.now();
+  for (let i = 0; i < pool.length; i++) {
+    const proxy = pool[(h + i) % pool.length];
+    if (!proxy.healthy && proxy.blockedUntil <= now) proxy.healthy = true;
+    if (proxy.blockedUntil > now) continue;
+    if (proxy.healthy) return { url: proxy.url, proxyObj: proxy };
+  }
+  // Every exit is cooling down: use the lane's own choice rather than nothing, so a search
+  // still goes out. Unlike getNextIspProxy this does not clear the cooldown it is ignoring.
+  const proxy = pool[h % pool.length];
+  return { url: proxy.url, proxyObj: proxy };
+}
+
 function markProxyBlocked(proxy) {
   if (!proxy) return;
   const cooldownMs = proxiesConfig?.isp?.cooldownMs || 1800000;
@@ -405,6 +445,7 @@ loadIspProxies();
 module.exports = {
   getProxyUrl,
   getNextIspProxy,
+  getIspProxyForLane,
   assignSharedPools,
   recordRequest,
   recordPollLatency,

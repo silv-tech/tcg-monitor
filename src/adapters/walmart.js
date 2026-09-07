@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice } = require('../utils/helpers');
-const { getProxyUrl } = require('../core/proxy');
+const { getProxyUrl, getIspProxyForLane } = require('../core/proxy');
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const { hashSku } = require('../utils/helpers');
@@ -417,39 +417,44 @@ class WalmartAdapter extends BaseAdapter {
   }
 
   /**
+   * The exit one search query goes out through.
+   *
+   * Walmart's proxyTier is 'residential' because its watchlist legs genuinely need residential
+   * addresses, so this cannot come from getProxy() — that reads the same tier and would hand
+   * search the residential exit, which is what it was already doing. Search is the one Walmart
+   * path that must not: walmart.ca/search does not complete through the residential exit at
+   * all (it redirects to /en/search and returns PerimeterX's /blocked page, 7.5KB with no
+   * __NEXT_DATA__), while all three of this retailer's ISP addresses answer 200 with 46 items
+   * in 4.0-4.6s. It is also the heaviest thing we send: a search page is 570KB, four of them
+   * every six seconds, and residential bandwidth is metered where these addresses are not.
+   *
+   * Falls back to residential when no ISP pool is configured, so local runs still work.
+   */
+  _searchExit(lane) {
+    const isp = getIspProxyForLane(this.id, lane);
+    return isp ? isp.url : getProxyUrl('residential');
+  }
+
+  /**
    * Stealth-fetch a Walmart search page and parse __NEXT_DATA__ for results.
    * Returns array of product items (same shape as ScraperAPI) or null on failure.
    */
   async _stealthSearch(query) {
     const url = `https://www.walmart.ca/search?q=${encodeURIComponent(query)}`;
-    // Search goes through this retailer's ISP pool, not the residential one.
-    //
-    // The residential exit reaches the open internet fine — httpbin answers and reports
-    // 38.21.186.235 — but walmart.ca search does not complete through it at all. Measured
-    // directly: it redirects to /en/search and then times out, still hanging after 25 seconds,
-    // while this method allows 8. Every search therefore returned null and the adapter reported
-    // "search — 0/4 stealth (0% avg), 0 products" on every poll, with no error logged anywhere
-    // because a null is indistinguishable from an empty result.
-    //
-    // The same request over Walmart's own ISP addresses answers HTTP 200 in 4.9-5.4s and parses
-    // 46 items — verified on two of the three addresses in its pool. The watchlist leg was
-    // already using them successfully, which is why product pages kept working while search
-    // returned nothing.
-    const { url: proxyUrl } = this.getProxy();
-    // One lane per query. The queries run in parallel, and on a single shared connection the
-    // residential pool gives them all the same exit IP — measured: 4 requests, 1 IP. That
-    // arrives at PerimeterX as a 4-request burst from one address every cycle, which is what
-    // drove stealth success from 86% down to ~50%. A lane per query means 4 separate
-    // connections and 4 different IPs, so each address sees a quarter of the rate.
+    // One lane per query. The queries run in parallel, and lanes keep them on separate
+    // connections and separate exits — without that they arrive at PerimeterX as a burst from
+    // a single address every cycle, which is what drove stealth success from 86% to ~50%.
+    // The lane also decides which ISP address this query uses; see _searchExit.
     const lane = `q:${query}`;
+    const proxyUrl = this._searchExit(lane);
 
     try {
       const html = await stealthGet(url, {
         proxyUrl,
         lane,
         maxRetries: 1,
-        // The ISP route answers in 4.9-5.4s measured against two of the three addresses,
-        // so 8s left almost no headroom and a slow response looked identical to a block.
+        // The ISP route answers in 4.0-5.4s, measured across all three addresses, so the
+        // old 8s left almost no headroom and a slow response looked identical to a block.
         timeoutMs: 15000,
       });
 
@@ -652,9 +657,11 @@ class WalmartAdapter extends BaseAdapter {
         // Drop each failed query's own lane so its retry opens a fresh connection, and so a
         // fresh exit IP. Clearing the unlaned key would leave the blocked lanes in place.
         for (const query of failedQueries) {
-          // Same pool the search itself uses; clearing the residential lane cleared a
-          // connection this method never opens.
-          _clearCache(this.getProxy().url, false, `q:${query}`);
+          // Ask for the exit by the SAME lane the query used. Exits are chosen per lane now,
+          // so a differently-keyed lookup can name another address and clear a connection this
+          // path never opened.
+          const lane = `q:${query}`;
+          _clearCache(this._searchExit(lane), false, lane);
         }
         const retryResults = await Promise.allSettled(
           failedQueries.map(query =>
