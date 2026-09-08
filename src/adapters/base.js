@@ -1,6 +1,6 @@
 const logger = require('../monitoring/logger');
 const { httpGet } = require('../utils/http');
-const { stealthGet } = require('../utils/stealth-http');
+const { stealthGet, isRateLimited, isSelfSkip } = require('../utils/stealth-http');
 const { getProxyUrl, getNextIspProxy, recordRequest, markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const productsConfig = require('../config/products.json');
 const { classifyCategory, isTCGProduct } = require('../utils/helpers');
@@ -403,7 +403,16 @@ class BaseAdapter {
       return products;
     } catch (err) {
       const elapsed = Date.now() - start;
-      logger.error(`${this.name}: poll failed in ${elapsed}ms`, { error: err.message });
+      // A rate-limit cooldown or a self-skip is us backing off on purpose, not the retailer
+      // failing. The scheduler already treats these as skips (no circuit trip, no recorded
+      // error), so logging them as ERROR here only made honoured backoff look like breakage in
+      // the admin log. Log at debug and still re-throw, so the scheduler classifies it exactly
+      // as before — behaviour is unchanged, only the log level of a non-failure.
+      if (isRateLimited(err) || isSelfSkip(err)) {
+        logger.debug(`${this.name}: poll skipped in ${elapsed}ms — ${err.message}`);
+      } else {
+        logger.error(`${this.name}: poll failed in ${elapsed}ms`, { error: err.message });
+      }
       throw err;
     }
   }
