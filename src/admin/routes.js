@@ -561,9 +561,17 @@ router.post('/sample-alert', async (req, res) => {
       : entries.find(p => p.inStock && p.isTCG) || entries.find(p => p.name);
     if (!product) return res.status(404).json({ error: `No cached product for ${retailerId}${sku ? `:${sku}` : ''}` });
 
+    // Attach per-store availability from the enrichment cache, so a demonstration alert shows
+    // the same store data a real alert carries rather than a stripped-down version of it.
+    let stores = null;
+    try {
+      const raw = await state.getRedis().get(`tcg:stores:${retailerId}`);
+      if (raw) stores = (JSON.parse(raw) || {})[product.sku] || null;
+    } catch { /* no store data is a missing field, never a failed alert */ }
+
     const event = {
       type: 'LISTING',
-      product: { ...product, retailerId, lastSeen: Date.now() },
+      product: { ...product, retailerId, lastSeen: Date.now(), ...(stores ? { _stores: stores } : {}) },
       detail: `Now monitoring ${entries.length} products at ${product.retailer || retailerId}`,
       _detectedAt: Date.now(),
       _scanTier: 'paid',
