@@ -182,3 +182,44 @@ describe('londondrugs: name decoding', () => {
     assert.strictEqual(isTrackedCardProduct(name), true);
   });
 });
+
+/**
+ * A sealed product form must beat the accessory exclusion.
+ *
+ * "Sleeved Booster Pack" is a booster pack — sealed cards, the exact thing people wait for —
+ * but "sleeved" matched the card-sleeves exclusion and removed it silently. London Drugs
+ * listed four of them and this monitor tracked none, which only surfaced when the client asked
+ * whether all Pokemon TCG stock was covered.
+ *
+ * The general lesson is the one the shops' non-TCG filter already records: an exclusion list is
+ * a heuristic over words in a title, and letting it veto an actual product form is how real
+ * stock goes missing. A missed drop is the failure that matters; a junk alert is not.
+ */
+describe('londondrugs: a sealed form outranks the accessory list', () => {
+  const tracked = [
+    'Pokemon TCG: Mega Evolution Chaos Rising Sleeved Booster Pack',
+    'Pokemon TCG: Mega Evolution Perfect Order Sleeved Booster Pack',
+    'Pokemon TCG: Mega Evolution Sleeved Booster Pack - Assorted',
+    'Pokemon Trading Card Game: Scarlet & Violet 10 Destined Rivals Sleeved Booster Pack',
+  ];
+  for (const name of tracked) {
+    test(`tracks: ${name.slice(0, 52)}`, () => {
+      assert.strictEqual(isTrackedCardProduct(name), true,
+        'a sleeved booster pack is sealed product, not sleeves');
+    });
+  }
+
+  // The rescue must not become a hole: these still have to stay out.
+  const excluded = [
+    'Ultra PRO Pokemon Card Sleeves - 100 pack',
+    'Ultra PRO Pokemon Trading Card Book - Sword and Shield - 252 cards',
+    'Pokemon Trading Card Game: Mini Portfolio',
+    'Mattel Mega Pokemon Evergreen Pokeball - Assorted',
+    'Jazwares Pokemon Battle Figure',
+  ];
+  for (const name of excluded) {
+    test(`still excludes: ${name.slice(0, 46)}`, () => {
+      assert.strictEqual(isTrackedCardProduct(name), false);
+    });
+  }
+});

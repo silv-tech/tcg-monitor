@@ -69,6 +69,15 @@ const ACCESSORY_TERMS = [
   'card case', 'playmat', 'toploader', 'deck box',
 ];
 
+// Forms that are sealed product no matter what accessory word also appears in the title.
+//
+// "Sleeved Booster Pack" is a booster pack — sealed cards, exactly the drop people wait for —
+// but the word "sleeved" matched the card-sleeves exclusion and silently removed it. London
+// Drugs listed four of them (Mega Evolution Chaos Rising, Perfect Order, Mega Evolution
+// Assorted, Destined Rivals) and this monitor tracked none. An exclusion list that can veto a
+// product form is how real stock goes missing, so the form wins.
+const SEALED_FORMS = ['booster pack', 'booster bundle', 'booster box', 'booster'];
+
 function decodeEntities(str) {
   return String(str || '')
     .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
@@ -152,6 +161,11 @@ function slugMap(html) {
 function isTrackedCardProduct(name) {
   const t = String(name || '').toLowerCase();
   if (!GAME_NAMES.some((g) => t.includes(g))) return false;
+  // A sealed form beats the accessory list. Checked first because the exclusion is a heuristic
+  // over words in a title, and the form is the actual product: "Sleeved Booster Pack" is a
+  // booster pack, not sleeves. Getting this the other way round dropped four real Pokemon
+  // products from this store without a trace.
+  if (SEALED_FORMS.some((f) => t.includes(f))) return true;
   if (ACCESSORY_TERMS.some((a) => t.includes(a))) return false;
   return PRODUCT_FORMS.some((f) => t.includes(f));
 }
