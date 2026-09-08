@@ -45,8 +45,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           headers: { 'content-type': 'application/octet-stream', 'x-api-key': cfg.apiKey },
           body: bin,
         });
+        // Recorded so the options page can show images landing. Without it there is no way to
+        // tell a working thumbnail pipeline from a silent one until an alert happens to fire.
+        await record(r.ok
+          ? { source: 'image', note: `sent ${Math.round(bin.length / 1024)}kb` }
+          : { source: 'image', error: `HTTP ${r.status}` });
         sendResponse({ ok: r.ok });
-      } catch {
+      } catch (err) {
+        await record({ source: 'image', error: err.message });
         sendResponse({ ok: false });
       }
     })();

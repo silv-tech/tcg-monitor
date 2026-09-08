@@ -20,9 +20,16 @@ async function renderLog() {
     const when = new Date(e.at).toLocaleTimeString();
     const ok = !e.error && e.status === 200;
     div.className = ok ? 'ok' : 'bad';
-    div.textContent = ok
-      ? `${when}  ${e.source}  ${e.parsed} parsed, ${e.known} known${e.seeded ? ' (seeded)' : ''}`
-      : `${when}  ${e.source}  ${e.error || `HTTP ${e.status}: ${e.error || ''}`}`;
+    // Image uploads and tab notes carry a note rather than parse counts.
+    if (e.note && !e.error) {
+      div.className = 'ok';
+      div.textContent = `${when}  ${e.source}  ${e.note}`;
+    } else if (e.error) {
+      div.className = 'bad';
+      div.textContent = `${when}  ${e.source}  ${e.error}`;
+    } else {
+      div.textContent = `${when}  ${e.source}  ${e.parsed} parsed, ${e.known} known${e.seeded ? ' (seeded)' : ''}`;
+    }
     box.appendChild(div);
   }
 }

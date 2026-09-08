@@ -74,6 +74,15 @@ function sameProductName(a, b) {
 const QUERIES_PER_POLL = Number(process.env.AMAZON_QUERIES_PER_POLL) || 1;
 const SEARCH_BACKOFF_MS = [60000, 180000, 300000, 600000, 900000];
 
+// Some items are buyable on Amazon but carry NO price on the search tile (verified on
+// B0GW2DK37Q — "First Partner Illustration Collection Series 2" — listed in stock, priced only
+// on its own product page). Our search stores price 0 for those, and delivery's no-price filter
+// then drops the alert, so a genuine restock is missed while a competitor that reads the product
+// page catches it. When we see a buyable-but-priceless item, resolve its price from the product
+// page (AOD fragment, ~30KB residential, no ScraperAPI credit) so the alert can go out. Bounded
+// per poll because each is a page fetch, and cached once resolved so it is never re-fetched.
+const MAX_PRICE_FILL_PER_POLL = Number(process.env.AMAZON_MAX_PRICE_FILL_PER_POLL) || 3;
+
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 const AOD_COOLDOWN_MS = 10 * 60 * 1000;
@@ -312,6 +321,9 @@ class AmazonAdapter extends BaseAdapter {
 
     let hits = 0;
     let found = 0;
+    // Buyable items whose search tile carried no price — keyed by ASIN so the same product
+    // surfacing under several queries is only looked up once.
+    const priceless = new Map();
     for (const result of results) {
       if (result.status === 'rejected') continue;
       const { items } = result.value;
@@ -323,7 +335,31 @@ class AmazonAdapter extends BaseAdapter {
         if (!product) continue;
         products[product.sku] = product;
         this._knownProducts.set(product.sku, product);
+        // In stock but no price we can trust: delivery would silently drop the alert. Queue a
+        // product-page price lookup so a real restock is not lost for want of a price.
+        if (product.inStock && !(product.price > 0)) priceless.set(product.sku, product);
       }
+    }
+
+    // Resolve prices for the buyable-but-priceless items from their own product page. Bounded
+    // per poll (each is a residential AOD fetch), skipped entirely while AOD is throttling, and
+    // done in parallel to keep the poll fast. A resolved price is written back to _knownProducts,
+    // so from the next poll _buildFromSearch reuses it and the item is never queued again. A
+    // lookup that yields no price leaves the item at 0 — suppressed exactly as before, then
+    // retried the next time it is seen: a miss becomes an alert, never a wrong price.
+    if (priceless.size && !this._lastFetchThrottled) {
+      const toFill = [...priceless.values()].slice(0, MAX_PRICE_FILL_PER_POLL);
+      await Promise.all(toFill.map(async (product) => {
+        try {
+          const data = await this._stealthCheckAsin(product.sku);
+          if (data && data.price > 0) {
+            product.price = data.price;
+            this._knownProducts.set(product.sku, product);
+            logger.info(`Amazon: price-filled $${data.price} for ${product.sku} `
+              + `(in stock, no price on search tile) — ${(product.name || '').slice(0, 50)}`);
+          }
+        } catch { /* leave price 0 — suppressed as before, retried next sighting */ }
+      }));
     }
 
     // Carry forward anything this sweep did not surface — absence from a search page is
