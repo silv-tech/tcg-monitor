@@ -1,7 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { normalizePrice, isTCGProduct, sleep } = require('../utils/helpers');
-const { getProxyUrl } = require('../core/proxy');
+const { getProxyUrl, getIspProxyRoundRobin, ispPoolSize } = require('../core/proxy');
 
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
@@ -276,6 +276,8 @@ class AmazonAdapter extends BaseAdapter {
     //
     // Carrying forward _knownProducts (below) means the queries not run this cycle still
     // report their products; only the discovery of a brand-new listing waits for its turn.
+    if (!this._rateLogged) { this._rateLogged = true; this._logSearchRate(); }
+
     const batch = [];
     for (let i = 0; i < QUERIES_PER_POLL && i < this.searchQueries.length; i++) {
       batch.push(this.searchQueries[this._queryCursor % this.searchQueries.length]);
@@ -335,12 +337,46 @@ class AmazonAdapter extends BaseAdapter {
    */
   async _freeSearch(query) {
     const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys`;
-    // A search page is ~1.4MB. Four of them every 10s through the residential proxy would
-    // be ~48GB/day, so the proxy is the fallback, not the default — direct also answers
-    // in ~1.2s versus ~3.5s proxied.
-    const direct = await this._searchOnce(url, null);
-    if (direct) return direct;
-    return this._searchOnce(url, getProxyUrl('residential'));
+
+    // Spread across this retailer's ISP exits, and never fall back to residential.
+    //
+    // Amazon's search limit is per ADDRESS: four queries every six seconds from Railway's
+    // single IP (0.67 req/s) blocked it after ~14 hours, which is why this adapter dropped to
+    // one query per poll. Rotating exits divides that rate by the pool, so coverage can widen
+    // without the rate per address rising — the same lever that fixed Walmart search.
+    //
+    // The residential fallback is deliberately gone. A search page is ~1.4MB, residential is
+    // billed per GB, and a fallback that only fires when things are already going badly is
+    // exactly when it would run hardest: four queries every 10s through it is ~48GB/day. The
+    // ISP exits are flat-rate, so there is nothing left worth paying for here. Direct remains
+    // the last resort because it costs nothing and still works when no pool is configured.
+    const isp = getIspProxyRoundRobin(this.id);
+    if (isp) {
+      const viaIsp = await this._searchOnce(url, isp.url);
+      if (viaIsp) return viaIsp;
+    }
+    return this._searchOnce(url, null);
+  }
+
+  /**
+   * Say out loud what rate this configuration runs at per exit.
+   *
+   * Amazon blocked Railway's address at 0.67 req/s after ~14 hours — slow enough that no
+   * short test catches it, so the number has to be visible in the log rather than discovered
+   * a day later as "SEARCH — 0/4 queries" with no explanation.
+   */
+  _logSearchRate() {
+    const exits = ispPoolSize(this.id);
+    const totalRps = QUERIES_PER_POLL / (this.intervalMs / 1000);
+    const rotationS = Math.ceil(this.searchQueries.length / QUERIES_PER_POLL) * (this.intervalMs / 1000);
+    const base = `Amazon: search — ${QUERIES_PER_POLL}/${this.searchQueries.length} queries per ` +
+      `${Math.round(this.intervalMs / 1000)}s poll (full rotation ${rotationS}s)`;
+    if (exits === 0) {
+      logger.warn(`${base} over the direct IP alone = ${totalRps.toFixed(3)} req/s on ONE address ` +
+        '— 0.67 req/s blocked it after ~14h');
+      return;
+    }
+    logger.info(`${base} over ${exits} ISP exit(s) = ${(totalRps / exits).toFixed(3)} req/s per exit`);
   }
 
   async _searchOnce(url, proxyUrl) {
