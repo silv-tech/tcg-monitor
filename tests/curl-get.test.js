@@ -45,13 +45,16 @@ describe('curl fetch strategy', () => {
   test('returns a string for text and a Buffer for binary', async (t) => {
     // Touches the network, so it skips rather than fails when there is none: a suite that goes
     // red offline teaches people to ignore red.
+    // Skip on anything short of a real 200. curlGet now reports a failed transfer as
+    // { status: 0 } rather than null, so a bare null-check no longer catches a network hiccup —
+    // which is exactly how this test went flaky and failed a run it should have skipped.
     const res = await curlGet('https://www.ebgames.ca/robots.txt', { timeoutMs: 20000 });
-    if (!res) return t.skip('curl unavailable or offline');
+    if (!res || res.status !== 200) return t.skip('curl unavailable or offline');
     assert.strictEqual(typeof res.body, 'string');
     assert.strictEqual(typeof res.status, 'number');
 
     const bin = await curlGet('https://www.ebgames.ca/robots.txt', { timeoutMs: 20000, binary: true });
-    if (!bin) return t.skip('offline between calls');
+    if (!bin || bin.status !== 200) return t.skip('offline between calls');
     assert.ok(Buffer.isBuffer(bin.body),
       'binary mode must not decode — decoding is what corrupted the image on the paid route');
   });
