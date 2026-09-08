@@ -1,6 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const scraperApi = require('../utils/scraper-api');
+const storeAvail = require('../utils/ld-store-availability');
 
 /**
  * London Drugs — Next.js App Router storefront behind DataDome.
@@ -32,6 +33,13 @@ const SWEEP_INTERVAL_FLOOR = 5 * 60 * 1000;
 // are all Disallow'd in robots.txt, and `/search*` with them, so discovery uses categories
 // and the sitemap only — never search.
 const SCRAPER_OPTS = { render: false, premium: false, ultraPremium: false };
+
+// Store enrichment cadence. Each pass costs one Bright Data browser session, so the floor is
+// deliberately high — this is background colour on an alert, not a detection path.
+const STORE_ENRICH_DEFAULT = 30 * 60 * 1000;
+const STORE_ENRICH_FLOOR = 10 * 60 * 1000;
+// Enough to name the nearest store and count the rest without bloating every Redis row.
+const STORE_ROWS_KEPT = 5;
 
 const GAME_NAMES = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
 const PRODUCT_FORMS = [
@@ -139,11 +147,15 @@ class LondonDrugsAdapter extends BaseAdapter {
     this._known = new Map(); // sku -> classified product
     this._lastSweepAt = 0;
     this._sweepRunning = false;
+    this._stores = new Map();        // sku -> store rows with stock, from the enrichment pass
+    this._storesAt = 0;
+    this._storesRunning = false;
     this._deriveTiming();
   }
 
   _deriveTiming() {
     this.sweepIntervalMs = this.timingValue('sweepIntervalMs', SWEEP_INTERVAL_DEFAULT, SWEEP_INTERVAL_FLOOR);
+    this.storeEnrichIntervalMs = this.timingValue('storeEnrichIntervalMs', STORE_ENRICH_DEFAULT, STORE_ENRICH_FLOOR);
   }
 
   applyTiming(timing) {
@@ -231,6 +243,39 @@ class LondonDrugsAdapter extends BaseAdapter {
     return out;
   }
 
+  /**
+   * Refresh per-store availability in the background, on a slow timer.
+   *
+   * Never awaited by the poll. A lookup costs a Bright Data browser session — measured 22.1s to
+   * open plus ~1.5-4s per product — so it is far too slow to sit in front of an alert, and it is
+   * billed per GB. Only in-stock products are looked up: a store cannot hold units of something
+   * the chain does not have online, and skipping the other ~17 products cuts the pass by most of
+   * its cost.
+   */
+  _maybeEnrichStores() {
+    const due = Date.now() - this._storesAt >= this.storeEnrichIntervalMs;
+    if (!due || this._storesRunning) return;
+    const openSession = storeAvail.createBrightDataSession(this.url);
+    if (!openSession) return; // no browser endpoint configured — alerts simply omit the store
+
+    this._storesRunning = true;
+    this._storesAt = Date.now();
+    const targets = [...this._known.values()].filter((p) => p.inStock && p.url)
+      .map((p) => ({ sku: p.sku, url: p.url }));
+    if (targets.length === 0) { this._storesRunning = false; return; }
+
+    storeAvail.fetchStoreAvailability(targets, { openSession })
+      .then((map) => {
+        for (const [sku, rows] of map) {
+          const withStock = storeAvail.storesWithStock(rows).slice(0, STORE_ROWS_KEPT);
+          if (withStock.length) this._stores.set(sku, withStock);
+          else this._stores.delete(sku);
+        }
+      })
+      .catch((err) => logger.warn(`${this.name}: store enrichment failed: ${err.message}`))
+      .finally(() => { this._storesRunning = false; });
+  }
+
   /** Wide sweep — replaces the catalogue so delisted products actually disappear. */
   async _sweep() {
     this._sweepRunning = true;
@@ -265,6 +310,8 @@ class LondonDrugsAdapter extends BaseAdapter {
       this._sweep().catch((err) => logger.warn(`${this.name}: sweep failed: ${err.message}`));
     }
 
+    this._maybeEnrichStores();
+
     const html = await this._fetchCategory(FAST_PATH);
     const found = this._toProducts(html);
 
@@ -273,6 +320,14 @@ class LondonDrugsAdapter extends BaseAdapter {
     // leaves the previous state intact instead of firing an out-of-stock alert for everything.
     if (found.length === 0 && this._known.size > 0) {
       throw new Error(`fast poll parsed 0 in-scope products (had ${this._known.size})`);
+    }
+
+    // Attach the last known per-store availability. It is enrichment, so it lags the stock
+    // number by up to one enrichment interval — acceptable here only because London Drugs is
+    // pickup-only and therefore not a checkout race.
+    for (const p of found) {
+      const stores = this._stores.get(p.sku);
+      if (stores && stores.length) p._stores = stores;
     }
 
     for (const p of found) this._known.set(p.sku, p);

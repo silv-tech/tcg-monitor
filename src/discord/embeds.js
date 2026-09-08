@@ -1,5 +1,6 @@
 const { EmbedBuilder } = require('discord.js');
 const { EVENT_TYPES } = require('../core/events');
+const { formatStoreField } = require('../utils/ld-store-availability');
 const { truncate } = require('../utils/helpers');
 
 // ─── Event config ────────────────────────────────────────────────
@@ -189,6 +190,17 @@ function buildAlertEmbed(event, tier) {
       embed.addFields({ name: 'Stock', value: String(stockQty), inline: true });
     } else {
       embed.addFields({ name: 'Stock', value: product.inStock ? '1+' : '\u{1F534}', inline: true });
+    }
+
+    // Store — where the units actually are.
+    //
+    // On a pickup-only retailer the address IS the alert: "in stock" the buyer cannot locate is
+    // barely information. Populated by the London Drugs enrichment pass, which is the only
+    // source we have for per-store quantity; absent for every other retailer, so the field
+    // simply does not appear rather than rendering an empty heading.
+    const storeField = product._stores ? formatStoreField(product._stores) : null;
+    if (storeField) {
+      embed.addFields({ name: 'Store', value: storeField, inline: false });
     }
 
     // Fulfilment — only when the retailer will NOT ship it.

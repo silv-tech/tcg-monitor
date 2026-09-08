@@ -119,4 +119,35 @@ describe('london drugs alert fields', () => {
     assert.strictEqual(f.Stock, '26');
     assert.match(f.Fulfilment, /pickup only/i);
   });
+
+  test('the store field names where the units actually are', () => {
+    const f = alertFor({
+      stockCount: 26, pickupOnly: true,
+      _stores: [
+        { code:'002', name:'Granville & Georgia', stockAvailable:1, distanceM:946,
+          address1:'710 Granville Street', city:'Vancouver', province:'British Columbia', postal:'V6Z 1E4' },
+        { code:'090', name:'Richmond Centre', stockAvailable:4, distanceM:9200,
+          address1:'6551 No 3 Road', city:'Richmond', province:'British Columbia', postal:'V6Y 2B6' },
+      ],
+    });
+    assert.ok(f.Store, 'no Store field — on a pickup-only retailer the address is the alert');
+    assert.match(f.Store, /Granville & Georgia/);
+    assert.match(f.Store, /1 in stock/);
+    assert.match(f.Store, /710 Granville Street, Vancouver, British Columbia V6Z 1E4/);
+    assert.match(f.Store, /\+1 other store in stock/);
+  });
+
+  test('retailers with no store data show no Store field at all', () => {
+    const f = alertFor({ stockCount: 26, pickupOnly: true });
+    assert.strictEqual(f.Store, undefined,
+      'an empty heading is worse than no heading; only London Drugs has this data');
+  });
+
+  test('store data that has no stock anywhere renders nothing, not "unavailable"', () => {
+    const f = alertFor({ stockCount: 26, pickupOnly: true,
+      _stores: [{ code:'082', name:'Olympic Village', stockAvailable:0, distanceM:1480,
+        address1:'1622 Salt Street', city:'Vancouver', province:'British Columbia', postal:'V5Y 0E4' }] });
+    assert.strictEqual(f.Store, undefined,
+      'the lookup may simply have missed it — stating absence as fact would be a wrong field');
+  });
 });
