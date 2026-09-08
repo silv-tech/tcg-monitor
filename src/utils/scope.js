@@ -243,9 +243,27 @@ function isInScopeName(name) {
 }
 
 
+/**
+ * Sealed product FORMS, as a list rather than a pattern.
+ *
+ * DEFINITE_SEALED above answers "is this one name sealed product?". This answers a different
+ * question — "are these two names the same KIND of product?" — which cross-retailer matching
+ * needs, because a Booster Bundle and a Booster Box of the same set share almost every word.
+ * Kept deliberately separate from DEFINITE_SEALED: that regex decides what enters the system
+ * at all, and widening it to serve a display feature would change scope for every retailer.
+ */
+const PRODUCT_FORMS = [
+  'elite trainer box', 'booster box', 'booster bundle', 'booster pack', 'booster display',
+  'build & battle', 'build and battle', 'premium collection', 'ultra premium collection',
+  'collection box', 'battle deck', 'starter deck', 'structure deck', 'mini tin', 'booster tin',
+  'checklane', 'ex box', 'surprise box', 'triple pack', 'blister', 'poster collection',
+  'pin collection', 'sticker collection',
+];
+
 module.exports = {
   GAME_NAMES,
   SET_NAMES,
+  PRODUCT_FORMS,
   ACCESSORY_KEYWORDS,
   PRINT_KEYWORDS,
   repairMojibake,

@@ -2,6 +2,7 @@ const Redis = require('ioredis');
 const config = require('../config');
 const logger = require('../monitoring/logger');
 const { hashSku } = require('../utils/helpers');
+const { SET_NAMES, PRODUCT_FORMS } = require('../utils/scope');
 
 let redis;
 
@@ -199,6 +200,46 @@ function tokenize(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(t => t.length > 1);
 }
 
+/**
+ * Words that appear on nearly every product in this catalogue and therefore identify nothing.
+ *
+ * Form words (box, pack, bundle, tin) are deliberately NOT here: they are exactly what
+ * separates a Booster Box from a Booster Bundle of the same set.
+ */
+const GENERIC_TOKENS = new Set([
+  'pokemon', 'pokémon', 'tcg', 'trading', 'card', 'cards', 'game', 'games',
+  'the', 'and', 'with', 'for', 'new', 'sealed', 'english', 'official',
+]);
+
+function distinctiveTokens(tokens) {
+  return tokens.filter(t => !GENERIC_TOKENS.has(t));
+}
+
+function sharedDistinctive(a, b) {
+  const setB = new Set(distinctiveTokens(b));
+  return distinctiveTokens(a).filter(t => setB.has(t));
+}
+
+/** Which names from `list` appear in `name`. */
+function phrasesIn(name, list) {
+  const lower = (name || '').toLowerCase();
+  return new Set(list.filter(p => lower.includes(p)));
+}
+
+/**
+ * True when each side names something from the list that the other does not.
+ *
+ * One-directional differences are fine and common — "Prismatic Evolutions Elite Trainer Box"
+ * and "Scarlet & Violet Prismatic Evolutions Elite Trainer Box" are the same product, one
+ * retailer simply spelled out the parent set. It is only when BOTH names carry a set (or a
+ * form) the other lacks that they are describing different things.
+ */
+function bothNameSomethingTheOtherLacks(a, b) {
+  const aHasOwn = [...a].some(x => !b.has(x));
+  const bHasOwn = [...b].some(x => !a.has(x));
+  return aHasOwn && bHasOwn;
+}
+
 function jaccardSimilarity(a, b) {
   const setA = new Set(a);
   const setB = new Set(b);
@@ -311,12 +352,29 @@ async function findCrossRetailerMatches(product) {
       continue;
     }
 
-    // Jaccard name similarity
+    // Jaccard name similarity, then three tests that ask whether the two names describe the
+    // same PRODUCT rather than merely the same kind of thing.
+    //
+    // Jaccard alone was not close to enough. A real alert on 2026-09-08 for "Pokemon Trading
+    // Card Game Bloodmoon Ursaluna EX Box" carried "Also In Stock: amazon — $700.00", and the
+    // link went to a Celebrations Elite Trainer Box. It scored 0.417 — over the threshold — on
+    // "pokemon, trading, card, game, box", not one of which identifies anything. Prismatic
+    // Evolutions ETB scores the same 0.417 against that source, so this was systemic: any two
+    // Pokemon sealed products sharing the boilerplate prefix plus "box" matched each other.
+    //
+    // The $700 was genuine, which is what made it convincing. The MATCH was wrong.
     if (sourceTokens.length > 0) {
       const sim = jaccardSimilarity(sourceTokens, p.tokens);
-      if (sim >= 0.4) {
-        matches.push({ retailer: p.retailerId, price: p.price, url: p.url, similarity: sim });
-      }
+      if (sim < 0.4) continue;
+      // At least two shared words that actually name something.
+      if (sharedDistinctive(sourceTokens, p.tokens).length < 2) continue;
+      // Sibling sets: Mega Evolution "Pitch Black" vs "Perfect Order" share every other word.
+      if (bothNameSomethingTheOtherLacks(
+        phrasesIn(product.name, SET_NAMES), phrasesIn(p.name, SET_NAMES))) continue;
+      // Same set, different product: a Booster Bundle is not a Booster Box.
+      if (bothNameSomethingTheOtherLacks(
+        phrasesIn(product.name, PRODUCT_FORMS), phrasesIn(p.name, PRODUCT_FORMS))) continue;
+      matches.push({ retailer: p.retailerId, price: p.price, url: p.url, similarity: sim });
     }
   }
 
