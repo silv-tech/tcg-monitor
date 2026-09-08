@@ -3,6 +3,7 @@ const logger = require('../monitoring/logger');
 const state = require('../core/state');
 const { sleep, hashSku } = require('../utils/helpers');
 const scraperApi = require('../utils/scraper-api');
+const { curlGet } = require('../utils/curl-get');
 
 const DEEP_CRAWL_INTERVAL_DEFAULT = 5 * 60 * 1000;
 const DEEP_CRAWL_INTERVAL_FLOOR = 60 * 1000;
@@ -211,6 +212,22 @@ class EBGamesAdapter extends BaseAdapter {
 
   async _fetchListing(url) {
     await this._throttle();
+
+    // curl first, because it is the only client Cloudflare accepts here — and it is free.
+    //
+    // Measured from one address within minutes: impit with a Chrome fingerprint 403,
+    // node-fetch 403, undici 403, curl 200 with the full 926KB listing in ~1s. Spoofing Chrome
+    // is actively worse than not spoofing anything on this host. Getting this right takes EB
+    // Games off the paid route entirely, which was running at ~14,400 credits a day.
+    //
+    // Any failure falls through to the routes below, so this can only add coverage.
+    try {
+      const res = await curlGet(url, { timeoutMs: 20000 });
+      if (res && res.status === 200 && !isChallenge(res.body)) return res.body;
+    } catch (err) {
+      logger.debug(`EB Games: curl attempt failed for ${url}: ${err.message}`);
+    }
+
     let stealthErr = null;
     try {
       const html = await this.stealthFetch(url, { ...STEALTH_OPTS, maxRetries: 2, retryDelayMs: 1500 });
