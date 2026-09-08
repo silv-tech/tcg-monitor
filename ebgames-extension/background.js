@@ -97,6 +97,10 @@ async function refreshNow() {
   await Promise.all(found.flat().map(({ tab, url }) => chrome.tabs.update(tab.id, { url }).catch(() => null)));
 }
 
+// Clicking the toolbar icon opens the options. There is no popup, so without this the icon
+// looks broken — and the options page is the only place the push log is visible.
+chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
+
 chrome.runtime.onInstalled.addListener(ensureTabs);
 chrome.runtime.onStartup.addListener(ensureTabs);
 chrome.alarms.create('ensure-tabs', { periodInMinutes: 1 });
