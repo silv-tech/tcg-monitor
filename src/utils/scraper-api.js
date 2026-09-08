@@ -95,6 +95,11 @@ async function scraperFetch(targetUrl, opts = {}) {
   }
 
   const {
+    // Binary responses (product images) MUST NOT go through response.text(): a JPEG's first
+    // byte 0x89/0xFF is not valid UTF-8, gets replaced with U+FFFD, and the file is destroyed
+    // irreversibly (this is the "271KB blob for a 151KB JPEG" we saw). arrayBuffer() preserves
+    // the bytes exactly. Verified 2026-09-08.
+    binary = false,
     render = true,
     premium = true,
     ultraPremium = false,
@@ -158,7 +163,7 @@ async function scraperFetch(targetUrl, opts = {}) {
   try {
     const response = await fetch(apiUrl, {
       signal: controller.signal,
-      headers: { 'Accept': 'text/html' },
+      headers: { 'Accept': binary ? 'image/avif,image/webp,image/png,image/*,*/*' : 'text/html' },
     });
 
     clearTimeout(timeout);
@@ -173,7 +178,9 @@ async function scraperFetch(targetUrl, opts = {}) {
       throw new Error(`ScraperAPI: HTTP ${response.status} ${response.statusText}`);
     }
 
-    const html = await response.text();
+    const payload = binary
+      ? Buffer.from(await response.arrayBuffer())
+      : await response.text();
 
     // Track credits + budget monitoring
     creditUsage.total += cost;
@@ -181,9 +188,9 @@ async function scraperFetch(targetUrl, opts = {}) {
     checkBudget();
     persistBudget();
 
-    logger.info(`ScraperAPI: OK for ${retailerId} (${tier}, ${cost} credits, session total: ${creditUsage.total})`);
+    logger.info(`ScraperAPI: OK for ${retailerId} (${tier}, ${cost} credits, session total: ${creditUsage.total}${binary ? `, ${payload.length}B binary` : ''})`);
 
-    return html;
+    return payload;
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') {

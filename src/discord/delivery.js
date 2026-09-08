@@ -1,7 +1,23 @@
 const fetch = require('node-fetch');
+const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const config = require('../config');
 const logger = require('../monitoring/logger');
 const { buildAlertEmbed } = require('./embeds');
+const imageFetch = require('../utils/image-fetch');
+
+// Hosts whose images Discord's own thumbnail fetcher cannot load, so a remote thumbnail URL
+// renders as nothing. For these we download the bytes ourselves and upload them as a Discord
+// attachment instead. EB Games' images sit behind a Cloudflare that 403s every datacenter
+// fetcher, Discord's included — verified 2026-09-08.
+const BLOCKED_IMAGE_HOSTS = new Set(['www.ebgames.ca', 'ebgames.ca']);
+
+function isBlockedImageHost(url) {
+  try {
+    return BLOCKED_IMAGE_HOSTS.has(new URL(url).host.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 const { filterDuplicates, markSent } = require('./dedup');
 const alertLimiter = require('./alert-limiter');
 const { recordAlertLatency } = require('../core/proxy');
@@ -452,6 +468,25 @@ class DeliveryQueue {
     return map[retailerName] || retailerName.toLowerCase().replace(/\s+/g, '');
   }
 
+  /**
+   * If the embed's thumbnail points at a host Discord cannot fetch, download the bytes and
+   * return a cloned embed whose thumbnail is a local attachment, plus the file to upload.
+   * Otherwise returns the embed unchanged with no files. Never throws and never blocks the
+   * alert indefinitely — on any failure the original embed is returned (worst case: no image,
+   * exactly as before this change).
+   */
+  async resolveThumbnail(embed) {
+    const rawThumb = embed?.data?.thumbnail?.url;
+    if (!rawThumb || !isBlockedImageHost(rawThumb)) return { embed, files: undefined };
+    const bytes = await imageFetch.fetchImageBytes(rawThumb, { retailerId: 'ebgames' });
+    if (!bytes) return { embed, files: undefined };
+    const name = 'thumb.jpg';
+    // Clone so a shared embed (e.g. watchlist sent to two channels) is never mutated in place —
+    // each message gets its own attachment reference.
+    const clone = EmbedBuilder.from(embed.data).setThumbnail(`attachment://${name}`);
+    return { embed: clone, files: [new AttachmentBuilder(bytes, { name })] };
+  }
+
   async sendToChannel(channelId, embed, components, content, tier) {
     if (!channelId) {
       logger.error('Alert dropped: no channel ID provided');
@@ -463,7 +498,11 @@ class DeliveryQueue {
       try {
         const channel = await this.fetchChannel(channelId);
         if (channel) {
-          const payload = { embeds: [embed] };
+          // For hosts Discord cannot fetch (EB Games), swap the remote thumbnail for a
+          // locally-uploaded attachment. Returns the original embed untouched otherwise.
+          const { embed: outEmbed, files } = await this.resolveThumbnail(embed);
+          const payload = { embeds: [outEmbed] };
+          if (files) payload.files = files;
           if (content) payload.content = content;
           if (components && components.length) payload.components = components;
           await channel.send(payload);
