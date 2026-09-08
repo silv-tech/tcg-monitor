@@ -81,7 +81,10 @@ describe('ebgames paid fallback', () => {
     const a = adapter(); wire(a, { stealthWorks: false });
     await a._fetchListing('https://www.ebgames.ca/a');
     a._paidWindowUntil = 0;             // burst over, floor still running
-    await assert.rejects(() => a._fetchListing('https://www.ebgames.ca/b'), /403/,
+    // Refused by OUR floor, so it throws a self-skip rather than the retailer's 403. The
+    // distinction is what keeps these out of the circuit breaker; see the self-skip suite below.
+    const err = await a._fetchListing('https://www.ebgames.ca/b').catch((e) => e);
+    assert.strictEqual(err.selfSkip, true,
       'without a floor this is ~52,000 credits a day, over the whole monthly budget');
     assert.strictEqual(calls.paid, 1);
   });
@@ -186,5 +189,45 @@ describe('ebgames deep crawl allowance', () => {
     a._crawlPaidRemaining = 5;
     for (let i = 0; i < 50; i++) await a._fetchListing(`https://www.ebgames.ca/p${i}`).catch(() => {});
     assert.ok(paid <= 5 + 4, `spent ${paid} — the grant plus at most one fast-poll burst`);
+  });
+});
+
+/**
+ * A page we declined to buy is not a retailer failure.
+ *
+ * The fast poll runs every 5s; the paid floor allows a purchase every 30s. So five polls in six
+ * legitimately buy nothing — and counting those as poll errors gave EB Games 33 consecutive
+ * failures and a degraded health status while it was working correctly and finding 250 products.
+ *
+ * Worse than the wrong status: enough consecutive errors trip the circuit breaker, and its
+ * recovery probes would hit the same floor and fail again. That is the loop that kept the
+ * Shopify shops down for hours on 2026-09-05, and the rule learned there — isSelfSkip — is the
+ * same one that applies here.
+ */
+describe('ebgames self-skip is not an error', () => {
+  test('a refusal by our own floor is marked as ours', async () => {
+    const a = new EBGames({ id: 'ebgames', name: 'EB Games', url: 'https://www.ebgames.ca',
+      intervalMs: 5000, proxyTier: 'none' });
+    a._throttle = async () => {};
+    a.stealthFetch = async () => { throw new Error('Blocked after 2 stealth attempts: 403'); };
+    scraperApi.isConfigured = () => true;
+    scraperApi.scraperFetch = async () => PAGE;
+
+    await a._fetchListing('https://www.ebgames.ca/a');   // opens the burst
+    a._paidWindowUntil = 0;                              // burst over, floor still running
+    const err = await a._fetchListing('https://www.ebgames.ca/b').catch((e) => e);
+    assert.strictEqual(err.selfSkip, true,
+      'unmarked, this reads as a retailer failure and counts toward the circuit breaker');
+  });
+
+  test('a retailer refusal is NOT marked as ours', async () => {
+    const a = new EBGames({ id: 'ebgames', name: 'EB Games', url: 'https://www.ebgames.ca',
+      intervalMs: 5000, proxyTier: 'none' });
+    a._throttle = async () => {};
+    a.stealthFetch = async () => { throw new Error('Blocked after 2 stealth attempts: 403'); };
+    scraperApi.isConfigured = () => false;               // no paid route at all
+    const err = await a._fetchListing('https://www.ebgames.ca/x').catch((e) => e);
+    assert.notStrictEqual(err.selfSkip, true,
+      'a real block must still count, or genuine outages stop being visible');
   });
 });

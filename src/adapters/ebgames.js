@@ -222,7 +222,14 @@ class EBGamesAdapter extends BaseAdapter {
     }
 
     // Free route refused. Pay for it, but only as often as the floor allows.
-    if (!scraperApi.isConfigured() || !this._paidAllowed()) throw stealthErr;
+    if (!scraperApi.isConfigured()) throw stealthErr;
+    if (!this._paidAllowed()) {
+      // OUR choice, not the retailer's. Marked so the poll can tell the two apart: the free
+      // route is blocked and we have decided not to buy this page yet.
+      const skip = new Error(`Paid floor: not buying ${url} yet`);
+      skip.selfSkip = true;
+      throw skip;
+    }
     const html = await scraperApi.scraperFetch(url, {
       render: false, premium: false, ultraPremium: false,
       retailerId: this.id, minIntervalMs: 0, timeoutMs: 45000,
@@ -293,11 +300,28 @@ class EBGamesAdapter extends BaseAdapter {
     const seen = new Map();
     let ok = 0;
     results.forEach((r, i) => {
-      if (!r.ok) { logger.warn(`EB Games: fast fetch failed ${jobs[i].url}: ${r.error.message}`); return; }
+      if (!r.ok) {
+        if (r.error && r.error.selfSkip) logger.debug(`EB Games: ${r.error.message}`);
+        else logger.warn(`EB Games: fast fetch failed ${jobs[i].url}: ${r.error.message}`);
+        return;
+      }
       ok++;
       this._ingest(r.value, jobs[i].src, seen);
     });
-    if (ok === 0) throw new Error('all fast-poll pages failed (Cloudflare block?)');
+    if (ok === 0) {
+      // Every page refused BY US is not a retailer failure and must not count as a poll error.
+      // The fast poll runs every 5s while the paid floor allows a purchase every 30s, so five
+      // polls in six legitimately buy nothing. Counting those as errors gave EB Games 33
+      // consecutive failures and a degraded health status while it was working correctly — and
+      // enough of them would trip the circuit breaker, whose recovery probes would hit the same
+      // floor. That exact loop kept the Shopify shops down for hours on 2026-09-05.
+      const allSelfSkip = results.every((r) => !r.ok && r.error && r.error.selfSkip);
+      if (allSelfSkip) {
+        logger.debug('EB Games: fast poll skipped — paid floor not elapsed, free route blocked');
+        return;
+      }
+      throw new Error('all fast-poll pages failed (Cloudflare block?)');
+    }
 
     const added = [...seen.keys()].filter(sku => !this._knownProducts.has(sku)).length;
     this._merge(seen, false);
