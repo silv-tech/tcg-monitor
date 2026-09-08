@@ -53,6 +53,16 @@ const PAID_MAX_PER_BURST = Number(process.env.EBGAMES_PAID_MAX_PER_BURST) || 4;
 // crawls per day, which is what deepCrawlIntervalMs controls.
 const PAID_MAX_PER_CRAWL = Number(process.env.EBGAMES_PAID_MAX_PER_CRAWL) || 40;
 
+// How long to stop trying curl after it is refused.
+//
+// curl is the only client this Cloudflare accepts — from a residential address. From Railway's
+// datacenter address it answers 403 no matter the client, which only became visible once the
+// container had a CA bundle; before that curl failed at TLS and looked like a different problem
+// entirely. So the free route is real, just not available from here. It is still attempted, only
+// rarely: datacenter ranges do get unblocked, and the day this one is, EB Games goes free again
+// with nobody watching for it.
+const CURL_RETRY_AFTER_MS = Number(process.env.EBGAMES_CURL_RETRY_MS) || 30 * 60 * 1000;
+
 // Cloudflare rate-limits bursts (~90 requests in 7s got 429s, 2 req/s still tripped it occasionally)
 const MIN_SPACING_DEFAULT = 750;
 const MIN_SPACING_FLOOR = 400;
@@ -147,6 +157,7 @@ class EBGamesAdapter extends BaseAdapter {
     this._paidInBurst = 0;
     this._crawlPaidRemaining = 0;
     this._curlReported = false;
+    this._curlBlockedUntil = 0;
     this._seeded = false;
     this._deriveTiming();
   }
@@ -223,8 +234,14 @@ class EBGamesAdapter extends BaseAdapter {
     //
     // Any failure falls through to the routes below, so this can only add coverage.
     try {
+      // Backing off after a refusal. curl is the only client this Cloudflare accepts, but only
+      // from a residential address — from Railway's datacenter address it answers 403 whatever
+      // the client. Retrying every request would add a pointless 403 to a host already refusing
+      // us; retrying rarely means the day the range is unblocked, EB Games goes free on its own.
+      if (Date.now() < this._curlBlockedUntil) throw new Error('curl backing off after a refusal');
       const res = await curlGet(url, { timeoutMs: 20000 });
       if (res && res.status === 200 && !isChallenge(res.body)) {
+        this._curlBlockedUntil = 0;
         // Say which strategy actually served the page, once. Whether curl works from this host
         // decides whether EB Games is free or costs ~14,400 credits a day, and without this the
         // only symptom is a credit counter moving for reasons nobody can see.
@@ -234,12 +251,14 @@ class EBGamesAdapter extends BaseAdapter {
         }
         return res.body;
       }
+      this._curlBlockedUntil = Date.now() + CURL_RETRY_AFTER_MS;
       if (!this._curlReported) {
         this._curlReported = true;
         const why = !res ? 'curl binary unavailable'
           : res.status === 0 ? `transfer failed: ${res.error || 'unknown'}`
             : `HTTP ${res.status}`;
-        logger.warn(`EB Games: curl did NOT work here (${why}) — falling back to the paid route`);
+        logger.warn(`EB Games: curl did NOT work here (${why}) — falling back to the paid route, `
+          + `retrying every ${Math.round(CURL_RETRY_AFTER_MS / 60000)}min in case the range is unblocked`);
       }
     } catch (err) {
       if (!this._curlReported) {
