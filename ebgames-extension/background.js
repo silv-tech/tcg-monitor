@@ -18,7 +18,19 @@ async function record(entry) {
   await chrome.storage.local.set({ pushLog: pushLog.slice(0, 20) });
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // A fresh top-level GET for this tab. location.reload() repeats the ORIGINAL request, which
+  // on Odoo means replaying a stale CSRF token and getting the same 400 forever.
+  if (msg && msg.type === 'ebgames-next') {
+    const target = TABS.find((t) => t.key === msg.source);
+    if (target && sender.tab) chrome.tabs.update(sender.tab.id, { url: target.url }).catch(() => {});
+    return undefined;
+  }
+  if (msg && msg.type === 'ebgames-note') {
+    record({ source: msg.source, error: msg.note });
+    return undefined;
+  }
+  if (msg && msg.type === 'ebgames-refresh') { refreshNow(); return undefined; }
   if (!msg || msg.type !== 'ebgames-listing') return undefined;
 
   (async () => {
@@ -50,20 +62,52 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 /**
  * A closed or crashed tab is a silent outage — the monitor would just stop hearing from us.
  * Re-open anything missing once a minute.
+ *
+ * Every tab is resolved in ONE pass rather than a sequential await loop. MV3 tears the service
+ * worker down between awaits, so a loop that created the first tab and then yielded lost the
+ * second one entirely — which is exactly what happened on first install: one pinned tab, and
+ * the other only appearing when the next alarm fired a minute later.
  */
 async function ensureTabs() {
   const { enabled = true } = await chrome.storage.local.get('enabled');
   if (!enabled) return;
-  for (const t of TABS) {
-    const base = t.url.split('?')[0];
-    const found = await chrome.tabs.query({ url: `${base}*` });
-    if (found.length === 0) {
-      await chrome.tabs.create({ url: t.url, pinned: true, active: false });
-    }
-  }
+  const queries = await Promise.all(
+    TABS.map((t) => chrome.tabs.query({ url: `${t.url.split('?')[0]}*` }).catch(() => []))
+  );
+  const missing = TABS.filter((_, i) => queries[i].length === 0);
+  if (missing.length === 0) return;
+  await Promise.all(
+    missing.map((t) => chrome.tabs.create({ url: t.url, pinned: true, active: false }).catch(() => null))
+  );
+  await record({ source: missing.map((t) => t.key).join(', '), note: 'opened tab' });
+}
+
+/**
+ * Send the category tabs to a fresh URL now, instead of waiting out whatever backoff they are
+ * sitting in. Navigation, not reload — a tab wedged on Odoo's stale-session 400 would reload
+ * straight back into it.
+ */
+async function refreshNow() {
+  await ensureTabs();
+  const found = await Promise.all(
+    TABS.map((t) => chrome.tabs.query({ url: `${t.url.split('?')[0]}*` })
+      .then((tabs) => tabs.map((tab) => ({ tab, url: t.url })))
+      .catch(() => []))
+  );
+  await Promise.all(found.flat().map(({ tab, url }) => chrome.tabs.update(tab.id, { url }).catch(() => null)));
 }
 
 chrome.runtime.onInstalled.addListener(ensureTabs);
 chrome.runtime.onStartup.addListener(ensureTabs);
 chrome.alarms.create('ensure-tabs', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'ensure-tabs') ensureTabs(); });
+
+/**
+ * Saving the options must take effect at once. The tabs open before there is any config to
+ * use, so their first push is refused and the content script backs off for two minutes —
+ * without this, entering a correct key looked like nothing happening at all.
+ */
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (['baseUrl', 'apiKey', 'intervalSec', 'enabled'].some((k) => k in changes)) refreshNow();
+});

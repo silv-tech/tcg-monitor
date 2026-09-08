@@ -38,5 +38,13 @@ $('save').addEventListener('click', async () => {
   setTimeout(() => { $('saved').textContent = ''; }, 1500);
 });
 
+// Manual recovery: a tab stuck on a Cloudflare challenge or Odoo's stale-session 400 gets
+// sent to a fresh URL without waiting for its backoff to expire.
+$('refresh').addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'ebgames-refresh' }).catch(() => {});
+  $('saved').textContent = 'reloading tabs';
+  setTimeout(() => { $('saved').textContent = ''; }, 1500);
+});
+
 chrome.storage.onChanged.addListener(renderLog);
 load();
