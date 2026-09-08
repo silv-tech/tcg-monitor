@@ -279,7 +279,13 @@ router.get('/stats/budget', async (req, res) => {
   // restart — which reads as "full budget available" when 15,520 credits were in fact spent.
   // The spend guard itself was never affected; it restores before deciding. This is about the
   // number a human looks at.
-  try { await require('../utils/scraper-api').restoreBudget(); } catch { /* report what we have */ }
+  try {
+    const sa = require('../utils/scraper-api');
+    await sa.restoreBudget();
+    // Pull the real billed figure from ScraperAPI's /account endpoint (throttled internally),
+    // so this reports the true usage rather than our local counter, which can drift or reset.
+    await sa.refreshAccountUsage(true);
+  } catch { /* report what we have */ }
   res.json(getBudgetStatus());
 });
 

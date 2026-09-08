@@ -15,12 +15,54 @@ const CREDIT_COSTS = {
 const creditUsage = { total: 0, byRetailer: {}, sessionStart: Date.now() };
 const REDIS_BUDGET_KEY = 'tcg:scraper_budget';
 
-// Budget monitoring — Hobby plan = 100K credits/month
+// Budget monitoring.
 const MONTHLY_BUDGET = parseInt(process.env.SCRAPER_BUDGET) || 100000;
 const WARN_THRESHOLD = 0.80;  // warn admin at 80%
 const PAUSE_THRESHOLD = 0.90; // pause scraping at 90%
 let budgetPaused = false;
 let budgetWarned = false;
+
+// Authoritative usage from ScraperAPI's own /account endpoint — this is the BILLED truth.
+// Our local creditUsage counter drifts and reset once (read ~30k while the dashboard was 145k),
+// which left the pause guard blind. We now anchor pause/warn to the real figure and only fall
+// back to the local counter if the account call has never succeeded. Refreshed at most once per
+// TTL, so it costs a handful of (free) account calls per hour, never a scrape credit.
+let dashboardUsed = null;   // requestCount from /account
+let dashboardLimit = null;  // requestLimit from /account (authoritative over SCRAPER_BUDGET)
+let lastAccountFetch = 0;
+const ACCOUNT_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Pull real usage from ScraperAPI's account endpoint. Throttled to ACCOUNT_TTL_MS. Never throws
+ * and never blocks a scrape: on any failure it keeps the last known figure (or leaves it null so
+ * checkBudget falls back to the local counter).
+ */
+async function refreshAccountUsage(force = false) {
+  if (!SCRAPER_API_KEY) return;
+  const now = Date.now();
+  if (!force && now - lastAccountFetch < ACCOUNT_TTL_MS) return;
+  lastAccountFetch = now;
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(`${SCRAPER_API_BASE}/account?api_key=${SCRAPER_API_KEY}`, { signal: controller.signal });
+    clearTimeout(t);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.requestCount === 'number') dashboardUsed = data.requestCount;
+    if (typeof data.requestLimit === 'number') dashboardLimit = data.requestLimit;
+    checkBudget(); // re-evaluate pause/warn against the real numbers immediately
+  } catch {
+    // Keep the last known values; the local counter still guards in the meantime.
+  }
+}
+
+/** The billed figure when we have it, else the local counter. */
+function effectiveUsage() {
+  const used = dashboardUsed != null ? dashboardUsed : creditUsage.total;
+  const limit = dashboardLimit != null ? dashboardLimit : MONTHLY_BUDGET;
+  return { used, limit, source: dashboardUsed != null ? 'dashboard' : 'local' };
+}
 
 // Restore budget from Redis on startup (lazy — first call triggers restore)
 let _budgetRestored = false;
@@ -118,6 +160,7 @@ async function scraperFetch(targetUrl, opts = {}) {
   } = opts;
 
   await restoreBudget();
+  await refreshAccountUsage(); // throttled; anchors the pause guard to the real billed figure
 
   // Budget check — pause scraping if over threshold
   if (budgetPaused) {
@@ -201,24 +244,28 @@ async function scraperFetch(targetUrl, opts = {}) {
 }
 
 function checkBudget() {
-  const pct = creditUsage.total / MONTHLY_BUDGET;
+  const { used, limit } = effectiveUsage();
+  const pct = used / limit;
   if (pct >= PAUSE_THRESHOLD && !budgetPaused) {
     budgetPaused = true;
-    logger.error(`ScraperAPI BUDGET PAUSED: ${creditUsage.total}/${MONTHLY_BUDGET} credits (${(pct * 100).toFixed(0)}%). Scraping halted to prevent overage.`);
+    logger.error(`ScraperAPI BUDGET PAUSED: ${used}/${limit} credits (${(pct * 100).toFixed(0)}%). Scraping halted to prevent overage.`);
   } else if (pct >= WARN_THRESHOLD && !budgetWarned) {
     budgetWarned = true;
-    logger.warn(`ScraperAPI BUDGET WARNING: ${creditUsage.total}/${MONTHLY_BUDGET} credits (${(pct * 100).toFixed(0)}%). Approaching limit.`);
+    logger.warn(`ScraperAPI BUDGET WARNING: ${used}/${limit} credits (${(pct * 100).toFixed(0)}%). Approaching limit.`);
   }
 }
 
 function getBudgetStatus() {
-  const pct = creditUsage.total / MONTHLY_BUDGET;
+  const { used, limit, source } = effectiveUsage();
+  const pct = used / limit;
   return {
-    used: creditUsage.total,
-    budget: MONTHLY_BUDGET,
+    used,
+    budget: limit,
     pct: parseFloat((pct * 100).toFixed(1)),
     warned: budgetWarned,
     paused: budgetPaused,
+    source,        // 'dashboard' = real billed figure, 'local' = fallback counter
+    localTotal: creditUsage.total, // kept for attribution/debugging
   };
 }
 
@@ -239,6 +286,7 @@ function getBudgetStatus() {
 async function amazonSearch(query, opts = {}) {
   if (!SCRAPER_API_KEY) throw new Error('SCRAPER_API_KEY not configured');
   await restoreBudget();
+  await refreshAccountUsage(); // throttled; anchors the pause guard to the real billed figure
   if (budgetPaused) return null;
 
   const { retailerId = 'amazon' } = opts;
@@ -304,6 +352,7 @@ async function amazonSearch(query, opts = {}) {
 async function fetchAmazonOlidAndSeller(asin) {
   if (!SCRAPER_API_KEY) return { olid: null, seller: null };
   await restoreBudget();
+  await refreshAccountUsage(); // throttled; anchors the pause guard to the real billed figure
   if (budgetPaused) return { olid: null, seller: null };
 
   // Rate limit per ASIN — don't re-fetch same ASIN within 5 minutes
@@ -402,4 +451,4 @@ function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, getBudgetStatus, restoreBudget, isConfigured };
+module.exports = { scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, getBudgetStatus, restoreBudget, refreshAccountUsage, isConfigured };
