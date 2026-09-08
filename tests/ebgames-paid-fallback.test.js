@@ -109,3 +109,44 @@ describe('ebgames paid fallback', () => {
     assert.strictEqual(calls.paid, 0);
   });
 });
+
+/**
+ * A time window alone does not bound cost.
+ *
+ * The first version floored how OFTEN a burst could start and left the burst itself unbounded.
+ * Production then billed 56,640 credits a day — 4.4x the estimate, exhausting a 1,000,000
+ * budget in under three weeks — because the five-minute deep crawl's ~30 pages all travelled
+ * through one open window. The floor was doing exactly what it said and still failed to control
+ * spend, which is the useful part: rate limits have two dimensions and only one was capped.
+ */
+describe('ebgames paid burst is bounded in size, not just frequency', () => {
+  function wiredAdapter() {
+    const a = new EBGames({ id: 'ebgames', name: 'EB Games', url: 'https://www.ebgames.ca',
+      intervalMs: 5000, proxyTier: 'none' });
+    a._throttle = async () => {};
+    a.stealthFetch = async () => { throw new Error('Blocked after 2 stealth attempts: 403'); };
+    scraperApi.isConfigured = () => true;
+    let paid = 0;
+    scraperApi.scraperFetch = async () => { paid += 1; return PAGE; };
+    return { a, paid: () => paid };
+  }
+
+  test('a deep crawl cannot drain the budget through one open window', async () => {
+    const { a, paid } = wiredAdapter();
+    // 30 pages arriving together, as the deep crawl does.
+    for (let i = 0; i < 30; i++) await a._fetchListing(`https://www.ebgames.ca/p${i}`).catch(() => {});
+    assert.ok(paid() <= 4,
+      `${paid()} paid calls went through one burst — unbounded bursts cost 56,640 credits/day`);
+  });
+
+  test('the cap resets on the next burst, so the crawl still completes over time', async () => {
+    const { a, paid } = wiredAdapter();
+    for (let i = 0; i < 10; i++) await a._fetchListing(`https://www.ebgames.ca/a${i}`).catch(() => {});
+    const first = paid();
+    a._paidWindowUntil = 0;
+    a._lastPaidAt = Date.now() - 120000; // floor elapsed
+    for (let i = 0; i < 10; i++) await a._fetchListing(`https://www.ebgames.ca/b${i}`).catch(() => {});
+    assert.ok(paid() > first, 'a later burst must be allowed, or the catalogue never refreshes');
+    assert.ok(paid() <= 8, 'and it must still be capped');
+  });
+});

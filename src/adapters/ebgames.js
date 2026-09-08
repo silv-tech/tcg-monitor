@@ -37,8 +37,14 @@ const STEALTH_OPTS = { ignoreTlsErrors: true, timeoutMs: 12000 };
 // so the moment Cloudflare relents EB Games returns to full speed at zero cost with no
 // intervention. A burst window lets one poll's pages through together — gating per request
 // would starve pages 2 and 3 of every cycle — while still allowing only one burst per floor.
-const PAID_FLOOR_MS = Number(process.env.EBGAMES_PAID_FLOOR_MS) || 20000;
+const PAID_FLOOR_MS = Number(process.env.EBGAMES_PAID_FLOOR_MS) || 30000;
 const PAID_BURST_MS = Number(process.env.EBGAMES_PAID_BURST_MS) || 15000;
+// A time window alone does not bound cost. Measured after shipping the floor: 56,640 credits a
+// day, 4.4x the estimate, because the 5-minute deep crawl's ~30 pages all rode through a single
+// open window — the floor limited how OFTEN a burst starts, never how much went through one.
+// Capping calls per burst is what actually bounds the spend; the deep crawl simply completes
+// across several bursts instead of one, which costs it nothing that matters.
+const PAID_MAX_PER_BURST = Number(process.env.EBGAMES_PAID_MAX_PER_BURST) || 4;
 
 // Cloudflare rate-limits bursts (~90 requests in 7s got 429s, 2 req/s still tripped it occasionally)
 const MIN_SPACING_DEFAULT = 750;
@@ -131,6 +137,7 @@ class EBGamesAdapter extends BaseAdapter {
     this._lastPaidAt = 0;
     this._paidWindowUntil = 0;
     this._paidFetches = 0;
+    this._paidInBurst = 0;
     this._seeded = false;
     this._deriveTiming();
   }
@@ -180,10 +187,15 @@ class EBGamesAdapter extends BaseAdapter {
    */
   _paidAllowed() {
     const now = Date.now();
-    if (now < this._paidWindowUntil) return true;
+    if (now < this._paidWindowUntil) {
+      if (this._paidInBurst >= PAID_MAX_PER_BURST) return false;
+      this._paidInBurst += 1;
+      return true;
+    }
     if (now - this._lastPaidAt < PAID_FLOOR_MS) return false;
     this._lastPaidAt = now;
     this._paidWindowUntil = now + PAID_BURST_MS;
+    this._paidInBurst = 1;
     return true;
   }
 
