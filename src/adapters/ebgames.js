@@ -146,6 +146,7 @@ class EBGamesAdapter extends BaseAdapter {
     this._paidFetches = 0;
     this._paidInBurst = 0;
     this._crawlPaidRemaining = 0;
+    this._curlReported = false;
     this._seeded = false;
     this._deriveTiming();
   }
@@ -223,9 +224,26 @@ class EBGamesAdapter extends BaseAdapter {
     // Any failure falls through to the routes below, so this can only add coverage.
     try {
       const res = await curlGet(url, { timeoutMs: 20000 });
-      if (res && res.status === 200 && !isChallenge(res.body)) return res.body;
+      if (res && res.status === 200 && !isChallenge(res.body)) {
+        // Say which strategy actually served the page, once. Whether curl works from this host
+        // decides whether EB Games is free or costs ~14,400 credits a day, and without this the
+        // only symptom is a credit counter moving for reasons nobody can see.
+        if (!this._curlReported) {
+          this._curlReported = true;
+          logger.info('EB Games: curl works from this host — listings are free, no paid fallback needed');
+        }
+        return res.body;
+      }
+      if (!this._curlReported) {
+        this._curlReported = true;
+        logger.warn(`EB Games: curl did NOT work here (${res ? `HTTP ${res.status}` : 'no result — binary missing or transfer failed'}) ` +
+          '— falling back to the paid route');
+      }
     } catch (err) {
-      logger.debug(`EB Games: curl attempt failed for ${url}: ${err.message}`);
+      if (!this._curlReported) {
+        this._curlReported = true;
+        logger.warn(`EB Games: curl threw (${err.message}) — falling back to the paid route`);
+      }
     }
 
     let stealthErr = null;
