@@ -255,8 +255,6 @@ class LondonDrugsAdapter extends BaseAdapter {
   _maybeEnrichStores() {
     const due = Date.now() - this._storesAt >= this.storeEnrichIntervalMs;
     if (!due || this._storesRunning) return;
-    const openSession = storeAvail.createBrightDataSession(this.url);
-    if (!openSession) return; // no browser endpoint configured — alerts simply omit the store
 
     // Work out the targets BEFORE stamping the clock. This runs at the top of the poll, so on
     // the first pass after a restart the catalogue is still empty — stamping first meant that
@@ -265,16 +263,25 @@ class LondonDrugsAdapter extends BaseAdapter {
       .map((p) => ({ sku: p.sku, url: p.url }));
     if (targets.length === 0) return; // nothing to enrich yet — try again next poll
 
+    // Seed the session on a PRODUCT page, never the homepage. Next.js server actions are
+    // route-scoped: posting one from the wrong route returns a different payload entirely,
+    // which parsed into rows that had no stockAvailable and therefore no stock. It logged a
+    // confident "9/9 products" while producing nothing usable.
+    const openSession = storeAvail.createBrightDataSession(targets[0].url);
+    if (!openSession) return; // no browser endpoint configured — alerts simply omit the store
+
     this._storesRunning = true;
     this._storesAt = Date.now();
 
     storeAvail.fetchStoreAvailability(targets, { openSession })
       .then((map) => {
+        let kept = 0;
         for (const [sku, rows] of map) {
           const withStock = storeAvail.storesWithStock(rows).slice(0, STORE_ROWS_KEPT);
-          if (withStock.length) this._stores.set(sku, withStock);
+          if (withStock.length) { this._stores.set(sku, withStock); kept++; }
           else this._stores.delete(sku);
         }
+        logger.info(`${this.name}: store data kept for ${kept}/${map.size} product(s)`);
       })
       .catch((err) => logger.warn(`${this.name}: store enrichment failed: ${err.message}`))
       .finally(() => { this._storesRunning = false; });

@@ -68,6 +68,14 @@ function parseStoreResponse(text) {
   const out = [];
   for (const r of rows) {
     if (!r || typeof r !== 'object') continue;
+    // Only accept rows that are actually stores. `"data":[...]` is not unique to this action —
+    // posting from the wrong route returns a different payload whose first data array parsed
+    // into rows with no stockAvailable, i.e. silently "no stock everywhere". Requiring the
+    // shape means a wrong payload yields nothing at all, which is visible, instead of
+    // plausible-looking zeros, which are not.
+    const looksLikeStore = (r.locationCode || r.code) && r.name && r.address
+      && typeof r.stockAvailable !== 'undefined';
+    if (!looksLikeStore) continue;
     const addr = r.address || {};
     const qty = Number(r.stockAvailable);
     out.push({
@@ -156,6 +164,8 @@ async function fetchStoreAvailability(products, opts = {}) {
 
   const started = Date.now();
   let ok = 0;
+  let withStock = 0;
+  let totalRows = 0;
   try {
     for (const p of list) {
       const byCode = new Map(); // dedupe: the same store answers several postal codes
@@ -169,14 +179,25 @@ async function fetchStoreAvailability(products, opts = {}) {
           logger.debug(`London Drugs: store lookup failed for ${p.sku} @ ${zip}: ${err.message}`);
         }
       }
-      if (byCode.size > 0) { result.set(p.sku, [...byCode.values()]); ok++; }
+      if (byCode.size > 0) {
+        const rows = [...byCode.values()];
+        result.set(p.sku, rows);
+        ok++;
+        withStock += storesWithStock(rows).length > 0 ? 1 : 0;
+        totalRows += rows.length;
+      }
     }
   } finally {
     try { await session.close(); } catch { /* the session is disposable */ }
   }
 
-  logger.info(`London Drugs: store availability — ${ok}/${list.length} products across ` +
-    `${codes.length} region(s) in ${Math.round((Date.now() - started) / 1000)}s`);
+  // "9/9 products" alone was a misleading success line: it counted products that returned ANY
+  // rows, so a payload full of rows with no stock read as a clean pass while every alert
+  // silently lost its store field. The counts that matter are rows parsed and products that
+  // actually have units somewhere.
+  logger.info(`London Drugs: store availability — ${ok}/${list.length} products, ` +
+    `${totalRows} store rows, ${withStock} with stock, across ${codes.length} region(s) ` +
+    `in ${Math.round((Date.now() - started) / 1000)}s`);
   return result;
 }
 

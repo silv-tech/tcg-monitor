@@ -75,8 +75,11 @@ describe('parsing the server-action response', () => {
     }
   });
 
-  test('a missing stockAvailable reads as zero, never as unknown-in-stock', () => {
-    const [row] = parseStoreResponse(flight([{ ...GRANVILLE, stockAvailable: undefined }]));
+  test('a non-numeric stockAvailable reads as zero rather than as stock', () => {
+    // The field being PRESENT but junk is a different case from it being absent: absent means
+    // this is not a stock reading at all (see "payloads that are not store lists"), whereas
+    // present-but-unparseable is a store we cannot count, which must never read as available.
+    const [row] = parseStoreResponse(flight([{ ...GRANVILLE, stockAvailable: 'lots' }]));
     assert.strictEqual(row.stockAvailable, 0);
   });
 });
@@ -219,5 +222,41 @@ describe('adapter enrichment trigger', () => {
     a._known.set('L1', { sku: 'L1', url: 'https://x/p/L1', inStock: false });
     a._maybeEnrichStores();
     assert.strictEqual(a._storesAt, 0);
+  });
+});
+
+/**
+ * A payload from the WRONG route must yield nothing, not plausible zeros.
+ *
+ * Server actions are route-scoped. The enrichment seeded its browser session on the homepage
+ * and posted the product action from there; Next.js answered with a different payload whose
+ * first `"data":[...]` array parsed into rows with no stockAvailable — which defaulted to 0.
+ * Production then logged a confident "9/9 products" while every alert silently lost its store
+ * field. Zeros that look like real data are worse than an empty result, because nothing
+ * upstream can tell they are wrong.
+ */
+describe('payloads that are not store lists', () => {
+  test('a data[] of something else yields no stores', () => {
+    const notStores = '1:' + JSON.stringify({ isSuccess: true, data: [
+      { id: 'nav-1', label: 'Shop by Category', url: '/category' },
+      { id: 'nav-2', label: 'Deals & Events', url: '/deals' },
+    ] });
+    assert.deepStrictEqual(parseStoreResponse(notStores), [],
+      'navigation rows were accepted as stores with 0 stock');
+  });
+
+  test('a store row missing stockAvailable entirely is not invented as zero', () => {
+    const partial = '1:' + JSON.stringify({ data: [
+      { locationCode: '002', name: 'Granville & Georgia',
+        address: { address1: '710 Granville Street' } }, // no stockAvailable
+    ] });
+    assert.deepStrictEqual(parseStoreResponse(partial), [],
+      'a row without a stock field is not a stock reading');
+  });
+
+  test('real store rows still parse', () => {
+    const rows = parseStoreResponse(flight([GRANVILLE]));
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].stockAvailable, 1);
   });
 });
