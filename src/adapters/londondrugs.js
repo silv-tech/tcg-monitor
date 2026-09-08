@@ -35,6 +35,14 @@ const SWEEP_INTERVAL_FLOOR = 5 * 60 * 1000;
 // and the sitemap only — never search.
 const SCRAPER_OPTS = { render: false, premium: false, ultraPremium: false };
 
+// Product images live on the Kibo CDN, keyed by product code. The storefront builds them from
+// kiboImagesFilePath in its own bundle — ".../cms/files/dynamicProductCode.jpg" with the code
+// substituted — which is where this pattern comes from rather than guesswork. Verified 200
+// image/jpeg on five separate SKUs; the -S/-M/-L size suffixes the bundle also references all
+// 404, so only the bare code resolves.
+const IMAGE_BASE = process.env.LD_IMAGE_BASE
+  || 'https://cdn-tp2.mozu.com/28945-m4/cms/files';
+
 // Store enrichment cadence. Each pass costs one Bright Data browser session, so the floor is
 // deliberately high — this is background colour on an alert, not a detection path.
 const STORE_ENRICH_DEFAULT = 30 * 60 * 1000;
@@ -228,7 +236,7 @@ class LondonDrugsAdapter extends BaseAdapter {
         url: slug
           ? `${this.url}/products/${slug}/p/${p.productCode}`
           : `${this.url}/products/p/${p.productCode}`,
-        image: '',
+        image: `${IMAGE_BASE}/${p.productCode}.jpg`,
         inStock: !!p.isAvailable,
         canAddToCart: !!p.isAvailable,
         // London Drugs does not ship TCG — every item is pickup-only. Saying otherwise

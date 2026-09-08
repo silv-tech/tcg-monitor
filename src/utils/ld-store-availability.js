@@ -112,9 +112,11 @@ function formatStoreField(stores) {
   if (hits.length === 0) return null;
   const s = hits[0];
   const where = [s.address1, s.city, s.province].filter(Boolean).join(', ');
-  const km = s.distanceM != null ? ` · ${(s.distanceM / 1000).toFixed(1)}km` : '';
+  // Distance is deliberately not shown: it is measured from the postal code WE queried,
+  // not from the reader, so it is true of the lookup and meaningless in the alert.
+  // It stays in the data for ordering.
   const more = hits.length > 1 ? `\n+${hits.length - 1} other store${hits.length > 2 ? 's' : ''} in stock` : '';
-  return `**${s.name}** — ${s.stockAvailable} in stock${km}\n${where} ${s.postal}`.trim() + more;
+  return `**${s.name}** — ${s.stockAvailable} in stock\n${where} ${s.postal}`.trim() + more;
 }
 
 /** The exact request the site makes. Kept in one place so a captured change lands once. */

@@ -151,3 +151,29 @@ describe('london drugs alert fields', () => {
       'the lookup may simply have missed it — stating absence as fact would be a wrong field');
   });
 });
+
+describe('london drugs product image', () => {
+  const LondonDrugsAdapter2 = require('../src/adapters/londondrugs');
+
+  test('every product carries its Kibo CDN image', () => {
+    // The storefront builds these from kiboImagesFilePath in its own bundle; verified 200
+    // image/jpeg on five SKUs. The -S/-M/-L variants the bundle also references all 404, so
+    // only the bare product code resolves — hence no size suffix here.
+    const payload = [
+      ['bb01', ['InStorePickup']],
+      ['bb02', { price: 9.49, salePrice: null, listPrice: 9.49 }],
+      ['bb03', { productCode: 'L3408413', supportedFulfilmentTypes: '$bb01', isAvailable: true,
+        inventory: { onlineStockLevel: 318 },
+        productName: 'Pokemon TCG: Mega Evolution Pitch Black Booster Blister',
+        price: '$bb02' }],
+    ].map(([id, o]) => `${id}:${JSON.stringify(o)}`).join('\n');
+    const html = `<script>self.__next_f.push([1,${JSON.stringify(payload)}])</script>`;
+
+    const a = new LondonDrugsAdapter2({ id: 'londondrugs', name: 'London Drugs',
+      url: 'https://www.londondrugs.com', intervalMs: 30000, proxyTier: 'residential' });
+    const [product] = a._toProducts(html);
+    assert.strictEqual(product.image,
+      'https://cdn-tp2.mozu.com/28945-m4/cms/files/L3408413.jpg',
+      'no image means the embed renders without a thumbnail, unlike every other retailer');
+  });
+});

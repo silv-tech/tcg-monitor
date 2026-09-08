@@ -550,7 +550,7 @@ router.post('/test-alert', async (req, res) => {
 // === Sample alert — a real cached product framed as "now monitoring", routed like a paid alert ===
 // Used to show a client that a retailer is live. Optional sku picks the product.
 router.post('/sample-alert', async (req, res) => {
-  const { retailerId, sku } = req.body;
+  const { retailerId, sku, channelId } = req.body;
   if (!retailerId) return res.status(400).json({ error: 'retailerId required' });
 
   try {
@@ -576,8 +576,19 @@ router.post('/sample-alert', async (req, res) => {
       _detectedAt: Date.now(),
       _scanTier: 'paid',
     };
-    await delivery.deliver([event], { skipDedup: true });
-    res.json({ ok: true, product: product.name, sku: product.sku, monitored: entries.length });
+    if (channelId) {
+      // Explicit target. Routing config has been wrong before, and a demonstration alert that
+      // lands somewhere unexpected is worse than no alert at all.
+      const { getClient } = require('../discord/bot');
+      const { buildAlertEmbed } = require('../discord/embeds');
+      const channel = await getClient().channels.fetch(channelId);
+      const { embed, components } = buildAlertEmbed(event, 'paid');
+      await channel.send({ embeds: [embed], ...(components && components.length ? { components } : {}) });
+    } else {
+      await delivery.deliver([event], { skipDedup: true });
+    }
+    res.json({ ok: true, product: product.name, sku: product.sku, monitored: entries.length,
+      channelId: channelId || 'routed', storeRows: stores ? stores.length : 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

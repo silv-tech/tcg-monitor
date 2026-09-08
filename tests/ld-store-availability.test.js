@@ -96,6 +96,9 @@ describe('choosing which store to show', () => {
     assert.match(field, /1 in stock/);
     assert.match(field, /710 Granville Street, Vancouver, British Columbia V6Z 1E4/);
     assert.match(field, /\+1 other store in stock/);
+    // Distance is measured from the postal code we queried, not from the reader, so it is
+    // true of the lookup and meaningless in the alert.
+    assert.doesNotMatch(field, /km/, 'distance must not appear in the embed');
   });
 
   test('nothing in stock renders nothing, rather than "unavailable"', () => {
