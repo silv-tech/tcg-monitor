@@ -2,6 +2,7 @@ const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const state = require('../core/state');
 const { sleep, hashSku } = require('../utils/helpers');
+const scraperApi = require('../utils/scraper-api');
 
 const DEEP_CRAWL_INTERVAL_DEFAULT = 5 * 60 * 1000;
 const DEEP_CRAWL_INTERVAL_FLOOR = 60 * 1000;
@@ -23,6 +24,21 @@ const SORT_MODIFIED = 'write_date desc';
 
 // Cloudflare challenges impit here unless cert verification is off (it changes the TLS ClientHello)
 const STEALTH_OPTS = { ignoreTlsErrors: true, timeoutMs: 12000 };
+
+// Paid fallback pacing.
+//
+// Cloudflare began refusing every free route into ebgames.ca — direct, ISP and residential all
+// answer 403 in under 200ms — and the adapter reported "found 0 products" on every poll while
+// looking healthy, because a poll that returns nothing without throwing is not an error.
+// Measured 2026-09-08: ScraperAPI standard returns the real listing (927KB, 27 product links,
+// no challenge) for 1 credit, so the store is recoverable, just not for free.
+//
+// The floor is on the PAID path only. The free path keeps trying at the adapter's own interval,
+// so the moment Cloudflare relents EB Games returns to full speed at zero cost with no
+// intervention. A burst window lets one poll's pages through together — gating per request
+// would starve pages 2 and 3 of every cycle — while still allowing only one burst per floor.
+const PAID_FLOOR_MS = Number(process.env.EBGAMES_PAID_FLOOR_MS) || 20000;
+const PAID_BURST_MS = Number(process.env.EBGAMES_PAID_BURST_MS) || 15000;
 
 // Cloudflare rate-limits bursts (~90 requests in 7s got 429s, 2 req/s still tripped it occasionally)
 const MIN_SPACING_DEFAULT = 750;
@@ -112,6 +128,9 @@ class EBGamesAdapter extends BaseAdapter {
     this._deepCrawlRunning = false;
     this._nextSlot = 0;
     this._cooldownUntil = 0;
+    this._lastPaidAt = 0;
+    this._paidWindowUntil = 0;
+    this._paidFetches = 0;
     this._seeded = false;
     this._deriveTiming();
   }
@@ -152,16 +171,45 @@ class EBGamesAdapter extends BaseAdapter {
     return `${this.url}${source.path}${page > 1 ? `/page/${page}` : ''}?${params}`;
   }
 
+  /**
+   * May this fetch use the paid route?
+   *
+   * Opens a short window on the first paid call so the rest of that poll's pages come with it,
+   * then closes until the floor has elapsed. Without the window a 20s floor would deliver one
+   * page per 20s and never assemble a complete listing.
+   */
+  _paidAllowed() {
+    const now = Date.now();
+    if (now < this._paidWindowUntil) return true;
+    if (now - this._lastPaidAt < PAID_FLOOR_MS) return false;
+    this._lastPaidAt = now;
+    this._paidWindowUntil = now + PAID_BURST_MS;
+    return true;
+  }
+
   async _fetchListing(url) {
     await this._throttle();
+    let stealthErr = null;
     try {
       const html = await this.stealthFetch(url, { ...STEALTH_OPTS, maxRetries: 2, retryDelayMs: 1500 });
       if (isChallenge(html)) throw new Error('Cloudflare challenge');
       return html;
     } catch (err) {
       if (err.message.includes('429')) this._cooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-      throw err;
+      stealthErr = err;
     }
+
+    // Free route refused. Pay for it, but only as often as the floor allows.
+    if (!scraperApi.isConfigured() || !this._paidAllowed()) throw stealthErr;
+    const html = await scraperApi.scraperFetch(url, {
+      render: false, premium: false, ultraPremium: false,
+      retailerId: this.id, minIntervalMs: 0, timeoutMs: 45000,
+    });
+    // null means rate-limited or budget-paused upstream, not a page — surface the original
+    // failure so health sees the free route's error rather than a silent empty result.
+    if (!html || isChallenge(html)) throw stealthErr;
+    this._paidFetches = (this._paidFetches || 0) + 1;
+    return html;
   }
 
   // Runs listing jobs through the pool; whatever failed gets one more attempt after the rest finish
