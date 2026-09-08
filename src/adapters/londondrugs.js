@@ -336,9 +336,20 @@ class LondonDrugsAdapter extends BaseAdapter {
     // Attach the last known per-store availability. It is enrichment, so it lags the stock
     // number by up to one enrichment interval — acceptable here only because London Drugs is
     // pickup-only and therefore not a checkout race.
+    let attached = 0;
     for (const p of found) {
       const stores = this._stores.get(p.sku);
-      if (stores && stores.length) p._stores = stores;
+      if (stores && stores.length) { p._stores = stores; attached++; }
+    }
+    // The cache filling but nothing reaching an alert is a silent failure, and it already cost
+    // three rounds of guessing. Say it out loud whenever the cache has entries: if attached is
+    // 0 while the cache is not, the two are keyed differently and the keys are printed to prove it.
+    if (this._stores.size > 0 && attached === 0) {
+      logger.warn(`${this.name}: store cache has ${this._stores.size} entries but attached to 0 ` +
+        `of ${found.length} products — cache keys [${[...this._stores.keys()].slice(0, 3).join(', ')}] ` +
+        `vs product keys [${found.slice(0, 3).map((p) => p.sku).join(', ')}]`);
+    } else if (attached > 0) {
+      logger.debug(`${this.name}: store field attached to ${attached}/${found.length} products`);
     }
 
     for (const p of found) this._known.set(p.sku, p);
