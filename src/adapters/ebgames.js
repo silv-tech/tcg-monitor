@@ -45,6 +45,12 @@ const PAID_BURST_MS = Number(process.env.EBGAMES_PAID_BURST_MS) || 15000;
 // Capping calls per burst is what actually bounds the spend; the deep crawl simply completes
 // across several bursts instead of one, which costs it nothing that matters.
 const PAID_MAX_PER_BURST = Number(process.env.EBGAMES_PAID_MAX_PER_BURST) || 4;
+// The deep crawl needs a whole catalogue in one pass, so a four-call burst starves it: capping
+// it there pinned coverage at 67 of 801 products, because every crawl re-fetched the same first
+// four pages and never reached the rest. It gets its own grant per crawl instead — bounded, so
+// it still cannot run away, but large enough to finish. Cost is this number times the number of
+// crawls per day, which is what deepCrawlIntervalMs controls.
+const PAID_MAX_PER_CRAWL = Number(process.env.EBGAMES_PAID_MAX_PER_CRAWL) || 40;
 
 // Cloudflare rate-limits bursts (~90 requests in 7s got 429s, 2 req/s still tripped it occasionally)
 const MIN_SPACING_DEFAULT = 750;
@@ -138,6 +144,7 @@ class EBGamesAdapter extends BaseAdapter {
     this._paidWindowUntil = 0;
     this._paidFetches = 0;
     this._paidInBurst = 0;
+    this._crawlPaidRemaining = 0;
     this._seeded = false;
     this._deriveTiming();
   }
@@ -186,6 +193,9 @@ class EBGamesAdapter extends BaseAdapter {
    * page per 20s and never assemble a complete listing.
    */
   _paidAllowed() {
+    // A crawl in progress spends from its own grant first: it is refreshing the whole
+    // catalogue, not racing a drop, and the fast poll's burst cap is sized for 3 pages.
+    if (this._crawlPaidRemaining > 0) { this._crawlPaidRemaining -= 1; return true; }
     const now = Date.now();
     if (now < this._paidWindowUntil) {
       if (this._paidInBurst >= PAID_MAX_PER_BURST) return false;
@@ -297,6 +307,9 @@ class EBGamesAdapter extends BaseAdapter {
 
   // Every 5 min: every page of every category (page size is locked to 10 server-side).
   async _deepCrawl() {
+    // Fresh grant per crawl. Set here rather than in the constructor so a crawl that dies
+    // partway cannot leave credit behind for the fast poll to spend.
+    this._crawlPaidRemaining = PAID_MAX_PER_CRAWL;
     this._deepCrawlRunning = true;
     const start = Date.now();
     try {

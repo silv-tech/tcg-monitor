@@ -150,3 +150,41 @@ describe('ebgames paid burst is bounded in size, not just frequency', () => {
     assert.ok(paid() <= 8, 'and it must still be capped');
   });
 });
+
+/**
+ * The deep crawl needs its own allowance.
+ *
+ * Capping it at the fast poll's four-call burst pinned coverage at 67 of 801 products: every
+ * crawl re-fetched the same first four pages and never reached the rest, so the catalogue sat
+ * frozen while the cost graph looked healthy. Fixing spend by starving coverage is not fixing
+ * anything — it just moves the failure somewhere with no alarm on it.
+ */
+describe('ebgames deep crawl allowance', () => {
+  test('a crawl can fetch a whole catalogue, well past the fast poll burst cap', async () => {
+    const a = new EBGames({ id: 'ebgames', name: 'EB Games', url: 'https://www.ebgames.ca',
+      intervalMs: 5000, proxyTier: 'none' });
+    a._throttle = async () => {};
+    a.stealthFetch = async () => { throw new Error('Blocked after 2 stealth attempts: 403'); };
+    scraperApi.isConfigured = () => true;
+    let paid = 0;
+    scraperApi.scraperFetch = async () => { paid += 1; return PAGE; };
+
+    a._crawlPaidRemaining = 40;   // as _deepCrawl grants
+    for (let i = 0; i < 30; i++) await a._fetchListing(`https://www.ebgames.ca/p${i}`).catch(() => {});
+    assert.strictEqual(paid, 30, 'the crawl must be able to walk every page in one pass');
+  });
+
+  test('the grant is finite — a runaway crawl still stops', async () => {
+    const a = new EBGames({ id: 'ebgames', name: 'EB Games', url: 'https://www.ebgames.ca',
+      intervalMs: 5000, proxyTier: 'none' });
+    a._throttle = async () => {};
+    a.stealthFetch = async () => { throw new Error('Blocked after 2 stealth attempts: 403'); };
+    scraperApi.isConfigured = () => true;
+    let paid = 0;
+    scraperApi.scraperFetch = async () => { paid += 1; return PAGE; };
+
+    a._crawlPaidRemaining = 5;
+    for (let i = 0; i < 50; i++) await a._fetchListing(`https://www.ebgames.ca/p${i}`).catch(() => {});
+    assert.ok(paid <= 5 + 4, `spent ${paid} — the grant plus at most one fast-poll burst`);
+  });
+});
