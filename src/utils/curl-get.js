@@ -74,12 +74,18 @@ function curlGet(url, opts = {}) {
       timeout: timeoutMs + 5000,
       maxBuffer: MAX_BUFFER,
       encoding: 'buffer',           // never let Node decode: it corrupts image bytes
-    }, (err, stdout) => {
+    }, (err, stdout, stderr) => {
       if (err && (err.code === 'ENOENT' || err.code === 'EACCES')) {
         markUnavailable(err.code);
         return resolve(null);
       }
-      if (!stdout || stdout.length === 0) return resolve(null);
+      // curl reports the real reason on stderr ("SSL routines", "Connection reset by peer",
+      // "Could not resolve host"). Discarding it turned every distinct network failure into the
+      // same useless "no result", which cost a diagnosis cycle.
+      const why = (stderr && stderr.length) ? stderr.toString('utf8').trim().slice(0, 200) : '';
+      if (!stdout || stdout.length === 0) {
+        return resolve({ status: 0, body: '', error: why || (err && err.message) || 'empty response' });
+      }
 
       // Split the trailing "\n<status>" off the end.
       const nl = stdout.lastIndexOf(0x0a);
@@ -88,7 +94,11 @@ function curlGet(url, opts = {}) {
       // curl still emits its write-out template when the transfer never happened — a DNS or
       // connect failure yields "000". That is not a response, and returning it as one would let
       // a caller treat a dead host as a real HTTP result instead of falling through.
-      if (!Number.isFinite(status) || status < 100) return resolve(null);
+      if (!Number.isFinite(status) || status < 100) {
+        // curl emits its write-out template even when the transfer never completed, so "000"
+        // means "no HTTP response happened" — the reason is on stderr, not in the status.
+        return resolve({ status: 0, body: '', error: why || (err && err.message) || 'transfer failed' });
+      }
 
       const bodyBuf = stdout.slice(0, nl);
       resolve({ status, body: binary ? bodyBuf : bodyBuf.toString('utf8') });

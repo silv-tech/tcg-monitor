@@ -236,8 +236,10 @@ class EBGamesAdapter extends BaseAdapter {
       }
       if (!this._curlReported) {
         this._curlReported = true;
-        logger.warn(`EB Games: curl did NOT work here (${res ? `HTTP ${res.status}` : 'no result — binary missing or transfer failed'}) ` +
-          '— falling back to the paid route');
+        const why = !res ? 'curl binary unavailable'
+          : res.status === 0 ? `transfer failed: ${res.error || 'unknown'}`
+            : `HTTP ${res.status}`;
+        logger.warn(`EB Games: curl did NOT work here (${why}) — falling back to the paid route`);
       }
     } catch (err) {
       if (!this._curlReported) {
