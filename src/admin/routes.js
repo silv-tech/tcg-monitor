@@ -33,6 +33,40 @@ function atomicWriteSync(filePath, data) {
   fs.renameSync(tmp, filePath);
 }
 
+/**
+ * EB Games listings captured by a real browser (see ebgames-extension/).
+ *
+ * Cloudflare runs a managed JS challenge on ebgames.ca and scores the client, not the IP, so
+ * no HTTP client and no proxy gets past it — that is what the paid route was buying. The
+ * extension loads the category pages in a genuine Chrome profile and POSTs the HTML here.
+ *
+ * Mounted under /api, so it inherits the x-api-key check and the write rate limiter that
+ * already guard every other write endpoint. That matters more here than elsewhere: an
+ * unauthenticated version of this route would let anyone inject stock and fire alerts into a
+ * paid channel, which is worse than EB Games staying dark.
+ *
+ * Body is raw HTML, not JSON — the global express.json() limit is 100kb and a listing is
+ * ~900kb, so the parser is mounted per-route.
+ */
+router.post('/ingest/ebgames', express.text({ limit: '8mb', type: '*/*' }), async (req, res) => {
+  const source = String(req.query.source || '');
+  const adapter = scheduler.getAdapter('ebgames');
+  if (!adapter) return res.status(503).json({ error: 'EB Games adapter not running' });
+  if (typeof adapter.ingestPushed !== 'function') {
+    return res.status(503).json({ error: 'EB Games adapter does not accept pushes' });
+  }
+  try {
+    const result = await adapter.ingestPushed(req.body, source);
+    logger.info(`EB Games: PUSH ${source} — ${result.parsed} cards parsed, ${result.known} known`
+      + `${result.seeded ? ' (first landing: seeded, no alerts)' : ''}`);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    // The extension shows this to the user, so say what actually went wrong.
+    logger.warn(`EB Games: push rejected (${source}): ${err.message}`);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
 // Health check
 router.get('/health', async (req, res) => {
   const health = await checkHealth();

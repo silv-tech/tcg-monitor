@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>TCG Monitor — EB Games bridge</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; max-width: 640px; color: #111; }
+  label { display: block; margin: 14px 0 4px; font-weight: 600; }
+  input[type=text], input[type=password], input[type=number] { width: 100%; padding: 7px 9px; font: inherit; box-sizing: border-box; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+  button { padding: 8px 16px; font: inherit; cursor: pointer; }
+  #log { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 12px; }
+  #log div { font-family: ui-monospace, monospace; font-size: 12px; padding: 3px 0; }
+  .ok { color: #157f3d; } .bad { color: #b3261e; }
+  small { color: #555; }
+</style>
+<h2>EB Games bridge</h2>
+<p><small>Loads the EB Games category pages in this browser and forwards them to the monitor.
+Cloudflare blocks every non-browser client on this site, so these pages have to be browsed rather than fetched.</small></p>
+
+<label for="baseUrl">Monitor URL</label>
+<input type="text" id="baseUrl" placeholder="https://www.nocturnemonitors.com">
+
+<label for="apiKey">Admin API key</label>
+<input type="password" id="apiKey" placeholder="ADMIN_API_KEY">
+
+<label for="intervalSec">Refresh interval (seconds)</label>
+<input type="number" id="intervalSec" min="5" max="600">
+
+<div class="row">
+  <input type="checkbox" id="enabled"><label for="enabled" style="margin:0">Enabled</label>
+</div>
+
+<div class="row"><button id="save">Save</button><span id="saved"></span></div>
+
+<div id="log"><strong>Recent pushes</strong><div id="entries"><small>nothing yet</small></div></div>
+
+<script src="options.js"></script>

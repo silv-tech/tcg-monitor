@@ -4,6 +4,7 @@ const state = require('../core/state');
 const { sleep, hashSku } = require('../utils/helpers');
 const scraperApi = require('../utils/scraper-api');
 const { curlGet } = require('../utils/curl-get');
+const { isInScopeName } = require('../utils/scope');
 
 const DEEP_CRAWL_INTERVAL_DEFAULT = 5 * 60 * 1000;
 const DEEP_CRAWL_INTERVAL_FLOOR = 60 * 1000;
@@ -19,6 +20,10 @@ const SOURCES = [
   { key: 'pokemon',  path: '/shop/category/trading-cards-pokemon-204', fastPages: 2 },
   { key: 'onepiece', path: '/shop/category/trading-cards-one-piece-208', fastPages: 1 },
 ];
+
+// How long after the last browser push EB Games still counts as fresh. Sized well above the
+// extension's refresh interval so one slow reload does not flap the retailer's health.
+const PUSH_STALE_MS = Number(process.env.EBGAMES_PUSH_STALE_MS) || 3 * 60 * 1000;
 
 const SORT_NEWEST = 'create_date desc';
 const SORT_MODIFIED = 'write_date desc';
@@ -159,7 +164,65 @@ class EBGamesAdapter extends BaseAdapter {
     this._curlReported = false;
     this._curlBlockedUntil = 0;
     this._seeded = false;
+
+    // Push mode: this adapter never reaches out to ebgames.ca. Listings arrive from the
+    // companion Chrome extension (ebgames-extension/), which loads the category pages in a
+    // real browser and POSTs the HTML to /api/ingest/ebgames.
+    //
+    // Measured 2026-09-08, all from a residential address, so IP is not the variable:
+    //   node fetch (Chrome UA)          403  Cf-Mitigated: challenge
+    //   curl                            403  same
+    //   patchright Chromium, headless   never leaves "Just a moment"
+    //   patchright Chromium, headed     same
+    //   real Chrome over CDP            200 once, then 403 in 67ms (edge-cached block)
+    // Cloudflare runs a managed JS challenge here and scores the CLIENT, so no amount of
+    // proxying fixes it — which is what the paid route was really buying. Only a genuine
+    // browser profile passes, so that is where the fetch now happens.
+    //
+    // ON BY DEFAULT, because the alternative is the paid route at ~14,400 credits/day. With
+    // push mode on and no extension running, EB Games simply reports nothing: no alerts, no
+    // spend. Set EBGAMES_PUSH_ONLY=false to restore the old fetching behaviour.
+    this.pushOnly = process.env.EBGAMES_PUSH_ONLY !== 'false';
+    this._lastPushAt = 0;
+    this._pushes = 0;
+
     this._deriveTiming();
+  }
+
+  /**
+   * Accept a category listing captured by a real browser.
+   *
+   * Runs the SAME parser the fetching path uses, so there is no second copy of the card
+   * extraction to drift out of step with the site.
+   *
+   * @returns {{parsed:number, known:number, seeded:boolean}}
+   */
+  async ingestPushed(html, sourceKey) {
+    const source = SOURCES.find(s => s.key === sourceKey);
+    if (!source) throw new Error(`unknown source "${sourceKey}"`);
+    if (typeof html !== 'string' || html.length === 0) throw new Error('empty body');
+    // isChallenge already rejects anything under 2000 chars as well as the challenge markup
+    // itself, so the message names both — a listing is ~900kb and neither case is one.
+    if (isChallenge(html)) {
+      throw new Error('body is not a listing — a Cloudflare challenge, or too short');
+    }
+
+    const fresh = new Map();
+    const parsed = this._ingest(html, source, fresh);
+    // A page that parses to nothing means the card markup moved, and merging it would look
+    // exactly like EB Games delisting the category. Refuse it and let the caller see why.
+    if (parsed === 0) throw new Error('parsed 0 products — card markup may have changed');
+
+    this._merge(fresh, false);
+
+    // First landing seeds Redis instead of alerting, or the very first push would fire
+    // NEW_SKU for the entire catalogue at once. Same guard the deep crawl uses.
+    const seeded = !this._seeded;
+    if (seeded) await this._seedRedis(true);
+
+    this._lastPushAt = Date.now();
+    this._pushes += 1;
+    return { parsed, known: this._knownProducts.size, seeded };
   }
 
   _deriveTiming() {
@@ -176,6 +239,21 @@ class EBGamesAdapter extends BaseAdapter {
   }
 
   async fetchProducts() {
+    // Push mode reports what the browser last sent and reaches out to nobody. Freshness is
+    // "did a push land recently", so a PC that went to sleep shows up as a stale retailer in
+    // /api/health rather than as a store that quietly stopped finding anything.
+    if (this.pushOnly) {
+      const age = Date.now() - this._lastPushAt;
+      const live = this._lastPushAt > 0 && age <= PUSH_STALE_MS;
+      this.reportFreshness(live ? 1 : 0, 1);
+      if (!live && this._knownProducts.size > 0 && !this._pushStaleWarned) {
+        this._pushStaleWarned = true;
+        logger.warn(`EB Games: no push in ${Math.round(age / 1000)}s — is the Chrome extension running?`);
+      }
+      if (live) this._pushStaleWarned = false;
+      return Object.fromEntries(this._knownProducts);
+    }
+
     if (this._knownProducts.size === 0) {
       // First run seeds the catalog. It is backgrounded so a slow crawl can't blow the
       // scheduler's adapter timeout; the poll returns empty and the next one picks up
@@ -311,11 +389,20 @@ class EBGamesAdapter extends BaseAdapter {
   /** @returns {number} product cards actually parsed out of this page */
   _ingest(html, source, into) {
     let added = 0;
+    let outOfScope = 0;
     for (const m of html.matchAll(CARD_RE)) {
       const parsed = parseCard(m[0], this.url, source.key);
       if (!parsed) continue;
+      // The shared scope rule — the one every other retailer already applies. EB Games was
+      // missed when it was centralised, so its catalogue carried accessories: page 1 of the
+      // Pokemon category on 2026-09-08 held "Ultra Pro Pokémon Dragonite Pro-Binder", which
+      // names the game, has a price and a stock flag, and would have alerted like any box.
+      if (!isInScopeName(parsed.name)) { outOfScope++; continue; }
       added++;
       if (!into.has(parsed.sku)) into.set(parsed.sku, this.classify(parsed));
+    }
+    if (outOfScope > 0) {
+      logger.debug(`EB Games: skipped ${outOfScope} out-of-scope card(s) on this page`);
     }
     return added;
   }
