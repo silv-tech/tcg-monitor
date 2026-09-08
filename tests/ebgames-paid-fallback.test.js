@@ -20,6 +20,15 @@
 const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert');
 
+// The adapter tries curl BEFORE stealthFetch. These tests exercise the stealth->paid fallback,
+// so curl must be deterministically out of the picture — otherwise on a dev box that CAN reach
+// ebgames.ca, real curl serves the page and the wired stealthFetch is never called. Pointing
+// CURL_BIN at a binary that does not exist makes curlGet fail ENOENT and mark itself
+// unavailable, so every subtest runs the intended path regardless of network. curl-get.js reads
+// CURL_BIN at load, and node --test isolates each file in its own process, so this is local to
+// this suite and never touches curl-get.test.js.
+process.env.CURL_BIN = 'tcg-no-such-curl-binary';
+
 const EBGames = require('../src/adapters/ebgames');
 const scraperApi = require('../src/utils/scraper-api');
 

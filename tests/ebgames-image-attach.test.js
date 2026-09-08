@@ -104,6 +104,52 @@ describe('image-fetch looksLikeImage', () => {
   });
 });
 
+describe('image-fetch fetchImageBytes gating (chrome API)', () => {
+  let realGetRedis; let realBrowser;
+  beforeEach(() => {
+    realGetRedis = state.getRedis;
+    state.getRedis = () => null; // cache degrades to miss, no real Redis
+    realBrowser = imageFetch.fetchViaBrowser;
+  });
+  afterEach(() => {
+    state.getRedis = realGetRedis;
+    imageFetch.fetchViaBrowser = realBrowser;
+    delete process.env.BRIGHTDATA_IMAGE_FETCH;
+  });
+
+  test('a non-http url is rejected without any fetch', async () => {
+    let called = false;
+    imageFetch.fetchViaBrowser = async () => { called = true; return fakeJpeg(); };
+    assert.strictEqual(await imageFetch.fetchImageBytes('data:image/png;base64,xxx'), null);
+    assert.strictEqual(called, false);
+  });
+
+  test('flag OFF: the browser is never touched (no cost while Bright Data blocks the domain)', async () => {
+    delete process.env.BRIGHTDATA_IMAGE_FETCH;
+    let called = false;
+    imageFetch.fetchViaBrowser = async () => { called = true; return fakeJpeg(); };
+    const out = await imageFetch.fetchImageBytes('https://www.ebgames.ca/web/image/1/x.jpg');
+    assert.strictEqual(out, null, 'flag off => no image');
+    assert.strictEqual(called, false, 'must not open a billed browser session while blocked');
+  });
+
+  test('flag ON: bytes come from the chrome API', async () => {
+    process.env.BRIGHTDATA_IMAGE_FETCH = 'true';
+    const jpeg = fakeJpeg(1200);
+    let called = false;
+    imageFetch.fetchViaBrowser = async () => { called = true; return jpeg; };
+    const out = await imageFetch.fetchImageBytes('https://www.ebgames.ca/web/image/1/x.jpg');
+    assert.ok(called, 'flag on => chrome API attempted');
+    assert.ok(Buffer.isBuffer(out) && out.equals(jpeg), 'returns exactly the browser bytes');
+  });
+
+  test('flag ON but browser returns null: graceful null, alert still sends imageless', async () => {
+    process.env.BRIGHTDATA_IMAGE_FETCH = 'true';
+    imageFetch.fetchViaBrowser = async () => null; // policy block / timeout / no ws
+    assert.strictEqual(await imageFetch.fetchImageBytes('https://www.ebgames.ca/web/image/1/x.jpg'), null);
+  });
+});
+
 describe('delivery.resolveThumbnail', () => {
   let realFetchBytes;
   beforeEach(() => { realFetchBytes = imageFetch.fetchImageBytes; });
