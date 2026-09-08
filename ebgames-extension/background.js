@@ -31,6 +31,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return undefined;
   }
   if (msg && msg.type === 'ebgames-refresh') { refreshNow(); return undefined; }
+
+  // Product image bytes, base64 over the message channel because runtime messages are JSON.
+  if (msg && msg.type === 'ebgames-image') {
+    (async () => {
+      const cfg = await chrome.storage.local.get(DEFAULTS);
+      if (!cfg.baseUrl || !cfg.apiKey) { sendResponse({ ok: false }); return; }
+      try {
+        const bin = Uint8Array.from(atob(msg.b64), (c) => c.charCodeAt(0));
+        const url = `${cfg.baseUrl.replace(/\/+$/, '')}/api/ingest/ebgames/image?src=${encodeURIComponent(msg.src)}`;
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream', 'x-api-key': cfg.apiKey },
+          body: bin,
+        });
+        sendResponse({ ok: r.ok });
+      } catch {
+        sendResponse({ ok: false });
+      }
+    })();
+    return true;
+  }
   if (!msg || msg.type !== 'ebgames-listing') return undefined;
 
   (async () => {

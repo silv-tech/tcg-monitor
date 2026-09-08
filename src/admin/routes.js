@@ -11,6 +11,7 @@ const logger = require('../monitoring/logger');
 const delivery = require('../discord/delivery');
 const { runScan } = require('../core/scan');
 const { getBudgetStatus } = require('../utils/scraper-api');
+const imageFetch = require('../utils/image-fetch');
 
 const router = express.Router();
 
@@ -65,6 +66,31 @@ router.post('/ingest/ebgames', express.text({ limit: '8mb', type: '*/*' }), asyn
     logger.warn(`EB Games: push rejected (${source}): ${err.message}`);
     return res.status(400).json({ error: err.message });
   }
+});
+
+/**
+ * Product images captured by the same browser that supplies the listings.
+ *
+ * Discord cannot fetch ebgames.ca images — the same Cloudflare that refuses every datacenter
+ * client refuses Discord's fetcher — so alerts had to upload the bytes themselves, and the
+ * only route that worked was a paid residential browser. The extension is already a real
+ * Chrome on a residential IP with the page open, so it just hands the bytes over and
+ * image-fetch finds them in cache instead of reaching for a browser.
+ *
+ * The absolute URL is built HERE from the raw src, using the same join the adapter uses, so
+ * the cache key cannot drift from the one the alert will look up.
+ */
+router.post('/ingest/ebgames/image', express.raw({ limit: '8mb', type: '*/*' }), async (req, res) => {
+  const src = String(req.query.src || '');
+  if (!src.startsWith('/')) return res.status(400).json({ error: 'src must be a site-relative path' });
+  const adapter = scheduler.getAdapter('ebgames');
+  if (!adapter) return res.status(503).json({ error: 'EB Games adapter not running' });
+
+  const url = `${adapter.url}${src}`;
+  const ok = await imageFetch.putImage(url, req.body);
+  if (!ok) return res.status(400).json({ error: 'not a usable image' });
+  logger.debug(`EB Games: cached image ${req.body.length}b for ${src.slice(0, 60)}`);
+  return res.json({ ok: true, bytes: req.body.length });
 });
 
 // Health check

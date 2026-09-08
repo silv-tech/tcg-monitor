@@ -81,7 +81,15 @@ async function writeCache(url, buf) {
   try {
     const redis = state.getRedis();
     if (!redis) return;
-    await redis.set(cacheKey(url), buf.toString('base64'), 'EX', CACHE_TTL_SEC);
+    // Bounded, for the same reason readCache is. ioredis queues commands while disconnected
+    // (enableOfflineQueue), so an unreachable Redis does not reject — it waits indefinitely,
+    // and an unbounded await here would hold the caller open with it. Losing a cache write
+    // costs one re-fetch; hanging the request that carries it costs the picture and the
+    // connection.
+    await Promise.race([
+      redis.set(cacheKey(url), buf.toString('base64'), 'EX', CACHE_TTL_SEC),
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
   } catch {
     // Non-critical: a cache write failure just means the next alert re-fetches.
   }
@@ -164,4 +172,23 @@ async function fetchImageBytes(url, opts = {}) {
   return null;
 }
 
-module.exports = { fetchImageBytes, fetchViaBrowser, looksLikeImage, cacheKey };
+/**
+ * Store image bytes captured elsewhere, so the expensive route is never taken for them.
+ *
+ * EB Games' images sit behind the same Cloudflare that 403s every datacenter client, which is
+ * why fetchViaBrowser exists and why it costs money. The browser extension that already
+ * supplies EB Games' listings is a real Chrome on a residential IP, so it can simply hand the
+ * bytes over — and fetchImageBytes then finds them in cache and never reaches for a browser.
+ *
+ * Validated before storing: an alert thumbnail is a place a bad payload would be visible to
+ * customers, so bytes that are not a recognisable image are refused rather than cached.
+ *
+ * @returns {Promise<boolean>} whether the bytes were accepted
+ */
+async function putImage(url, buf) {
+  if (!url || !looksLikeImage(buf)) return false;
+  await writeCache(url, buf);
+  return true;
+}
+
+module.exports = { fetchImageBytes, fetchViaBrowser, looksLikeImage, cacheKey, putImage };

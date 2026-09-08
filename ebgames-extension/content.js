@@ -59,6 +59,54 @@ function navigateIn(ms, source) {
   }, ms);
 }
 
+// At most this many images per page load. The monitor's API allows 30 writes a minute per IP
+// and the listings themselves need two of those per cycle: at four images x two tabs the
+// backfill alone reached ~24/min, close enough to trip the limiter and take the listings down
+// with it. Two keeps a cycle at ~14/min and still backfills the catalogue in a few minutes.
+const IMAGES_PER_CYCLE = 2;
+// Re-send an image occasionally: the monitor's cache expires, and a listing's picture can be
+// replaced. Well under the server's 30-day cache so a live product never loses its thumbnail.
+const IMAGE_RESEND_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function uploadNewImages() {
+  const nodes = [...document.querySelectorAll('img[src^="/web/image/product.product/"]')];
+  if (nodes.length === 0) return;
+
+  const { imagesSent = {} } = await chrome.storage.local.get('imagesSent');
+  const now = Date.now();
+  const todo = [];
+  for (const img of nodes) {
+    const src = img.getAttribute('src');
+    if (!src) continue;
+    if (imagesSent[src] && now - imagesSent[src] < IMAGE_RESEND_MS) continue;
+    if (!todo.includes(src)) todo.push(src);
+    if (todo.length >= IMAGES_PER_CYCLE) break;
+  }
+  if (todo.length === 0) return;
+
+  for (const src of todo) {
+    try {
+      // Same-origin fetch from a page that has already cleared Cloudflare, so this is the one
+      // context in which these bytes are obtainable for free.
+      const blob = await (await fetch(src)).blob();
+      const b64 = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+        fr.onerror = reject;
+        fr.readAsDataURL(blob);
+      });
+      const res = await chrome.runtime.sendMessage({ type: 'ebgames-image', src, b64 });
+      if (res && res.ok) imagesSent[src] = now;
+    } catch {
+      // A missing picture costs one field on an alert; never let it disturb the listing loop.
+    }
+  }
+
+  // Keep the record from growing without bound as the catalogue turns over.
+  const entries = Object.entries(imagesSent).sort((a, b) => b[1] - a[1]).slice(0, 500);
+  await chrome.storage.local.set({ imagesSent: Object.fromEntries(entries) });
+}
+
 (async () => {
   const source = sourceKey();
   if (!source) return;
@@ -75,6 +123,15 @@ function navigateIn(ms, source) {
 
   const html = document.documentElement.outerHTML;
   let delay = Math.max(5, Number(intervalSec) || 25) * 1000;
+
+  // Hand over any product images the monitor has not been given yet. Discord cannot fetch
+  // ebgames.ca images — the same Cloudflare that refuses every datacenter client refuses
+  // Discord's fetcher too — so the bytes have to come from a browser that can load them.
+  // This one already has the page open, so they are free here.
+  //
+  // Bounded per cycle, and each image is sent once: the point of this bridge is a SMALL
+  // footprint, and uploading eighteen pictures every 25 seconds would undo that.
+  uploadNewImages().catch(() => {});
 
   try {
     const res = await chrome.runtime.sendMessage({ type: 'ebgames-listing', source, html });
