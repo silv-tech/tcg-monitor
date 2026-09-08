@@ -5,7 +5,16 @@ const { sleep, hashSku } = require('../utils/helpers');
 const scraperApi = require('../utils/scraper-api');
 const { curlGet } = require('../utils/curl-get');
 
-const DEEP_CRAWL_INTERVAL_DEFAULT = 5 * 60 * 1000;
+// The deep crawl is now a SAFETY NET, not the primary restock mechanism. Verified 2026-09-08:
+// EB Games bumps a product's write_date when it is restocked/repriced, so restocks surface on
+// the first pages of the SORT_MODIFIED fast poll (a live compare of create_date-desc vs
+// write_date-desc page 1 shared zero SKUs — the modified sort was entirely older products
+// changed in batches, the signature of a set being restocked). The fast poll therefore catches
+// restocks every cycle; the full-catalogue crawl only needs to sweep occasionally to cover
+// anything that spills past the modified pages between sweeps. Dropping it from 5min to 30min is
+// ~80% of the crawl's cost removed with no loss of coverage — the modified pages hold the line
+// in between. Env-tunable via deepCrawlIntervalMs.
+const DEEP_CRAWL_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DEEP_CRAWL_INTERVAL_FLOOR = 60 * 1000;
 const CONCURRENCY = 4;
 
@@ -14,10 +23,16 @@ const CONCURRENCY = 4;
 const MAX_DROP_SHARE = 0.2;
 
 // Odoo eCommerce category routes — only the games the client tracks.
-// fastPages: pages fetched every poll (newest-first + recently-modified); the deep crawl covers the rest.
+//   fastPages     — pages read newest-first (create_date desc) every poll, to catch NEW listings.
+//   modifiedPages — pages read recently-modified-first (write_date desc) every poll, to catch
+//                   RESTOCKS and price drops on existing products. This is deliberately larger
+//                   than fastPages: a restock bumps write_date so it lands at the top of this
+//                   sort, and reading more of it every poll is what lets the deep crawl step
+//                   back to a 30-min safety net. A batch restock of a whole set is ~1-3 pages,
+//                   so 6 covers a normal poll's worth of change with headroom.
 const SOURCES = [
-  { key: 'pokemon',  path: '/shop/category/trading-cards-pokemon-204', fastPages: 2 },
-  { key: 'onepiece', path: '/shop/category/trading-cards-one-piece-208', fastPages: 1 },
+  { key: 'pokemon',  path: '/shop/category/trading-cards-pokemon-204', fastPages: 2, modifiedPages: 6 },
+  { key: 'onepiece', path: '/shop/category/trading-cards-one-piece-208', fastPages: 1, modifiedPages: 3 },
 ];
 
 const SORT_NEWEST = 'create_date desc';
@@ -345,8 +360,16 @@ class EBGamesAdapter extends BaseAdapter {
       if (total <= src.fastPages) {
         for (let p = 1; p <= total; p++) jobs.push({ src, url: this._listingUrl(src, p, SORT_NEWEST) });
       } else {
+        // Newest pages FIRST (queued ahead of the modified ones) so brand-new listings are
+        // fetched in the earliest paid burst of the cycle — new-listing latency is unchanged.
         for (let p = 1; p <= src.fastPages; p++) {
           jobs.push({ src, url: this._listingUrl(src, p, SORT_NEWEST) });
+        }
+        // Then more recently-modified pages — this is where restocks/price-drops surface, and
+        // reading a deeper slice of it every poll is what lets the deep crawl relax to a 30-min
+        // safety net. Bounded by the real page count so a small category never over-requests.
+        const modPages = Math.min(src.modifiedPages || src.fastPages, total);
+        for (let p = 1; p <= modPages; p++) {
           jobs.push({ src, url: this._listingUrl(src, p, SORT_MODIFIED) });
         }
       }
