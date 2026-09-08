@@ -33,6 +33,28 @@ function decodeEntities(str) {
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
 }
 
+/**
+ * Do two titles describe the same listing?
+ *
+ * Amazon serves one product under several strings: search aria-labels drop accented brand
+ * prefixes ("Pokémon TCG: X" -> "TCG: X"), AOD titles carry zero-width padding, and the
+ * separator moves between em dash, hyphen and nothing. A literal comparison would call every
+ * product a relist. Compared on letters and digits alone with accents folded, and counted as
+ * the same product when either title contains the other — which is the relationship a
+ * truncated or prefix-stripped rendering always has to the full title.
+ */
+function sameProductName(a, b) {
+  const norm = s => String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]/g, '');
+  const x = norm(a);
+  const y = norm(b);
+  // Nothing to compare on. Saying "same" here means a missing title never triggers a rename;
+  // the scope test above is what protects against a listing that actually changed.
+  if (!x || !y) return true;
+  return x.includes(y) || y.includes(x);
+}
+
 // How often to run the paid ScraperAPI search for NEW listings. This is the whole
 // ScraperAPI bill: 3 queries x 5 credits per run. It does NOT affect restock speed —
 // _monitorKnownAsins re-checks every known ASIN on every poll, free, regardless.
@@ -598,9 +620,48 @@ class AmazonAdapter extends BaseAdapter {
             if (data.seller) state.cacheSellerInfo(asin, data.seller).catch(() => {});
           }
 
-          // Keep cached identity (name, category, retailer) — update price + stock only
+          // AOD returns the LIVE title for this exact ASIN on every poll, and this path used
+          // to discard it and keep whatever name discovery first stored. Amazon repurposes
+          // listings, so a frozen name eventually describes a different product than the one
+          // the link goes to: on 2026-09-08 ASIN B0BCC6N8YL alerted as "Pokemon TCG: Mega
+          // Evolution - Chaos Rising Sleeved Booster" while /dp/B0BCC6N8YL served a
+          // PopSockets phone grip. Name, image and link disagreed, and nothing could notice
+          // because the only name anyone read was the stale one — including the out-of-scope
+          // purge in fetchProducts, which rejects that live title (verified) but was reading
+          // the cached name too.
+          //
+          // Checked against the shared scope rule, not a bespoke test, so an ASIN that stops
+          // being a product we track leaves the same way any other out-of-scope product does.
+          if (data.name && !isInScopeName(data.name)) {
+            logger.warn(`Amazon: ASIN ${asin} is no longer the product we stored — dropping. Was "${cached?.name}", now "${data.name}"`);
+            this._knownProducts.delete(asin);
+            delete products[asin];
+            continue;
+          }
+
+          // Still in scope, but a relist can swap one tracked product for another — and a
+          // wrong name on a real alert is worse than no alert. Adopt the live title when it
+          // is not simply a fuller rendering of the cached one. Amazon's search aria-label
+          // drops accented brand prefixes ("Pokémon TCG: X" arrives as "TCG: X"), so the
+          // cached name is normally a substring of the AOD title; only a break in that
+          // containment means the listing actually became something else.
+          let name = cached?.name;
+          let category = cached?.category;
+          if (data.name && cached?.name && !sameProductName(cached.name, data.name)) {
+            logger.warn(`Amazon: ASIN ${asin} was relisted — "${cached.name}" -> "${data.name}"`);
+            name = data.name;
+            // Re-place it, but keep the discovered category when the new title names only a
+            // set: isInScopeName accepts a set name as evidence, and classifyCategory does
+            // not, so re-classifying blind would turn a real Pokemon product into 'other'.
+            const reclassified = this.classify({ name: data.name }).category;
+            if (reclassified !== 'other') category = reclassified;
+          }
+
+          // Keep cached identity (category, retailer) — update name, price + stock
           const product = {
             ...cached,
+            name: name || cached?.name,
+            category: category || cached?.category,
             price: data.price || cached.price,
             inStock: data.inStock,
             canAddToCart: data.inStock,
