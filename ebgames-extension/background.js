@@ -48,6 +48,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         body: msg.html,
       });
       const body = await r.json().catch(() => ({}));
+      if (r.ok) await chrome.storage.local.set({ lastPushAt: Date.now() });
       await record({ source: msg.source, status: r.status, ...body });
       sendResponse({ ok: r.ok, ...body });
     } catch (err) {
@@ -101,10 +102,40 @@ async function refreshNow() {
 // looks broken — and the options page is the only place the push log is visible.
 chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
 
-chrome.runtime.onInstalled.addListener(ensureTabs);
-chrome.runtime.onStartup.addListener(ensureTabs);
+/**
+ * Restart the loop if it has gone quiet.
+ *
+ * The refresh cycle lives in the page: the content script posts, then schedules the next
+ * navigation. Reloading or updating the extension kills the content scripts in already-open
+ * tabs and takes that pending timer with them, leaving the tabs fully loaded with nothing
+ * driving them — and ensureTabs() sees a tab present and does nothing. That is exactly how
+ * pushes stopped dead for eight minutes on 2026-09-08 the moment the extension was reloaded,
+ * with no symptom on this side at all. Chrome updates and extension auto-updates do the same.
+ *
+ * So liveness is judged on the only thing that matters: when a push last succeeded.
+ */
+async function watchdog() {
+  const { enabled = true, intervalSec = 25, lastPushAt = 0 } = await chrome.storage.local.get(
+    ['enabled', 'intervalSec', 'lastPushAt']
+  );
+  if (!enabled) return;
+  const silentFor = Date.now() - lastPushAt;
+  const limit = Math.max(90000, Number(intervalSec) * 3000);
+  if (lastPushAt === 0 || silentFor > limit) {
+    await record({ source: 'watchdog', note: `no push for ${Math.round(silentFor / 1000)}s — restarting tabs` });
+    await refreshNow();
+  }
+}
+
+// onInstalled fires on reload and on update too, which is precisely when the open tabs are
+// left with dead content scripts — so re-navigate them rather than only filling gaps.
+chrome.runtime.onInstalled.addListener(refreshNow);
+chrome.runtime.onStartup.addListener(refreshNow);
 chrome.alarms.create('ensure-tabs', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'ensure-tabs') ensureTabs(); });
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name !== 'ensure-tabs') return;
+  ensureTabs().then(watchdog);
+});
 
 /**
  * Saving the options must take effect at once. The tabs open before there is any config to
