@@ -267,3 +267,38 @@ describe('payloads that are not store lists', () => {
     assert.strictEqual(rows[0].stockAvailable, 1);
   });
 });
+
+/**
+ * The "+N other stores" count must describe reality, not the cache.
+ *
+ * It is derived from the rows handed to the embed, so truncating the cache silently truncates
+ * the claim: a product genuinely in stock at 16 stores announced "+4 other stores in stock"
+ * because only 5 rows were kept. Understating is still a wrong number, and a wrong number in
+ * an alert is worse than a missing one.
+ */
+describe('the other-stores count', () => {
+  function storesWithUnits(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      code: String(100 + i), locationCode: String(100 + i), name: `Store ${i}`,
+      address: { address1: `${i} Main Street`, cityOrTown: 'Vancouver',
+        stateOrProvince: 'British Columbia', postalOrZipCode: 'V6Z 1E4' },
+      stockAvailable: 1 + i, distance: 1000 * (i + 1),
+    }));
+  }
+
+  test('counts every store that has stock', () => {
+    const field = formatStoreField(parseStoreResponse(flight(storesWithUnits(16))));
+    assert.match(field, /\+15 other stores in stock/,
+      'the count must reflect all 16 stores with stock, not a truncated sample');
+  });
+
+  test('one store alone adds no count at all', () => {
+    const field = formatStoreField(parseStoreResponse(flight(storesWithUnits(1))));
+    assert.doesNotMatch(field, /other store/);
+  });
+
+  test('two stores says "store", not "stores"', () => {
+    const field = formatStoreField(parseStoreResponse(flight(storesWithUnits(2))));
+    assert.match(field, /\+1 other store in stock/);
+  });
+});

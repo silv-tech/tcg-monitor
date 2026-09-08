@@ -48,7 +48,13 @@ const IMAGE_BASE = process.env.LD_IMAGE_BASE
 const STORE_ENRICH_DEFAULT = 30 * 60 * 1000;
 const STORE_ENRICH_FLOOR = 10 * 60 * 1000;
 // Enough to name the nearest store and count the rest without bloating every Redis row.
-const STORE_ROWS_KEPT = 5;
+// Keep every store that actually HAS stock, not a display-sized sample.
+//
+// This was 5, and the embed's "+N other stores in stock" is derived from what is kept — so a
+// product in stock at 16 stores advertised "+4". Understating is still a wrong number, and the
+// standard here is that a wrong value is worse than a missing one. The cap is a sanity bound
+// against a pathological response, not a display limit: 40 rows is roughly 8KB per product.
+const STORE_ROWS_KEPT = 40;
 
 const GAME_NAMES = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
 const PRODUCT_FORMS = [
