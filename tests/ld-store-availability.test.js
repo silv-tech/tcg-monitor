@@ -176,3 +176,48 @@ describe('the enrichment loop', () => {
     assert.strictEqual(out.size, 0);
   });
 });
+
+/**
+ * The enrichment trigger on the adapter itself.
+ *
+ * _maybeEnrichStores runs at the TOP of the poll, before the catalogue is refreshed, so on the
+ * first pass after a restart there is nothing to enrich yet. The first version stamped the
+ * interval clock before working that out, so that empty pass consumed the whole 30 minutes and
+ * store data never appeared in production at all — the alert shipped without the field it was
+ * built for. A no-op must not spend the interval.
+ */
+describe('adapter enrichment trigger', () => {
+  const LondonDrugs = require('../src/adapters/londondrugs');
+
+  function adapter() {
+    const a = new LondonDrugs({
+      id: 'londondrugs', name: 'London Drugs', url: 'https://www.londondrugs.com',
+      intervalMs: 30000, proxyTier: 'residential',
+    });
+    process.env.BRIGHTDATA_BROWSER_WS = 'wss://example.invalid:9222';
+    return a;
+  }
+
+  test('an empty catalogue does not consume the enrichment interval', () => {
+    const a = adapter();
+    a._known.clear();
+    a._maybeEnrichStores();
+    assert.strictEqual(a._storesAt, 0,
+      'the clock was stamped on a pass that did nothing — the next real chance is 30 minutes away');
+    assert.strictEqual(a._storesRunning, false, 'a no-op must not leave the guard latched');
+  });
+
+  test('a catalogue with in-stock products does start a pass', () => {
+    const a = adapter();
+    a._known.set('L1', { sku: 'L1', url: 'https://x/p/L1', inStock: true });
+    a._maybeEnrichStores();
+    assert.ok(a._storesAt > 0, 'a real pass must stamp the clock so it is not repeated every poll');
+  });
+
+  test('out-of-stock-only catalogues are also a no-op that keeps the clock', () => {
+    const a = adapter();
+    a._known.set('L1', { sku: 'L1', url: 'https://x/p/L1', inStock: false });
+    a._maybeEnrichStores();
+    assert.strictEqual(a._storesAt, 0);
+  });
+});

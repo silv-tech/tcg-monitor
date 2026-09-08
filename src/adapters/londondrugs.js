@@ -258,11 +258,15 @@ class LondonDrugsAdapter extends BaseAdapter {
     const openSession = storeAvail.createBrightDataSession(this.url);
     if (!openSession) return; // no browser endpoint configured — alerts simply omit the store
 
-    this._storesRunning = true;
-    this._storesAt = Date.now();
+    // Work out the targets BEFORE stamping the clock. This runs at the top of the poll, so on
+    // the first pass after a restart the catalogue is still empty — stamping first meant that
+    // empty pass consumed the whole 30-minute interval and store data never appeared at all.
     const targets = [...this._known.values()].filter((p) => p.inStock && p.url)
       .map((p) => ({ sku: p.sku, url: p.url }));
-    if (targets.length === 0) { this._storesRunning = false; return; }
+    if (targets.length === 0) return; // nothing to enrich yet — try again next poll
+
+    this._storesRunning = true;
+    this._storesAt = Date.now();
 
     storeAvail.fetchStoreAvailability(targets, { openSession })
       .then((map) => {
