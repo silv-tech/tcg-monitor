@@ -530,13 +530,13 @@ router.post('/test-alert', async (req, res) => {
     await delivery.enrichEvent(event);
 
     if (channelId) {
-      // Send directly to specified channel
-      const { getClient } = require('../discord/bot');
+      // Route through delivery.sendToChannel — the SAME path production uses — so a demo alert
+      // renders exactly like a real one, including the attachment swap for images Discord
+      // cannot fetch (EB Games). A direct channel.send() here would bypass that and show a
+      // blank thumbnail, misrepresenting what customers actually receive.
       const { buildAlertEmbed } = require('../discord/embeds');
-      const client = getClient();
-      const channel = await client.channels.fetch(channelId);
       const { embed, components } = buildAlertEmbed(event, 'paid');
-      await channel.send({ embeds: [embed], components });
+      await delivery.sendToChannel(channelId, embed, components, null, 'paid');
       res.json({ ok: true, product: product.name, channelId, offerId: product._offerId || 'none' });
     } else {
       await delivery.deliver([event], { skipDedup: true });
