@@ -2,6 +2,7 @@ const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const scraperApi = require('../utils/scraper-api');
 const storeAvail = require('../utils/ld-store-availability');
+const state = require('../core/state');
 
 /**
  * London Drugs — Next.js App Router storefront behind DataDome.
@@ -243,6 +244,45 @@ class LondonDrugsAdapter extends BaseAdapter {
     return out;
   }
 
+  /** Redis key holding sku -> store rows for this retailer. */
+  get _storesKey() { return `tcg:stores:${this.id}`; }
+
+  /** Persist the enrichment result so the next poll — or the next process — can see it. */
+  async _saveStores() {
+    try {
+      const redis = state.getRedis();
+      if (!redis) return;
+      const obj = Object.fromEntries(this._stores);
+      // Two hours: comfortably longer than the enrichment interval, short enough that store
+      // counts cannot go stale enough to mislead if enrichment stops.
+      await redis.set(this._storesKey, JSON.stringify(obj), 'EX', 7200);
+      logger.info(`${this.name}: store data persisted for ${Object.keys(obj).length} product(s)`);
+    } catch (err) {
+      logger.warn(`${this.name}: could not persist store data: ${err.message}`);
+    }
+  }
+
+  /** Load store rows written by any process. Never throws — a miss just means no store field. */
+  async _loadStores() {
+    try {
+      const redis = state.getRedis();
+      if (!redis) return;
+      // Bounded: the poll must never stall on a slow or unreachable Redis. A miss here costs
+      // the store field on this cycle, nothing more.
+      const raw = await Promise.race([
+        redis.get(this._storesKey),
+        new Promise((resolve) => setTimeout(() => resolve(null), 2000)),
+      ]);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      for (const [sku, rows] of Object.entries(obj)) {
+        if (Array.isArray(rows) && rows.length) this._stores.set(sku, rows);
+      }
+    } catch (err) {
+      logger.debug(`${this.name}: could not load store data: ${err.message}`);
+    }
+  }
+
   /**
    * Refresh per-store availability in the background, on a slow timer.
    *
@@ -282,6 +322,7 @@ class LondonDrugsAdapter extends BaseAdapter {
           else this._stores.delete(sku);
         }
         logger.info(`${this.name}: store data kept for ${kept}/${map.size} product(s)`);
+        return this._saveStores();
       })
       .catch((err) => logger.warn(`${this.name}: store enrichment failed: ${err.message}`))
       .finally(() => { this._storesRunning = false; });
@@ -336,6 +377,15 @@ class LondonDrugsAdapter extends BaseAdapter {
     // Attach the last known per-store availability. It is enrichment, so it lags the stock
     // number by up to one enrichment interval — acceptable here only because London Drugs is
     // pickup-only and therefore not a checkout race.
+    // Read the cache through Redis rather than trusting instance memory.
+    //
+    // The enrichment reported "kept for 9/9 product(s)" while every poll attached nothing, and
+    // the attach logic is provably correct in isolation — so the cache simply was not there by
+    // the time the next poll ran. Rather than keep theorising about why in-process state went
+    // missing, the store data now lives in Redis: it survives a restart, it is inspectable from
+    // outside, and the attach no longer depends on two callbacks sharing an object.
+    await this._loadStores();
+
     let attached = 0;
     for (const p of found) {
       const stores = this._stores.get(p.sku);

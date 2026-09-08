@@ -198,6 +198,10 @@ describe('adapter enrichment trigger', () => {
       intervalMs: 30000, proxyTier: 'residential',
     });
     process.env.BRIGHTDATA_BROWSER_WS = 'wss://example.invalid:9222';
+    // Persistence is Redis-backed; opening a connection here would hold the test process open
+    // long after the assertions finish. These tests are about the trigger, not the store.
+    a._saveStores = async () => {};
+    a._loadStores = async () => {};
     return a;
   }
 
