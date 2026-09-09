@@ -18,6 +18,29 @@ const WINDOW_MS = 60 * 1000;
 const DEFAULT_MAX_PER_WINDOW = 12;
 const COOLDOWN_MS = 10 * 60 * 1000;
 
+/**
+ * How many HIGH-VALUE alerts may still escape a single mute.
+ *
+ * A mute drops everything for that retailer, and a dropped RESTOCK is lost PERMANENTLY: poll
+ * -adapter writes the new product state immediately after delivery, so oldProduct.inStock is
+ * already true on the next poll and events.js can never re-fire it. On 2026-09-09 Amazon was
+ * muted for ten minutes and 40 alerts went in the bin — the flood itself was harmless
+ * first-sightings, but any genuine restock in that window went with them, unrecoverably.
+ *
+ * Deliberately NOT an unconditional exemption. The identity exemption below returns before the
+ * counter increments, so exempting RESTOCK outright would make the limiter blind to a mass-
+ * RESTOCK regression — which is the exact failure it was built for (EB Games once produced 289
+ * restock alerts in three days from stale state). A small budget per mute keeps the ceiling
+ * intact: a 40-alert flood costs three extra messages, and so would a 289-alert one.
+ *
+ * Not a replay queue either: released ten minutes later, a price and stock flag are stale, and
+ * delivery's out-of-stock guard deliberately exempts RESTOCK so it would not catch it. A wrong
+ * value is worse than a missing one. These go out live or not at all.
+ */
+const MUTE_ESCAPE_BUDGET = Number(process.env.ALERT_MUTE_ESCAPE) || 3;
+// A restock IS the product. Everything else can wait for the next poll.
+const HIGH_VALUE_TYPES = new Set(['RESTOCK', 'PREORDER_LIVE']);
+
 // A drop is exactly when a retailer legitimately fires several alerts at once, so the
 // paths that carry drops get more headroom than routine catalogue churn.
 const LIMITS = {
@@ -92,6 +115,14 @@ function allow(event) {
   const mute = muted.get(retailerId);
   if (mute) {
     if (now < mute.until) {
+      // Let a bounded number of genuine restocks through. This is the only alert that cannot
+      // be recovered later, so it is the only one worth spending the budget on.
+      if (mute.escapes > 0 && HIGH_VALUE_TYPES.has(event.type) && event.product?.inStock) {
+        mute.escapes -= 1;
+        logger.warn(`ALERT LIMITER: ${retailerId} is muted, but letting a ${event.type} through `
+          + `(${mute.escapes} escape(s) left): ${event.product?.name || 'unknown'}`);
+        return { allowed: true, escaped: true };
+      }
       mute.suppressed++;
       const name = event.product?.name;
       if (name && mute.products.length < SUPPRESS_SAMPLE) mute.products.push(name);
@@ -120,7 +151,7 @@ function allow(event) {
   const limit = limitFor(retailerId);
   if (w.count > limit) {
     const reason = `${w.count} alerts in ${Math.round((now - w.startedAt) / 1000)}s (limit ${limit}/min)`;
-    muted.set(retailerId, { until: now + COOLDOWN_MS, suppressed: 1, reason, products: [event.product?.name].filter(Boolean) });
+    muted.set(retailerId, { until: now + COOLDOWN_MS, suppressed: 1, reason, products: [event.product?.name].filter(Boolean), escapes: MUTE_ESCAPE_BUDGET });
     logger.error(`ALERT LIMITER: muting ${retailerId} for ${Math.round(COOLDOWN_MS / 60000)}min — ${reason}`);
     if (onTrip) {
       try { onTrip(retailerId, reason); } catch (err) { logger.warn(`Alert limiter trip handler failed: ${err.message}`); }
