@@ -271,3 +271,56 @@ describe('amazon: an unresolved item is withheld, not guessed as out of stock', 
     assert.strictEqual(products['B0GW2DK37Q'].inStock, false);
   });
 });
+
+/**
+ * The hole the first withhold fix left open.
+ *
+ * The filter was a step at the END of fetchProducts, and the search-backoff early return jumped
+ * straight past it — dumping the raw _knownProducts map, unresolved guesses and all, on every
+ * poll for the 60-900s a backoff lasts. With one query per poll a single failed exit is enough
+ * to enter that state, so the hole was hit often: it wrote ~125 fresh inStock:false guesses to
+ * Redis silently (price-0 events are dropped by delivery, and there is no out-of-stock event),
+ * each one a future RESTOCK the moment AOD resolved it. That is why the flood recurred an hour
+ * after the fix. The filter is now a WRAPPER, so every return path is covered.
+ */
+describe('amazon: no return path can publish an unresolved guess', () => {
+  function adapter() {
+    const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
+    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._monitorKnownAsins = async () => {};
+    a._purgeOutOfScopeState = async () => {};
+    a._lastAodSweepAt = Date.now();
+    return a;
+  }
+
+  test('the search-backoff early return withholds unresolved items', async () => {
+    const a = adapter();
+    // An unresolved guess and a real product, both already known.
+    a._knownProducts.set('B0UNRESOLV', {
+      sku: 'B0UNRESOLV', name: 'Pokemon TCG: Something', price: 0, inStock: false,
+      _priceUnknown: true, category: 'pokemon',
+    });
+    a._knownProducts.set('B0REAL0001', {
+      sku: 'B0REAL0001', name: 'Pokemon TCG: Real Box', price: 42.5, inStock: true,
+      _priceUnknown: false, category: 'pokemon',
+    });
+    a._searchBlockedUntil = Date.now() + 60000;   // Amazon is refusing search
+
+    const products = await a.fetchProducts();
+    assert.ok(!('B0UNRESOLV' in products),
+      'a guess must not be published just because search is backing off');
+    assert.ok('B0REAL0001' in products, 'the resolved product is still reported');
+  });
+
+  test('a resolved-but-priceless-tile item is published once it has a real price', async () => {
+    const a = adapter();
+    a._knownProducts.set('B0FILLED01', {
+      sku: 'B0FILLED01', name: 'Pokemon TCG: Filled', price: 39.95, inStock: true,
+      _priceUnknown: true, category: 'pokemon',
+    });
+    a._searchBlockedUntil = Date.now() + 60000;
+    const products = await a.fetchProducts();
+    assert.ok('B0FILLED01' in products,
+      '_priceUnknown with a real price means AOD resolved it — that is publishable');
+  });
+});

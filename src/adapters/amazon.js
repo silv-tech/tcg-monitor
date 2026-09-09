@@ -228,7 +228,7 @@ class AmazonAdapter extends BaseAdapter {
    * The AOD sweep only tops up offer ids and sellers, and only when Amazon is not
    * throttling it — search alone is enough to fire a restock alert.
    */
-  async fetchProducts() {
+  async _collectProducts() {
     const products = {};
     const now = Date.now();
 
@@ -290,26 +290,33 @@ class AmazonAdapter extends BaseAdapter {
       await this._monitorKnownAsins(products);
     }
 
-    // Never report a product whose stock we have not actually established.
-    //
-    // A tile with no price says nothing about availability, and a price-fill that has not run
-    // yet (bounded to 3 per poll) or that failed says nothing either. Reporting those as "out
-    // of stock" writes a GUESS into Redis — and the moment a later fill resolves it, the diff
-    // sees false -> true and fires a RESTOCK for an item that never went anywhere.
-    //
-    // That is what happened on 2026-09-09: widening the query list took the catalogue from ~80
-    // to ~205 ASINs, each unresolved one landed as a false out-of-stock, and the fill then
-    // "restocked" them in batches — 21 alerts in 24s, twice, muting Amazon for ten minutes each
-    // time and suppressing genuine alerts along with the noise.
-    //
-    // Withholding is strictly safer than guessing here: an unresolved item simply is not
-    // reported until AOD reads a real buy box, at which point it enters state with its true
-    // status and alerts once, correctly, as a new listing. Nothing is lost — it stays in
-    // _knownProducts and is retried every poll.
+    return products;
+  }
+
+  /**
+   * Never report a product whose stock we have not actually established.
+   *
+   * A tile with no price says nothing about availability, and a price-fill that has not run yet
+   * (bounded per poll) or that failed says nothing either. Publishing those as "out of stock"
+   * writes a GUESS into Redis — and the moment a later fill resolves it, the diff sees
+   * false -> true and fires a RESTOCK for an item that never went anywhere. On 2026-09-09 that
+   * flooded the channel three times and muted the retailer for ten minutes each time,
+   * suppressing genuine alerts along with the noise.
+   *
+   * This is a WRAPPER, not a step at the end of the poll, because the first version was a step
+   * at the end and the search-backoff early return jumped straight past it — dumping the raw
+   * _knownProducts map, guesses and all, on every poll for the 60-900s a backoff lasts. With
+   * one query per poll a single failed exit is enough to enter that state, so the hole was hit
+   * often. A wrapper covers every return path, including ones added later.
+   *
+   * Withholding is strictly safer than guessing: an unresolved item is simply not reported
+   * until AOD reads a real buy box. It stays in _knownProducts and is retried every poll.
+   */
+  async fetchProducts() {
+    const products = await this._collectProducts();
     for (const [sku, p] of Object.entries(products)) {
       if (p && p._priceUnknown && !(p.price > 0)) delete products[sku];
     }
-
     return products;
   }
 
