@@ -91,3 +91,43 @@ describe('during the cooldown, no lane touches the endpoint', () => {
     assert.strictEqual(a._aodThrottleStreak, 0, 'and must not count toward the cooldown');
   });
 });
+
+describe('the AOD cooldown escalates on repeated blocks (quiet ladder)', () => {
+  const mins = (a) => Math.round((a._aodCooldownUntil - Date.now()) / 60000);
+  // A fresh block: the prior cooldown window has expired (retry time), then two 503s trip it again.
+  const nextBlock = (a) => { a._aodCooldownUntil = 0; a._aodStrike(); a._aodStrike(); };
+
+  test('consecutive blocks wait 10, then 20, then 40 min, capped at 40', () => {
+    const a = adapter();
+    nextBlock(a); assert.strictEqual(mins(a), 10, 'first block: shortest wait');
+    nextBlock(a); assert.strictEqual(mins(a), 20, 'second block: longer');
+    nextBlock(a); assert.strictEqual(mins(a), 40, 'third block: longest');
+    nextBlock(a); assert.strictEqual(mins(a), 40, 'stays capped at the top rung — never unbounded');
+    assert.strictEqual(a._aodCooldownLevel, 4);
+  });
+
+  test('a real read resets the ladder to the shortest wait', () => {
+    const a = adapter();
+    nextBlock(a); nextBlock(a);              // climbed to level 2
+    assert.strictEqual(a._aodCooldownLevel, 2);
+    a._aodRecovered();                        // what a successful AOD read does
+    assert.strictEqual(a._aodCooldownLevel, 0, 'recovery drops back to the bottom rung');
+    nextBlock(a); assert.strictEqual(mins(a), 10, 'next block starts short again');
+  });
+
+  test('one isolated throttle is still just the short cooldown', () => {
+    const a = adapter();
+    nextBlock(a);
+    assert.strictEqual(mins(a), 10, 'a one-off blip does not over-penalize');
+  });
+
+  test('extra 503s WITHIN an active cooldown do not climb the ladder (no rung-skipping)', () => {
+    const a = adapter();
+    nextBlock(a);                             // one real block → level 1, 10 min
+    assert.strictEqual(a._aodCooldownLevel, 1);
+    // Simulate in-flight/sibling-lane 503s arriving while the cooldown is still active:
+    a._aodStrike(); a._aodStrike(); a._aodStrike();
+    assert.strictEqual(a._aodCooldownLevel, 1, 'still level 1 — one outage escalates at most once');
+    assert.strictEqual(mins(a), 10, 'the window is not extended by re-strikes');
+  });
+});

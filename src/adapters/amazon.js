@@ -96,7 +96,12 @@ const MAX_PRICE_FILL_PER_POLL = Number(process.env.AMAZON_MAX_PRICE_FILL_PER_POL
 
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
-const AOD_COOLDOWN_MS = 10 * 60 * 1000;
+// Escalating quiet ladder for a throttled AOD endpoint, mirroring the search backoff ladder. A
+// FLAT cooldown didn't clear a stubborn block: each 10-min window ended with a retry poke, and a
+// block only decays under sustained silence (the search incident: a lightly-poked block stayed
+// dead 2h+, a quiet one lifted in ~23min). Each consecutive block waits longer; a successful read
+// resets to the bottom. So a one-off throttle costs 10min, a hard block escalates to real silence.
+const AOD_COOLDOWN_LADDER_MS = [10 * 60 * 1000, 20 * 60 * 1000, 40 * 60 * 1000];
 const AOD_THROTTLE_STRIKES = 2;   // consecutive 503s (any lane) before every AOD lane goes quiet
 
 // ONE shared budget for EVERY AOD call — the sweep, the watchlist fast-poll, and the price-fill
@@ -132,6 +137,7 @@ class AmazonAdapter extends BaseAdapter {
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
     this._aodThrottleStreak = 0;     // consecutive AOD 503s across ALL lanes; trips the shared cooldown
+    this._aodCooldownLevel = 0;      // rung on the escalating cooldown ladder; reset by a real read
     this._aodCursor = 0;             // persistent round-robin position for the known-ASIN sweep,
                                      // so a throttle-break resumes the tail instead of restarting
                                      // at 0 and starving late ASINs (that is why a tracked ASIN's
@@ -241,7 +247,7 @@ class AmazonAdapter extends BaseAdapter {
         return null;
       }
 
-      this._aodThrottleStreak = 0; // a real buy-box read: the endpoint is healthy again
+      this._aodRecovered(); // a real buy-box read: endpoint healthy, reset strike counter + ladder
       return this._parseAod(html, asin);
     } catch (err) {
       // stealthGet throws on 503 before we can read the body
@@ -260,12 +266,26 @@ class AmazonAdapter extends BaseAdapter {
    * and observe the block — otherwise, when the block began between sweeps, the hot lane kept
    * knocking for up to a full sweep interval and stopped the endpoint from ever decaying.
    */
+  // A real AOD read succeeded: the endpoint is healthy, so drop back to the shortest cooldown.
+  _aodRecovered() {
+    this._aodThrottleStreak = 0;
+    this._aodCooldownLevel = 0;
+  }
+
   _aodStrike() {
+    // Already paused this window: an in-flight 503 that lands after the cooldown was armed must not
+    // re-count. Several lanes can 503 near-simultaneously, and without this a single outage could
+    // climb the ladder more than once (skipping rungs). Re-blocks AFTER a window expires still climb.
+    if (Date.now() < this._aodCooldownUntil) return;
     if (++this._aodThrottleStreak >= AOD_THROTTLE_STRIKES) {
-      this._aodCooldownUntil = Date.now() + AOD_COOLDOWN_MS;
+      // Climb the ladder: each consecutive block (no success in between) waits longer, so a
+      // stubborn block gets real uninterrupted silence instead of a poke every 10 min.
+      const wait = AOD_COOLDOWN_LADDER_MS[Math.min(this._aodCooldownLevel, AOD_COOLDOWN_LADDER_MS.length - 1)];
+      this._aodCooldownUntil = Date.now() + wait;
+      this._aodCooldownLevel += 1;
       this._aodThrottleStreak = 0;
       logger.warn(`Amazon: AOD throttled (${AOD_THROTTLE_STRIKES}x 503) — pausing ALL AOD lanes for `
-        + `${AOD_COOLDOWN_MS / 60000}min so the block can decay`);
+        + `${wait / 60000}min (block level ${this._aodCooldownLevel}) so the block can decay`);
     }
   }
 
