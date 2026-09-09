@@ -74,8 +74,12 @@ async function checkHealth() {
     // This is bounded by isStale, which is still evaluated normally below: once the silence
     // outlives the cooldown the shop goes unhealthy regardless, so a permanently refused shop
     // is still reported rather than excused forever.
+    // lastError is an OBJECT ({ message, time } — state.js writes it, alerts.js reads
+    // .message), so String(status.lastError) was always "[object Object]" and this regex never
+    // matched once. The whole excuse-a-throttled-store branch has been dead since it was
+    // written; read the message it was always meant to read.
     const throttledOnly = !isStale && throttledForMs > 0
-      && /rate.?limit|429/i.test(String(status.lastError || ''));
+      && /rate.?limit|429/i.test(String(status.lastError?.message || status.lastError || ''));
 
     const healthy = (status.healthy || throttledOnly) && !isStale
       && zeroCount < ZERO_PRODUCT_THRESHOLD

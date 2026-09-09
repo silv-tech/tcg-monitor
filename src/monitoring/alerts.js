@@ -9,6 +9,23 @@ const { EmbedBuilder } = require('discord.js');
 // it was silence. So the first alert still fires immediately and is not repeated at that
 // cadence, but a store that stays broken is escalated on a widening ladder.
 const alertedRetailers = new Map(); // retailerId → { firstAt, lastAt, reminders }
+
+/**
+ * Retailers seen unhealthy but not yet paged about — retailerId → when it first went bad.
+ *
+ * There was NO debounce: the first sweep that saw healthy===false paged immediately. Shopify
+ * shops take genuine 429s on /products.json, go quiet while the backoff is honoured, and heal
+ * themselves in a couple of minutes; every one of those produced "Monitor Alert / Still down /
+ * Recovery" in the client's channel. On 2026-09-09 that was six pages in twenty minutes for
+ * outages that had already fixed themselves, which trains everyone to ignore the channel —
+ * and an ignored alert channel is a worse failure than the blip it was reporting.
+ *
+ * A retailer must now still be unhealthy on a later sweep before anyone is told.
+ */
+const pendingUnhealthy = new Map();
+// Three sweeps' worth, on top of the 5-minute stale threshold, so a genuine outage still pages
+// at ~11 minutes while a self-healing throttle blip pages not at all.
+const PAGE_AFTER_MS = Number(process.env.ALERT_PAGE_AFTER_MS) || 6 * 60 * 1000;
 // Reminders at 5, 15 and 30 minutes, then hourly. Widening rather than fixed so a long
 // outage does not turn #admin-alerts into a wall of the same message.
 const REMINDER_LADDER_MS = [5 * 60 * 1000, 15 * 60 * 1000, 30 * 60 * 1000];
@@ -51,8 +68,13 @@ async function checkAndAlert(discordClient) {
   const unhealthy = system.retailers.filter(r => !r.healthy);
   const unhealthyIds = new Set(unhealthy.map(r => r.id));
 
-  // Find NEWLY unhealthy retailers (not already alerted)
-  const newlyUnhealthy = unhealthy.filter(r => !alertedRetailers.has(r.id));
+  // Track how long each has been unhealthy, and forget any that healed before we spoke.
+  for (const r of unhealthy) if (!pendingUnhealthy.has(r.id)) pendingUnhealthy.set(r.id, now);
+  for (const id of [...pendingUnhealthy.keys()]) if (!unhealthyIds.has(id)) pendingUnhealthy.delete(id);
+
+  // Find NEWLY unhealthy retailers: not already alerted, AND still bad after the debounce.
+  const newlyUnhealthy = unhealthy.filter(r => !alertedRetailers.has(r.id)
+    && now - (pendingUnhealthy.get(r.id) || now) >= PAGE_AFTER_MS);
 
   // Find RECOVERED retailers (were alerted, now healthy again)
   const recovered = [];
@@ -84,7 +106,11 @@ async function checkAndAlert(discordClient) {
       }
 
       // Mark as alerted — won't alert again until it recovers
-      alertedRetailers.set(r.id, { firstAt: now, lastAt: now, reminders: 0 });
+      // firstAt is when it BROKE, not when we noticed. It used to be `now`, so every
+      // duration in these embeds understated the real silence by the whole debounce plus the
+      // stale threshold — which is how "Down for 6 min" and "back online after 2 min" could
+      // describe the same episode.
+      alertedRetailers.set(r.id, { firstAt: pendingUnhealthy.get(r.id) || now, lastAt: now, reminders: 0 });
     });
     if (newlyUnhealthy.length > MAX_LISTED) {
       embed.addFields({ name: 'More', value: `…and ${newlyUnhealthy.length - MAX_LISTED} more retailers`, inline: false });

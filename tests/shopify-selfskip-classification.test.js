@@ -75,3 +75,35 @@ describe('the throttle grace actually fires for a shop', () => {
     assert.strictEqual(cooldownRemaining('https://kanzengames.com'), 0);
   });
 });
+
+describe('the throttle grace is not wiped by an expired sibling key', () => {
+  // Time is mocked because setCooldown FLOORS any request at the first ladder rung (30s), so
+  // an "already expired" key cannot be created by passing a small value — an earlier version of
+  // these tests passed while exercising nothing.
+  const { mock } = require('node:test');
+  const { setCooldown, cooldownRemaining, _resetCooldowns } = require('../src/utils/stealth-http');
+
+  test('an endpoint still cooling is reported even when a sibling has expired', () => {
+    _resetCooldowns();
+    mock.timers.enable({ apis: ['Date'] });
+    try {
+      setCooldown('https://doescards.ca/collections/a/products.json', 30000, null);
+      setCooldown('https://doescards.ca/products.json', 600000, null);
+      mock.timers.tick(60000);          // the collection key has expired; /products.json has 9 min left
+      const left = cooldownRemaining('https://doescards.ca');
+      assert.ok(left > 0,
+        `an expired sibling must not wipe the grace — got ${left}`);
+    } finally { mock.timers.reset(); }
+  });
+
+  test('a host whose keys have ALL expired still reports zero', () => {
+    _resetCooldowns();
+    mock.timers.enable({ apis: ['Date'] });
+    try {
+      setCooldown('https://gameshack.ca/products.json', 30000, null);
+      mock.timers.tick(120000);
+      assert.strictEqual(cooldownRemaining('https://gameshack.ca'), 0,
+        'shopify.js relies on === 0 meaning "free to poll"');
+    } finally { mock.timers.reset(); }
+  });
+});

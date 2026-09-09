@@ -168,7 +168,11 @@ function cooldownRemaining(url, proxyUrl) {
   for (const [k, until] of hostCooldowns) {
     if (!k.startsWith(prefix)) continue;
     const left = until - now;
-    if (left <= 0) { hostCooldowns.delete(k); return 0; }
+    // One EXPIRED sibling key used to `return 0` for the whole host, wiping the answer even
+    // when the endpoint we actually need is benched for another fourteen minutes. A shop has
+    // many keys — /products.json and each /collections/<handle>/products.json, times each exit
+    // — so an expired one is the common case, not the rare one. Drop it and keep looking.
+    if (left <= 0) { hostCooldowns.delete(k); continue; }
     best = Math.min(best, left);
   }
   return best === Infinity ? 0 : best;
