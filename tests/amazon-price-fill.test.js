@@ -401,3 +401,67 @@ describe('amazon: a guessed row is re-baselined silently, not alerted', () => {
     assert.strictEqual(a._seedSkus.size, 0);
   });
 });
+
+/**
+ * Withholding traded a RESTOCK flood for a NEW_SKU flood of identical size.
+ *
+ * A withheld item has no stored row at all, so the first time it is published events.js sees no
+ * oldProduct and emits NEW_SKU. On 2026-09-09 the limiter muted Amazon again and suppressed 40
+ * alerts, an hour after the withhold fix. The item is not new to Amazon — it is new to US, and
+ * only because we could not price it until AOD read a buy box.
+ */
+describe('amazon: a withheld item that resolves is seeded, not announced', () => {
+  const state = require('../src/core/state');
+
+  function adapter() {
+    const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
+    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._monitorKnownAsins = async () => {};
+    a._purgeOutOfScopeState = async () => {};
+    a._guessScanDone = true;
+    a._lastAodSweepAt = Date.now();
+    a._searchBlockedUntil = Date.now() + 60000;   // use the cached path, no network
+    return a;
+  }
+
+  test('the first publication after a withhold writes state instead of alerting', async () => {
+    const written = [];
+    state.setProduct = async (rid, sku, p) => { written.push([sku, p.price]); };
+    const a = adapter();
+
+    // Poll 1: unresolved, so withheld.
+    a._knownProducts.set('B0LATE0001', {
+      sku: 'B0LATE0001', name: 'Pokemon TCG: Late', price: 0, inStock: false,
+      _priceUnknown: true, category: 'pokemon',
+    });
+    let products = await a.fetchProducts();
+    assert.ok(!('B0LATE0001' in products), 'still unknown, so still withheld');
+    assert.ok(a._withheldSkus.has('B0LATE0001'), 'and remembered as withheld');
+
+    // Poll 2: AOD resolved it.
+    a._knownProducts.set('B0LATE0001', {
+      sku: 'B0LATE0001', name: 'Pokemon TCG: Late', price: 44.5, inStock: true,
+      _priceUnknown: true, category: 'pokemon',
+    });
+    products = await a.fetchProducts();
+
+    assert.ok('B0LATE0001' in products, 'it is reported now that we know its state');
+    assert.deepStrictEqual(written, [['B0LATE0001', 44.5]],
+      'and its row is seeded first, so the diff sees no change and emits no NEW_SKU');
+    assert.ok(!a._withheldSkus.has('B0LATE0001'), 'seeded once, not every poll');
+  });
+
+  test('a product never withheld is NOT seeded — a real new listing still alerts', async () => {
+    const written = [];
+    state.setProduct = async (rid, sku, p) => { written.push([sku, p.price]); };
+    const a = adapter();
+    a._knownProducts.set('B0BRANDNEW', {
+      sku: 'B0BRANDNEW', name: 'Pokemon TCG: Brand New', price: 59.99, inStock: true,
+      _priceUnknown: false, category: 'pokemon',
+    });
+    const products = await a.fetchProducts();
+    assert.ok('B0BRANDNEW' in products);
+    assert.deepStrictEqual(written, [],
+      'a genuinely new listing must still produce NEW_SKU — that alert is the product');
+  });
+});

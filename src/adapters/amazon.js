@@ -105,6 +105,11 @@ class AmazonAdapter extends BaseAdapter {
     this._lastAodSweepAt = 0;
     // SKUs whose stored row is a GUESS written before the withhold fix — see _findGuessedRows.
     this._seedSkus = new Set();
+    // ASINs we have WITHHELD at least once. A withheld item has no stored row, so its first
+    // publication looks like a brand-new listing and fires NEW_SKU — the RESTOCK flood traded
+    // for an identically-sized NEW_SKU flood. It is not new to Amazon; it is new to us, and
+    // only because we could not price it. Seeded on first publish, then alerts normally.
+    this._withheldSkus = new Set();
     this._guessScanDone = false;
     this._deriveTiming();
 
@@ -324,7 +329,14 @@ class AmazonAdapter extends BaseAdapter {
   async fetchProducts() {
     const products = await this._collectProducts();
     for (const [sku, p] of Object.entries(products)) {
-      if (p && p._priceUnknown && !(p.price > 0)) delete products[sku];
+      if (p && p._priceUnknown && !(p.price > 0)) {
+        this._withheldSkus.add(sku);
+        delete products[sku];
+      }
+    }
+    // A withheld item that has now resolved is not a new listing — seed it, do not announce it.
+    for (const sku of this._withheldSkus) {
+      if (sku in products) { this._withheldSkus.delete(sku); this._seedSkus.add(sku); }
     }
     await this._seedRepairedRows(products);
     return products;
