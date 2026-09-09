@@ -211,3 +211,63 @@ describe('amazon price-fill: a resolved item stays resolved', () => {
     assert.strictEqual(products['B0GW2DK37Q'].inStock, false, 'an explicit OOS tile is believed');
   });
 });
+
+/**
+ * The alert flood, and why withholding beats guessing.
+ *
+ * On 2026-09-09 widening the query list took Amazon from ~80 to ~205 ASINs. Every unresolved
+ * priceless tile landed in Redis as "out of stock" — a guess we had no evidence for — and each
+ * time the bounded price-fill later resolved one, the diff saw false -> true and fired a
+ * RESTOCK. 21 alerts in 24s, twice, muting the retailer for ten minutes each time and
+ * suppressing genuine alerts along with the noise (events.js:31 is the transition that fires).
+ *
+ * An item whose stock we have not established is now simply not reported.
+ */
+describe('amazon: an unresolved item is withheld, not guessed as out of stock', () => {
+  function adapter() {
+    const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
+    a.searchQueries = ['pokemon'];
+    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._monitorKnownAsins = async () => {};
+    a._purgeOutOfScopeState = async () => {};
+    a._lastAodSweepAt = Date.now();
+    return a;
+  }
+
+  test('a priceless tile whose fill has not succeeded is not reported at all', async () => {
+    const a = adapter();
+    a._freeSearch = async () => [item()];
+    a._stealthCheckAsin = async () => null;          // fill fails
+    const products = await a.fetchProducts();
+    assert.ok(!('B0GW2DK37Q' in products),
+      'an unknown-stock item must not be published as out of stock');
+    assert.ok(a._knownProducts.has('B0GW2DK37Q'), 'but it is kept, to retry next poll');
+  });
+
+  test('once the fill resolves it, it IS reported — with real stock and price', async () => {
+    const a = adapter();
+    a._freeSearch = async () => [item()];
+    a._stealthCheckAsin = async () => ({ name: 'x', price: 39.95, inStock: true, olid: 'o' });
+    const products = await a.fetchProducts();
+    assert.strictEqual(products['B0GW2DK37Q'].price, 39.95);
+    assert.strictEqual(products['B0GW2DK37Q'].inStock, true);
+  });
+
+  test('a normally-priced item is unaffected', async () => {
+    const a = adapter();
+    a._freeSearch = async () => [item({ price: 24.99, inStock: true, _priceUnknown: false })];
+    a._stealthCheckAsin = async () => null;
+    const products = await a.fetchProducts();
+    assert.strictEqual(products['B0GW2DK37Q'].price, 24.99);
+  });
+
+  test('an explicitly out-of-stock tile is still reported as out of stock', async () => {
+    // _priceUnknown is false when the tile says "Currently unavailable" — that IS evidence.
+    const a = adapter();
+    a._freeSearch = async () => [item({ _priceUnknown: false, inStock: false })];
+    a._stealthCheckAsin = async () => null;
+    const products = await a.fetchProducts();
+    assert.ok('B0GW2DK37Q' in products, 'a real OOS observation must still be published');
+    assert.strictEqual(products['B0GW2DK37Q'].inStock, false);
+  });
+});

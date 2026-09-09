@@ -290,6 +290,26 @@ class AmazonAdapter extends BaseAdapter {
       await this._monitorKnownAsins(products);
     }
 
+    // Never report a product whose stock we have not actually established.
+    //
+    // A tile with no price says nothing about availability, and a price-fill that has not run
+    // yet (bounded to 3 per poll) or that failed says nothing either. Reporting those as "out
+    // of stock" writes a GUESS into Redis — and the moment a later fill resolves it, the diff
+    // sees false -> true and fires a RESTOCK for an item that never went anywhere.
+    //
+    // That is what happened on 2026-09-09: widening the query list took the catalogue from ~80
+    // to ~205 ASINs, each unresolved one landed as a false out-of-stock, and the fill then
+    // "restocked" them in batches — 21 alerts in 24s, twice, muting Amazon for ten minutes each
+    // time and suppressing genuine alerts along with the noise.
+    //
+    // Withholding is strictly safer than guessing here: an unresolved item simply is not
+    // reported until AOD reads a real buy box, at which point it enters state with its true
+    // status and alerts once, correctly, as a new listing. Nothing is lost — it stays in
+    // _knownProducts and is retried every poll.
+    for (const [sku, p] of Object.entries(products)) {
+      if (p && p._priceUnknown && !(p.price > 0)) delete products[sku];
+    }
+
     return products;
   }
 
