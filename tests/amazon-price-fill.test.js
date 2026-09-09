@@ -18,6 +18,14 @@ const assert = require('node:assert');
 
 const AmazonAdapter = require('../src/adapters/amazon');
 
+// No Redis in unit tests. fetchProducts now kicks off a one-time scan of stored rows
+// (_findGuessedRows), so without these the adapter opens a real ioredis client whose retry
+// timer holds the test process open forever.
+const stateModule = require('../src/core/state');
+stateModule.getRedis = () => null;
+stateModule.getAllProducts = async () => ({});
+stateModule.setProduct = async () => {};
+
 function adapter() {
   const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon Canada', url: 'https://www.amazon.ca', intervalMs: 6000, proxyTier: 'none' });
   a.searchQueries = ['pokemon'];
@@ -322,5 +330,74 @@ describe('amazon: no return path can publish an unresolved guess', () => {
     const products = await a.fetchProducts();
     assert.ok('B0FILLED01' in products,
       '_priceUnknown with a real price means AOD resolved it — that is publishable');
+  });
+});
+
+/**
+ * Repairing the guesses that were already written, without alerting on the repair.
+ *
+ * Between widening the query list and fixing the leak, ~125 unresolved tiles were published as
+ * inStock:false with no price. Those rows are still in Redis and stale cleanup re-pins them with
+ * a fresh TTL forever, so each is a loaded RESTOCK waiting for its AOD read. Deleting them would
+ * only convert that into an identically-sized NEW_SKU flood, so the row is overwritten with the
+ * truth BEFORE the diff reads it — poll-adapter reads oldProducts after fetchProducts returns,
+ * so old and new match and no event is produced.
+ */
+describe('amazon: a guessed row is re-baselined silently, not alerted', () => {
+  const state = require('../src/core/state');
+
+  function adapter(stored) {
+    const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
+    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._monitorKnownAsins = async () => {};
+    a._purgeOutOfScopeState = async () => {};
+    a._lastAodSweepAt = Date.now();
+    state.getAllProducts = async () => stored;
+    return a;
+  }
+
+  test('an unpriced out-of-stock row is marked, and overwritten when the truth arrives', async () => {
+    const written = [];
+    state.setProduct = async (rid, sku, p) => { written.push([sku, p.price, p.inStock]); };
+    const a = adapter({
+      B0GUESS001: { sku: 'B0GUESS001', name: 'Pokemon TCG: Guess', price: 0, inStock: false },
+    });
+    await a._findGuessedRows();
+    assert.ok(a._seedSkus.has('B0GUESS001'), 'the guess must be recognised');
+
+    // It later resolves and is published.
+    a._knownProducts.set('B0GUESS001', {
+      sku: 'B0GUESS001', name: 'Pokemon TCG: Guess', price: 39.95, inStock: true, category: 'pokemon',
+    });
+    a._searchBlockedUntil = Date.now() + 60000;
+    const products = await a.fetchProducts();
+
+    assert.deepStrictEqual(written, [['B0GUESS001', 39.95, true]],
+      'Redis must be re-baselined to the truth before the diff reads it');
+    assert.ok('B0GUESS001' in products, 'and the product is still reported normally');
+    assert.strictEqual(a._seedSkus.size, 0, 're-baselining happens once, not every poll');
+  });
+
+  test('a priced row is not treated as a guess', async () => {
+    const a = adapter({
+      B0REAL0002: { sku: 'B0REAL0002', name: 'Pokemon TCG: Real', price: 24.99, inStock: false },
+    });
+    await a._findGuessedRows();
+    assert.strictEqual(a._seedSkus.size, 0, 'a real out-of-stock observation is not a guess');
+  });
+
+  test('a watchlisted SKU is never re-baselined', async () => {
+    const a = adapter({
+      B0WATCHED1: { sku: 'B0WATCHED1', name: 'Pokemon TCG: Watched', price: 0, inStock: false },
+    });
+    a.watchlist = new Set(['B0WATCHED1']);
+    await a._findGuessedRows();
+    assert.strictEqual(a._seedSkus.size, 0, 'a hand-picked product keeps its alert');
+  });
+
+  test('an empty catalogue is a no-op', async () => {
+    const a = adapter({});
+    await a._findGuessedRows();
+    assert.strictEqual(a._seedSkus.size, 0);
   });
 });

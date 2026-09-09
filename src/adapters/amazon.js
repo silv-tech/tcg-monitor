@@ -103,6 +103,9 @@ class AmazonAdapter extends BaseAdapter {
     this._searchStrikes = 0;
     this._searchBlockedUntil = 0;
     this._lastAodSweepAt = 0;
+    // SKUs whose stored row is a GUESS written before the withhold fix — see _findGuessedRows.
+    this._seedSkus = new Set();
+    this._guessScanDone = false;
     this._deriveTiming();
 
     // Shared query set (src/config/products.json) — identical to Walmart and Best Buy
@@ -283,6 +286,12 @@ class AmazonAdapter extends BaseAdapter {
         logger.warn(`Amazon: out-of-scope state purge failed: ${err.message}`));
     }
 
+    if (!this._guessScanDone) {
+      this._guessScanDone = true;
+      this._findGuessedRows().catch(err =>
+        logger.warn(`Amazon: guessed-row scan failed: ${err.message}`));
+    }
+
     // Back off the enrichment sweep while search is struggling — they share a pool
     const searchRate = this._searchSuccessRate();
     if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs && (searchRate ?? 1) >= 0.5) {
@@ -317,7 +326,57 @@ class AmazonAdapter extends BaseAdapter {
     for (const [sku, p] of Object.entries(products)) {
       if (p && p._priceUnknown && !(p.price > 0)) delete products[sku];
     }
+    await this._seedRepairedRows(products);
     return products;
+  }
+
+  /**
+   * Find the false out-of-stock rows written before the withhold fix, once per process.
+   *
+   * Between widening the query list and fixing the leak, every unresolved tile was published as
+   * inStock:false with no price — a guess with nothing behind it. Those rows are still in Redis
+   * and poll-adapter's stale cleanup re-pins them with a fresh TTL on every poll, so they never
+   * expire. Each one is a loaded RESTOCK: the moment AOD reads a real buy box the diff sees
+   * false -> true and alerts for a product that never went anywhere.
+   *
+   * Nothing is deleted. A row is only marked, and _seedRepairedRows overwrites it with the truth
+   * the first time we actually know it — deleting instead would just turn the RESTOCK flood into
+   * an identically-sized NEW_SKU flood.
+   */
+  async _findGuessedRows() {
+    const all = await state.getAllProducts(this.id);
+    const entries = Object.entries(all || {});
+    if (entries.length === 0) return;
+
+    const watched = this.watchlist instanceof Set ? this.watchlist : new Set();
+    const guesses = entries.filter(([sku, p]) => p
+      && p.inStock === false && !(p.price > 0)
+      && !watched.has(String(sku)) && !p._watchlist);
+    if (guesses.length === 0) return;
+
+    for (const [sku] of guesses) this._seedSkus.add(String(sku));
+    logger.info(`Amazon: ${guesses.length}/${entries.length} stored rows are unpriced `
+      + 'out-of-stock guesses — re-baselining them silently instead of alerting on the correction');
+  }
+
+  /**
+   * Overwrite a guessed row with the truth BEFORE the diff reads it, so the correction is
+   * silent. poll-adapter reads oldProducts after fetchProducts returns, so a row written here is
+   * what the diff compares against — identical to what we publish, therefore no event.
+   *
+   * A genuine restock of one of these loses exactly one alert, and only once: the row said
+   * price 0, and delivery drops price-0 alerts anyway, so nothing that could have reached a
+   * customer is lost. Every later change alerts normally.
+   */
+  async _seedRepairedRows(products) {
+    if (this._seedSkus.size === 0) return;
+    for (const [sku, p] of Object.entries(products)) {
+      if (!this._seedSkus.has(sku)) continue;
+      this._seedSkus.delete(sku);
+      await state.setProduct(this.id, sku, p).catch(err =>
+        logger.warn(`Amazon: could not re-baseline ${sku}: ${err.message}`));
+      logger.debug(`Amazon: re-baselined ${sku} at $${p.price} inStock=${p.inStock} (no alert)`);
+    }
   }
 
   /**
