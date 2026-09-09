@@ -27,6 +27,22 @@ const SWEEP_PAGES_PER_RUN = 10;
 // slowly; dropping to zero would stall the rotation permanently.
 const MIN_SWEEP_PAGES = 2;
 
+// How long a page that yielded nothing is trusted to still be empty.
+//
+// Barren pages were not persisted at all, so every restart made all of them look never-read and
+// the 100-page shops (maxProducts 25000 -> 100 pages) spent all ten sweep slots on cold,
+// full-payload fetches, forever — never converging on the small productive set that answers 304.
+// That burst is what earns the 429s. Remembering them permanently would be the opposite error,
+// since a shop grows; a day is long enough to stop the churn and short enough that a page which
+// has since filled up is found within one cycle.
+const BARREN_RECHECK_MS = Number(process.env.SHOP_BARREN_RECHECK_MS) || 24 * 60 * 60 * 1000;
+// And how many of them may be re-checked in a single sweep. Strictly rationed, and taken only
+// after the productive pages: ranking stale-barren pages as ordinary discovery put fifty-three
+// empty pages ahead of the two that held product on a mapped shop, which is precisely the
+// staleness the yield ranking exists to prevent. Two per sweep still walks a 100-page
+// catalogue in a few days.
+const BARREN_RECHECKS_PER_SWEEP = Number(process.env.SHOP_BARREN_RECHECKS_PER_SWEEP) || 2;
+
 /**
  * Keyword search — the same approach the big seven already use, finally applied to the shops.
  *
@@ -857,13 +873,15 @@ class ShopifyAdapter extends BaseAdapter {
     const explore = Math.min(Math.max(this._sweepCursor || 1, 1), maxPages);
     pages.push(explore);
 
-    // Discovery: anything never read yet.
+    // Discovery: pages never read at all. Mapping an unknown shop is worth the whole budget.
     for (let p = 1; p <= maxPages && pages.length < budget; p++) {
       if (this._pageYield.has(String(p))) continue;
       if (!pages.includes(p)) pages.push(p);
     }
 
-    // Exploitation: pages that actually hold product, oldest-checked first.
+    // Exploitation: pages that actually hold product, oldest-checked first. This is the point
+    // of the sweep — Hobbiesville's sold-out Booster Box read in-stock for over an hour when
+    // a blind rotation gave page 40 the same priority as the pages holding what we track.
     if (pages.length < budget) {
       const productive = [];
       for (const [p, info] of this._pageYield) {
@@ -872,6 +890,28 @@ class ShopifyAdapter extends BaseAdapter {
       }
       productive.sort((a, b) => a.at - b.at);
       for (const { page } of productive) {
+        if (pages.length >= budget) break;
+        if (!pages.includes(page)) pages.push(page);
+      }
+    }
+
+    // Re-check of pages known EMPTY, last and strictly rationed.
+    //
+    // A shop grows, so a page that was empty last week may not be now — but this must never
+    // compete with the pages that hold product. Ranking stale-barren pages as discovery put
+    // fifty-three empty pages ahead of the two productive ones on a mapped shop, which is the
+    // exact staleness the yield ranking exists to prevent. A couple per sweep walks the whole
+    // catalogue over time and costs almost nothing.
+    if (pages.length < budget) {
+      const now = Date.now();
+      const stale = [];
+      for (const [p, info] of this._pageYield) {
+        const page = Number(p);
+        if (page > maxPages || !info || info.n > 0) continue;
+        if (now - (info.at || 0) > BARREN_RECHECK_MS) stale.push({ page, at: info.at || 0 });
+      }
+      stale.sort((a, b) => a.at - b.at);   // longest-unchecked first
+      for (const { page } of stale.slice(0, BARREN_RECHECKS_PER_SWEEP)) {
         if (pages.length >= budget) break;
         if (!pages.includes(page)) pages.push(page);
       }
@@ -1029,6 +1069,13 @@ class ShopifyAdapter extends BaseAdapter {
       if (saved.yield && typeof saved.yield === 'object') {
         for (const [p, info] of Object.entries(saved.yield)) this._pageYield.set(p, info);
       }
+      // Pages known to be EMPTY, stored as page -> timestamp. Restoring these is what stops a
+      // restart re-exploring the whole catalogue; they age out via BARREN_RECHECK_MS.
+      if (saved.barren && typeof saved.barren === 'object') {
+        for (const [p, at] of Object.entries(saved.barren)) {
+          if (!this._pageYield.has(p)) this._pageYield.set(p, { n: 0, at: Number(at) || 0 });
+        }
+      }
     } catch { /* first sweep just starts at page 1 with no history */ }
   }
 
@@ -1039,11 +1086,22 @@ class ShopifyAdapter extends BaseAdapter {
       // Only pages that actually yielded product are worth carrying — a shop with a hundred
       // empty pages should not rewrite a hundred zeroes on every sweep.
       const productive = {};
-      for (const [p, info] of this._pageYield) if (info && info.n > 0) productive[p] = info;
+      const barren = {};
+      for (const [p, info] of this._pageYield) {
+        if (!info) continue;
+        if (info.n > 0) productive[p] = info;
+        // Barren pages are kept too, but as page -> timestamp only. The original reasoning —
+        // "a shop with a hundred empty pages should not rewrite a hundred zeroes" — was right
+        // about the cost of full objects and wrong about dropping them: selection treats an
+        // unknown page as never-read, so forgetting them sent every restart back through ten
+        // cold full-payload fetches. A bare number each is ~8 bytes and buys that back.
+        else barren[p] = info.at || 0;
+      }
       const payload = JSON.stringify({
         cursor: this._sweepCursor,
         handles,
         yield: productive,
+        barren,
         priceAgreements: Number.isFinite(this._searchPriceAgreements) ? this._searchPriceAgreements : 0,
       });
       await withRedisTimeout(state.getRedis().set(`tcg:sweepcursor:${this.id}`, payload));
