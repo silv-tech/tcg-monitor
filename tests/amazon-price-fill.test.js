@@ -27,9 +27,24 @@ function adapter() {
   return a;
 }
 
-// A search item that passes _buildFromSearch's filters (Pokémon, TCG, not an accessory).
+// A search item as _parseSearchHtml ACTUALLY produces it for a priceless tile.
+//
+// The first version of these tests built the item as { inStock: true, price: null }, and every
+// one of them passed — while the feature could not fire even once in production. A tile with no
+// price is marked inStock:false by construction (a price is the only stock signal a tile
+// carries), so "inStock && no price" is unsatisfiable on this path. Measured on 90 live tiles:
+// 43 priceless, 0 of them in stock. The shape below is the real one.
 function item(over = {}) {
-  return { asin: 'B0GW2DK37Q', name: 'Pokémon TCG: First Partner Illustration Collection', price: null, inStock: true, image: 'https://m.media-amazon.com/x.jpg', _alt: '', ...over };
+  return {
+    asin: 'B0GW2DK37Q',
+    name: 'Pokémon TCG: First Partner Illustration Collection',
+    price: null,
+    inStock: false,
+    _priceUnknown: true,
+    image: 'https://m.media-amazon.com/x.jpg',
+    _alt: '',
+    ...over,
+  };
 }
 
 describe('amazon price-fill for buyable-but-priceless items', () => {
@@ -47,11 +62,15 @@ describe('amazon price-fill for buyable-but-priceless items', () => {
     await a._runDiscovery(products);
     assert.deepStrictEqual(calls.check, ['B0GW2DK37Q'], 'the priceless item is looked up once');
     assert.strictEqual(products['B0GW2DK37Q'].price, 39.95, 'the real price is filled in');
-    assert.strictEqual(products['B0GW2DK37Q'].inStock, true);
+    // The tile said out of stock only because it showed no price. AOD read a live buy box, so
+    // the stock flag has to be corrected too — a real price on a false OOS still never alerts,
+    // which was the entire miss.
+    assert.strictEqual(products['B0GW2DK37Q'].inStock, true, 'AOD settles stock, not just price');
+    assert.strictEqual(products['B0GW2DK37Q'].canAddToCart, true);
   });
 
   test('a priced item is NOT looked up (no wasted fetch)', async () => {
-    const a = adapter(); wire(a, { items: [item({ price: 24.99 })], price: 99 });
+    const a = adapter(); wire(a, { items: [item({ price: 24.99, inStock: true, _priceUnknown: false })], price: 99 });
     await a._runDiscovery({});
     assert.strictEqual(calls.check.length, 0, 'priced items never trigger a product-page fetch');
   });
@@ -89,5 +108,57 @@ describe('amazon price-fill for buyable-but-priceless items', () => {
     a._lastFetchThrottled = true;
     await a._runDiscovery({});
     assert.strictEqual(calls.check.length, 0, 'do not hammer AOD when it is already 503ing');
+  });
+});
+
+/**
+ * The gap that let a passing suite hide a feature that never ran: nothing asserted that the
+ * parser can actually produce the shape the fill logic waits for. These drive real Amazon
+ * markup through the real parser.
+ */
+describe('amazon price-fill: the trigger is reachable from real search HTML', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const HTML = fs.readFileSync(path.join(__dirname, 'fixtures/amazon-search-tiles.html'), 'utf8');
+
+  test('a real priceless tile is flagged, a real priced tile is not', () => {
+    const items = AmazonAdapter.prototype._parseSearchHtml.call({}, HTML);
+    assert.strictEqual(items.length, 2);
+    const priceless = items.find((i) => i._priceUnknown);
+    const priced = items.find((i) => !i._priceUnknown);
+    assert.ok(priceless, 'the parser must flag a tile that shows no price');
+    assert.strictEqual(priceless.price, null);
+    assert.strictEqual(priceless.inStock, false, 'still not treated as in stock on tile alone');
+    assert.ok(priced.price > 0);
+  });
+
+  test('that tile reaches the fill queue end to end', async () => {
+    const a = adapter();
+    const items = AmazonAdapter.prototype._parseSearchHtml.call({}, HTML);
+    const checked = [];
+    a._freeSearch = async () => items;
+    a._stealthCheckAsin = async (asin) => {
+      checked.push(asin);
+      return { name: 'x', price: 74.95, inStock: true, olid: 'o' };
+    };
+    const products = {};
+    await a._runDiscovery(products);
+
+    const priceless = items.find((i) => i._priceUnknown);
+    assert.deepStrictEqual(checked, [priceless.asin], 'exactly the priceless tile is looked up');
+    assert.strictEqual(products[priceless.asin].price, 74.95);
+    assert.strictEqual(products[priceless.asin].inStock, true);
+  });
+
+  test('a failed lookup leaves the tile exactly as it was — never a false in-stock', async () => {
+    const a = adapter();
+    const items = AmazonAdapter.prototype._parseSearchHtml.call({}, HTML);
+    a._freeSearch = async () => items;
+    a._stealthCheckAsin = async () => null;
+    const products = {};
+    await a._runDiscovery(products);
+    const priceless = items.find((i) => i._priceUnknown);
+    assert.strictEqual(products[priceless.asin].inStock, false);
+    assert.ok(!(products[priceless.asin].price > 0));
   });
 });

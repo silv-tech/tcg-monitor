@@ -337,7 +337,9 @@ class AmazonAdapter extends BaseAdapter {
         this._knownProducts.set(product.sku, product);
         // In stock but no price we can trust: delivery would silently drop the alert. Queue a
         // product-page price lookup so a real restock is not lost for want of a price.
-        if (product.inStock && !(product.price > 0)) priceless.set(product.sku, product);
+        // Ambiguous tile: no price shown and no "Currently unavailable". Once a price has
+        // been resolved and cached, _buildFromSearch reuses it, so this stops queueing.
+        if (product._priceUnknown && !(product.price > 0)) priceless.set(product.sku, product);
       }
     }
 
@@ -354,6 +356,16 @@ class AmazonAdapter extends BaseAdapter {
           const data = await this._stealthCheckAsin(product.sku);
           if (data && data.price > 0) {
             product.price = data.price;
+            // AOD settles STOCK too, not just price. The tile marked this out of stock only
+            // because it showed no price; AOD reads the actual buy box (an offer listing id
+            // plus a price), so if it says buyable, it is. Without this the item keeps a real
+            // price and a false out-of-stock, and its restock still never fires — which was
+            // the whole miss. Only ever raised here: a failed or negative read leaves the
+            // item exactly as the tile had it, so this can add an alert but never suppress one.
+            if (data.inStock) {
+              product.inStock = true;
+              product.canAddToCart = true;
+            }
             this._knownProducts.set(product.sku, product);
             logger.info(`Amazon: price-filled $${data.price} for ${product.sku} `
               + `(in stock, no price on search tile) — ${(product.name || '').slice(0, 50)}`);
@@ -529,6 +541,16 @@ class AmazonAdapter extends BaseAdapter {
         _alt: altAccepted,
         price,
         inStock: !!price && !oos,
+        // A tile with no price is NOT evidence of being unavailable. Amazon prices some
+        // genuinely buyable items only on their own product page — B0GW2DK37Q ("First Partner
+        // Illustration Collection Series 2") is one — and the line above marks every one of
+        // them out of stock, because a price is the only stock signal a tile reliably carries.
+        //
+        // Measured on 90 live tiles: 43 had no price, and NONE of them were marked in stock.
+        // That is why price-filling keyed on "inStock && no price" never once ran in
+        // production — the two conditions cannot both hold here. Flag the ambiguity instead
+        // and let the AOD fetch settle it, since that reads the real buy box.
+        _priceUnknown: !priceStr && !oos,
         image: (card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com[^"]+)"/) || [])[1] || '',
       });
     }
@@ -578,6 +600,9 @@ class AmazonAdapter extends BaseAdapter {
       shipsToHome: true,
       lastSeen: Date.now(),
     });
+
+    // Carried through so discovery can tell "no price shown" apart from "priced at nothing".
+    product._priceUnknown = !!item._priceUnknown;
 
     // Category from the product itself, falling back to the query only when the product really
     // does name a tracked game. Previously this defaulted to 'pokemon' for anything the
