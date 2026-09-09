@@ -46,15 +46,36 @@ function isSessionError() {
   return /invalid CSRF token|Session expired|400: Bad Request/i.test(text);
 }
 
+// Which page this tab is showing, and how many the category has — so the background can walk
+// the sweep. Odoo puts the page in the PATH (/page/N); page 1 is the bare category URL, and the
+// last page is the largest N in the pagination links.
+function getCurrentPage() {
+  const m = location.pathname.match(/\/page\/(\d+)/);
+  return m ? Math.max(1, parseInt(m[1], 10)) : 1;
+}
+function getMaxPage() {
+  let max = 1;
+  for (const a of document.querySelectorAll('a[href*="/page/"]')) {
+    const m = a.getAttribute('href').match(/\/page\/(\d+)/);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return max;
+}
+
 /**
- * Always a FRESH top-level GET, never a reload. The background worker drives it, because
- * location.reload() repeats the original request — stale token and all.
+ * Always a FRESH top-level GET, never a reload. The background worker drives it (it advances the
+ * sweep to the next page), because location.reload() repeats the original request — stale token
+ * and all. The tab reports the page it is on and the last page so the walk is stateless.
  */
 function navigateIn(ms, source) {
+  const page = getCurrentPage();
+  const maxPage = getMaxPage();
   setTimeout(() => {
-    chrome.runtime.sendMessage({ type: 'ebgames-next', source }).catch(() => {
-      // Worker unreachable; a plain assignment is still better than a reload.
-      location.href = location.pathname + location.search;
+    chrome.runtime.sendMessage({ type: 'ebgames-next', source, page, maxPage }).catch(() => {
+      // Worker unreachable — advance the sweep ourselves rather than reload the same page.
+      const next = page >= maxPage ? 1 : page + 1;
+      const base = location.origin + location.pathname.replace(/\/page\/\d+.*$/, '').replace(/\/$/, '');
+      location.href = next === 1 ? `${base}?order=create_date+desc` : `${base}/page/${next}?order=create_date+desc`;
     });
   }, ms);
 }

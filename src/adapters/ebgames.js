@@ -25,6 +25,16 @@ const SOURCES = [
 // extension's refresh interval so one slow reload does not flap the retailer's health.
 const PUSH_STALE_MS = Number(process.env.EBGAMES_PUSH_STALE_MS) || 3 * 60 * 1000;
 
+// How long the silent seed lasts after the first push of a process. The extension now sweeps the
+// WHOLE category (every page, ~250 products) rather than only page 1, so pages 2..N arrive as
+// separate pushes over one sweep (~9 min). Flipping "seeded" after the first push — as the
+// original single-page bridge did — would let every later page fire NEW_SKU/RESTOCK at once, a
+// storm into the client's channel the moment coverage widens. Instead the seed spans a window
+// that comfortably exceeds one full sweep: every push inside it silently writes Redis-missing
+// SKUs (deploy purges Redis first, so the window re-baselines the current stock of the whole
+// catalogue), and only after it do real stock/price deltas alert. Env-tunable.
+const SEED_WINDOW_MS = Number(process.env.EBGAMES_SEED_WINDOW_MS) || 15 * 60 * 1000;
+
 const SORT_NEWEST = 'create_date desc';
 const SORT_MODIFIED = 'write_date desc';
 
@@ -161,6 +171,7 @@ class EBGamesAdapter extends BaseAdapter {
     this._paidFetches = 0;
     this._paidInBurst = 0;
     this._crawlPaidRemaining = 0;
+    this._seedStartedAt = 0;   // when the silent-seed window opened (first push of this process)
     this._curlReported = false;
     this._curlBlockedUntil = 0;
     this._seeded = false;
@@ -215,14 +226,21 @@ class EBGamesAdapter extends BaseAdapter {
 
     this._merge(fresh, false);
 
-    // First landing seeds Redis instead of alerting, or the very first push would fire
-    // NEW_SKU for the entire catalogue at once. Same guard the deep crawl uses.
-    const seeded = !this._seeded;
-    if (seeded) await this._seedRedis(true);
+    // Silent seed spans the FIRST FULL SWEEP, not just the first push. The extension sweeps
+    // every page of the category, so pages 2..N land as separate pushes; seeding only the first
+    // would let all the later pages alert at once. Keep seeding (Redis-missing SKUs, no alert)
+    // on every push until SEED_WINDOW_MS after the first, which exceeds one sweep, then start
+    // alerting on real deltas. _seedRedis flips _seeded only when passed complete===true.
+    const seeding = !this._seeded;
+    if (seeding) {
+      if (this._seedStartedAt === 0) this._seedStartedAt = Date.now();
+      const windowClosed = Date.now() - this._seedStartedAt >= SEED_WINDOW_MS;
+      await this._seedRedis(windowClosed);
+    }
 
     this._lastPushAt = Date.now();
     this._pushes += 1;
-    return { parsed, known: this._knownProducts.size, seeded };
+    return { parsed, known: this._knownProducts.size, seeded: seeding };
   }
 
   _deriveTiming() {

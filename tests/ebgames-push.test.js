@@ -27,7 +27,8 @@ function adapter() {
     id: 'ebgames', name: 'EB Games', url: 'https://www.ebgames.ca', intervalMs: 5000,
   });
   a.pushOnly = true;
-  a._seedRedis = async () => { a._seeded = true; };   // no Redis in unit tests
+  // no Redis in unit tests — but honour `complete`, or the seed-window logic is untestable
+  a._seedRedis = async (complete) => { if (complete) a._seeded = true; };
   // Any outbound call is a bug in push mode: the whole point is that we never touch the site.
   a._fetchListing = async () => { throw new Error('push mode must not fetch'); };
   a._deepCrawl = async () => { throw new Error('push mode must not crawl'); };
@@ -52,12 +53,21 @@ describe('ebgames: a pushed listing feeds the normal pipeline', () => {
     assert.ok(!/Pro-Binder/.test(names), `a binder must not be tracked — got ${names}`);
   });
 
-  test('the first push seeds instead of alerting, later pushes do not', async () => {
+  test('the seed spans the whole first sweep, then switches to alerting', async () => {
     const a = adapter();
     const first = await a.ingestPushed(FIXTURE, 'pokemon');
     assert.strictEqual(first.seeded, true, 'first landing must seed Redis, not fire NEW_SKU');
+    // A later page of the SAME sweep must ALSO seed. This is the whole fix: the single-page
+    // bridge flipped after one push, so widening to a full-catalogue sweep would have stormed
+    // the channel with a page of NEW_SKU/RESTOCK as each later page arrived.
     const second = await a.ingestPushed(FIXTURE, 'pokemon');
-    assert.strictEqual(second.seeded, false);
+    assert.strictEqual(second.seeded, true, 'pages within the sweep window keep seeding, not alerting');
+    // Once the window has elapsed, the next push completes the seed and alerting begins.
+    a._seedStartedAt = Date.now() - (16 * 60 * 1000);
+    const closing = await a.ingestPushed(FIXTURE, 'pokemon');
+    assert.strictEqual(closing.seeded, true, 'the push that closes the window still seeds');
+    const afterwards = await a.ingestPushed(FIXTURE, 'pokemon');
+    assert.strictEqual(afterwards.seeded, false, 'after the window, pushes alert on real deltas');
   });
 
   test('products reach fetchProducts without any outbound request', async () => {

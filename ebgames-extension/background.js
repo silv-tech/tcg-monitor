@@ -7,10 +7,35 @@
 
 const DEFAULTS = { baseUrl: '', apiKey: '', intervalSec: 25, enabled: true };
 
+// Each tab SWEEPS its whole category — every page, one page per cycle, looping back to page 1.
+// Page 1 alone (the original bridge) is not enough: on ebgames.ca the recently-modified sort is
+// dominated by OUT-OF-STOCK products, so the in-stock inventory and restocks sit on deeper pages
+// that page 1 never shows (verified live 2026-09-09: write_date pages 1–2 were 0/24 in stock;
+// in-stock products first appeared on page 3+). Walking every page is the only way to see the
+// whole catalogue's stock, exactly as the old server-side deep crawl did.
+//
+// Sort is create_date (stable): pages don't reshuffle mid-sweep, so a full walk sees every
+// product once. write_date would move a product to page 1 the instant it changes, so a sweep
+// could pass a product's old page and never reach its new one. New listings still land on
+// page 1, which every sweep visits.
+const SORT = 'order=create_date+desc';
 const TABS = [
-  { key: 'pokemon', url: 'https://www.ebgames.ca/shop/category/trading-cards-pokemon-204?order=write_date+desc' },
-  { key: 'onepiece', url: 'https://www.ebgames.ca/shop/category/trading-cards-one-piece-208?order=write_date+desc' },
+  { key: 'pokemon', base: 'https://www.ebgames.ca/shop/category/trading-cards-pokemon-204' },
+  { key: 'onepiece', base: 'https://www.ebgames.ca/shop/category/trading-cards-one-piece-208' },
 ];
+
+// Odoo paginates in the PATH (/page/N); page 1 is the bare category URL. Pure + exported for
+// unit tests — the Chrome glue below cannot run under node, but this math can.
+function pageUrl(base, page) {
+  const p = Math.max(1, Number(page) || 1);
+  return p === 1 ? `${base}?${SORT}` : `${base}/page/${p}?${SORT}`;
+}
+function nextPage(page, maxPage) {
+  const cur = Math.max(1, Number(page) || 1);
+  const max = Math.max(1, Number(maxPage) || 1);
+  return cur >= max ? 1 : cur + 1;
+}
+if (typeof module !== 'undefined' && module.exports) module.exports = { pageUrl, nextPage, SORT };
 
 async function record(entry) {
   const { pushLog = [] } = await chrome.storage.local.get('pushLog');
@@ -22,8 +47,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // A fresh top-level GET for this tab. location.reload() repeats the ORIGINAL request, which
   // on Odoo means replaying a stale CSRF token and getting the same 400 forever.
   if (msg && msg.type === 'ebgames-next') {
+    // Advance the sweep: the content script reports the page it is on and the category's last
+    // page; go to the next one, wrapping to page 1 after the last. Stateless — the page the tab
+    // is actually showing is the source of truth, not a cursor that could drift.
     const target = TABS.find((t) => t.key === msg.source);
-    if (target && sender.tab) chrome.tabs.update(sender.tab.id, { url: target.url }).catch(() => {});
+    if (target && sender.tab) {
+      const url = pageUrl(target.base, nextPage(msg.page, msg.maxPage));
+      chrome.tabs.update(sender.tab.id, { url }).catch(() => {});
+    }
     return undefined;
   }
   if (msg && msg.type === 'ebgames-note') {
@@ -100,12 +131,12 @@ async function ensureTabs() {
   const { enabled = true } = await chrome.storage.local.get('enabled');
   if (!enabled) return;
   const queries = await Promise.all(
-    TABS.map((t) => chrome.tabs.query({ url: `${t.url.split('?')[0]}*` }).catch(() => []))
+    TABS.map((t) => chrome.tabs.query({ url: `${t.base}*` }).catch(() => []))
   );
   const missing = TABS.filter((_, i) => queries[i].length === 0);
   if (missing.length === 0) return;
   await Promise.all(
-    missing.map((t) => chrome.tabs.create({ url: t.url, pinned: true, active: false }).catch(() => null))
+    missing.map((t) => chrome.tabs.create({ url: pageUrl(t.base, 1), pinned: true, active: false }).catch(() => null))
   );
   await record({ source: missing.map((t) => t.key).join(', '), note: 'opened tab' });
 }
@@ -118,8 +149,8 @@ async function ensureTabs() {
 async function refreshNow() {
   await ensureTabs();
   const found = await Promise.all(
-    TABS.map((t) => chrome.tabs.query({ url: `${t.url.split('?')[0]}*` })
-      .then((tabs) => tabs.map((tab) => ({ tab, url: t.url })))
+    TABS.map((t) => chrome.tabs.query({ url: `${t.base}*` })
+      .then((tabs) => tabs.map((tab) => ({ tab, url: pageUrl(t.base, 1) })))
       .catch(() => []))
   );
   await Promise.all(found.flat().map(({ tab, url }) => chrome.tabs.update(tab.id, { url }).catch(() => null)));
