@@ -5,6 +5,7 @@ const { getProxyUrl, getIspProxyRoundRobin, ispPoolSize } = require('../core/pro
 
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
+const rateBudget = require('../utils/rate-budget');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
 const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
@@ -97,6 +98,28 @@ const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 const AOD_COOLDOWN_MS = 10 * 60 * 1000;
 
+// ONE shared budget for EVERY AOD call — the sweep, the watchlist fast-poll, and the price-fill
+// all hit the same endpoint, which Amazon throttles endpoint-wide (measured: sequential ~0.5
+// req/s passes, two concurrent 503s on every call, and a fresh IP per request does NOT help). The
+// two loops were previously uncoordinated: fine at 3 watchlist ASINs, but scaling the fast lane
+// would let their combined rate trip the 10-min cooldown that stalls BOTH lanes — exactly the
+// kind of self-inflicted outage this monitor has hit before. A single token bucket at burst 1
+// makes AOD strictly one-at-a-time and mathematically incapable of exceeding the ceiling, no
+// matter how the loops interleave. A budget MISS is not an endpoint throttle: the caller returns
+// null (kept as cached, no false OOS) and never enters the cooldown.
+const AOD_BUDGET_KEY = 'amazon:aod';
+const AOD_RATE_PER_SEC = 0.45;   // just under the measured ~0.5 req/s sequential ceiling
+const AOD_ACQUIRE_WAIT_MS = 6000; // small, so a 120s-timeout-orphaned poll cannot pile up waiters
+
+// Restock detection was a flat, unprioritised round-robin over every known ASIN (~1.9s each →
+// ~19min per lap, growing with the catalogue): far too slow against items that restock every
+// ~20min. "Hot" = seen in stock within HOT_WINDOW_MS; the HOT_MAX most-recently-in-stock get the
+// fast AOD lane (priority 0), the rest stay on the slow sweep (priority 1). Auto-detected — no
+// hand-curation — so an item earns the fast lane by actually restocking. Cap keeps the fast
+// lane's share of the shared budget bounded (10 items / ~25s ≈ 0.4 req/s, well under the ceiling).
+const HOT_WINDOW_MS = 48 * 60 * 60 * 1000;
+const HOT_MAX = 10;
+
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
@@ -118,6 +141,10 @@ class AmazonAdapter extends BaseAdapter {
     this._searchStrikes = 0;
     this._searchBlockedUntil = 0;
     this._lastAodSweepAt = 0;
+    this._sweepInFlight = false;     // single-flight guard: the 120s poll timeout orphans (does not
+                                     // cancel) a long sweep, so a fresh poll could start a second
+                                     // one that races the first over _aodCursor/_knownProducts
+    this._lastInStockAt = new Map(); // ASIN → last time seen in stock, drives the auto-hot fast lane
     // SKUs whose stored row is a GUESS written before the withhold fix — see _findGuessedRows.
     this._seedSkus = new Set();
     // ASINs we have WITHHELD at least once. A withheld item has no stored row, so its first
@@ -147,7 +174,23 @@ class AmazonAdapter extends BaseAdapter {
    * and is not gated. 15 ASINs every 2 minutes drops from ~20 GB/day to ~0.3 GB/day,
    * and the offer id it hands back saves the 10-credit enrichment call per alert.
    */
-  async _stealthCheckAsin(asin) {
+  async _stealthCheckAsin(asin, priority = 1, ctx = null) {
+    // Every AOD request in the process passes through here, so this is the one place the shared
+    // endpoint budget can be enforced. burst 1 = one grant at a time. priority 0 = latency-
+    // critical (watchlist/hot); 1 = background (sweep, price-fill) so it yields to the hot lane.
+    //
+    // Throttle signalling: `this._lastFetchThrottled` is a shared field kept only for the
+    // price-fill pre-gate (a non-critical heuristic). The COOLDOWN decision must not read it —
+    // concurrent lanes clobber it — so we also record the throttle on the caller's private `ctx`,
+    // which the sweep reads per-call and cannot be corrupted by a sibling lane.
+    const mark = (v) => { this._lastFetchThrottled = v; if (ctx) ctx.throttled = v; };
+
+    // A miss means "out of budget", NOT "endpoint throttled": mark false so the sweep never
+    // counts it toward the 2-strike cooldown, and return null so callers keep the cached row.
+    const granted = await rateBudget.acquire(AOD_BUDGET_KEY, AOD_ACQUIRE_WAIT_MS, priority,
+      { ratePerSec: AOD_RATE_PER_SEC, burst: 1 });
+    if (!granted) { mark(false); return null; }
+
     const url = `https://www.amazon.ca/gp/product/ajax/aodAjaxMain/?asin=${asin}&pc=dp`;
     const proxyUrl = getProxyUrl('residential');
 
@@ -169,10 +212,10 @@ class AmazonAdapter extends BaseAdapter {
         },
       });
 
-      this._lastFetchThrottled = false;
+      mark(false);
       // Amazon answers an over-used AOD endpoint with a 503 that redirects to /error/500
       if (html && html.includes('/error/500')) {
-        this._lastFetchThrottled = true;
+        mark(true);
         return null;
       }
       if (!html || html.length < 1000) return null;
@@ -191,7 +234,7 @@ class AmazonAdapter extends BaseAdapter {
       return this._parseAod(html, asin);
     } catch (err) {
       // stealthGet throws on 503 before we can read the body
-      this._lastFetchThrottled = /50[03]|Blocked after/.test(err.message || '');
+      mark(/50[03]|Blocked after/.test(err.message || ''));
       if (proxyUrl) _clearCache(proxyUrl);
       return null;
     }
@@ -286,6 +329,12 @@ class AmazonAdapter extends BaseAdapter {
     // forever. This is what kept B0GX7S11S3 ("Psychedelic Universe", no franchise word)
     // firing the same price drop 21 times until the limiter muted the retailer.
     for (const [asin, data] of this._knownProducts) {
+      // A watchlist ASIN is the user's explicit pick and is never scope-dropped — the same guard
+      // poll-adapter and base use. It matters here because fetchProductPage now seeds config
+      // items into _knownProducts (so the main poll and the fast loop agree); its admit gate
+      // (hasGameScope + isTCGProduct) is looser than isInScopeName, so without this a watchlist
+      // item whose live title reads as merch/accessory would be deleted and re-added every poll.
+      if (this.watchlist.has(asin)) continue;
       if (!isInScopeName(data.name)) {
         logger.warn(`Amazon: dropping out-of-scope cached ASIN ${asin} — ${data.name}`);
         this._knownProducts.delete(asin);
@@ -323,6 +372,28 @@ class AmazonAdapter extends BaseAdapter {
     }
 
     return products;
+  }
+
+  /**
+   * The fast-poll (hot) lane the scheduler's watchlist loop drives. Config watchlist ASINs are
+   * always included — they are unindexed, so search can never rediscover them, and dropping them
+   * would risk the one miss we most want to avoid. On top of that, the HOT_MAX most-recently-in-
+   * stock ASINs (seen within HOT_WINDOW_MS) earn the lane automatically. Everything else stays on
+   * the slow sweep. The scheduler prefers this over the static `watchlist` when present.
+   */
+  getFastPollAsins() {
+    const now = Date.now();
+    const hot = [];
+    for (const [asin, ts] of this._lastInStockAt) {
+      if (now - ts < HOT_WINDOW_MS) hot.push(asin);
+    }
+    hot.sort((a, b) => this._lastInStockAt.get(b) - this._lastInStockAt.get(a)); // freshest first
+    const set = new Set(this.watchlist);
+    for (const asin of hot) {
+      if (set.size >= HOT_MAX) break;
+      set.add(asin);
+    }
+    return set;
   }
 
   /**
@@ -489,7 +560,10 @@ class AmazonAdapter extends BaseAdapter {
     // retried the next time it is seen: a miss becomes an alert, never a wrong price.
     if (priceless.size && !this._lastFetchThrottled) {
       const toFill = [...priceless.values()].slice(0, MAX_PRICE_FILL_PER_POLL);
-      await Promise.all(toFill.map(async (product) => {
+      // Sequential, not Promise.all: AOD 503s on concurrent requests (measured: two at once →
+      // 7/8 fail). The shared budget already paces grants, but issuing these one-by-one keeps a
+      // single AOD connection in flight rather than up to three.
+      for (const product of toFill) {
         try {
           const data = await this._stealthCheckAsin(product.sku);
           if (data && data.price > 0) {
@@ -503,13 +577,14 @@ class AmazonAdapter extends BaseAdapter {
             if (data.inStock) {
               product.inStock = true;
               product.canAddToCart = true;
+              this._lastInStockAt.set(product.sku, Date.now()); // fresh in-stock read → hot lane
             }
             this._knownProducts.set(product.sku, product);
             logger.info(`Amazon: price-filled $${data.price} for ${product.sku} `
               + `(in stock, no price on search tile) — ${(product.name || '').slice(0, 50)}`);
           }
         } catch { /* leave price 0 — suppressed as before, retried next sighting */ }
-      }));
+      }
     }
 
     // Carry forward anything this sweep did not surface — absence from a search page is
@@ -785,6 +860,10 @@ class AmazonAdapter extends BaseAdapter {
         product._categoryFromQuery = true;
       }
     }
+
+    // A fresh in-stock tile (one carrying a real price signal) is a genuine sighting → feed the
+    // auto-hot lane. A price-unknown tile asserts nothing about stock, so it never stamps.
+    if (!item._priceUnknown && item.inStock) this._lastInStockAt.set(item.asin, Date.now());
     return product;
   }
 
@@ -804,7 +883,24 @@ class AmazonAdapter extends BaseAdapter {
    * Returns cached data for ASINs where the fetch fails (prevents false OOS).
    */
   async _monitorKnownAsins(products) {
-    const all = [...this._knownProducts.keys()];
+    // Single-flight: the 120s poll timeout ORPHANS a long sweep (JS can't cancel it) but frees the
+    // poll guard, so the next poll could start a second sweep that races this one over _aodCursor
+    // and _knownProducts. Skip if one is already running — the carried-forward cache (set in
+    // _runDiscovery before the sweep) already fills `products`, so nothing is lost by skipping.
+    if (this._sweepInFlight) return;
+    this._sweepInFlight = true;
+    try {
+      return await this._monitorKnownAsinsInner(products);
+    } finally {
+      this._sweepInFlight = false;
+    }
+  }
+
+  async _monitorKnownAsinsInner(products) {
+    // Hot ASINs are covered by the fast lane (getFastPollAsins); skip them here so the sweep spends
+    // the shared AOD budget only on the cold long tail and never double-checks a hot item.
+    const hot = this.getFastPollAsins();
+    const all = [...this._knownProducts.keys()].filter(asin => !hot.has(asin));
     if (all.length === 0) {
       logger.debug('Amazon: no known ASINs — waiting for discovery');
       return;
@@ -839,12 +935,20 @@ class AmazonAdapter extends BaseAdapter {
       const batch = asins.slice(i, i + BATCH);
       processed += batch.length;
       const results = await Promise.allSettled(
-        batch.map(asin => this._stealthCheckAsin(asin).then(data => ({ asin, data })))
+        batch.map((asin) => {
+          // Read the throttle signal PER CALL via a private ctx, never the shared
+          // _lastFetchThrottled field. Three lanes (hot/watchlist, sweep, price-fill) call
+          // _stealthCheckAsin concurrently; a sibling lane's clean read or budget miss could
+          // otherwise clear a genuine 503 before the sweep reads it — masking the strike so the
+          // 10-min cooldown never fires and the sweep keeps hammering a throttled endpoint.
+          const ctx = { throttled: false };
+          return this._stealthCheckAsin(asin, 1, ctx).then(data => ({ asin, data, throttled: ctx.throttled }));
+        }),
       );
 
       for (const result of results) {
         if (result.status === 'rejected') continue;
-        const { asin, data } = result.value;
+        const { asin, data, throttled: wasThrottled } = result.value;
         checked++;
 
         if (data) {
@@ -908,9 +1012,12 @@ class AmazonAdapter extends BaseAdapter {
           };
           this._knownProducts.set(asin, product);
           products[asin] = product;
+          // Fresh in-stock read → keep the ASIN in the auto-hot lane (stamped only on a real
+          // sighting, never from a carried-forward row, so hotness genuinely decays after 48h).
+          if (product.inStock) this._lastInStockAt.set(asin, Date.now());
         } else {
           // Fetch failed — return cached data unchanged (no false OOS events)
-          if (this._lastFetchThrottled) throttled++;
+          if (wasThrottled) throttled++;
           const cached = this._knownProducts.get(asin);
           if (cached) products[asin] = cached;
         }
@@ -947,7 +1054,9 @@ class AmazonAdapter extends BaseAdapter {
    * Fetch a single product page — used by watchlist fast-polling.
    */
   async fetchProductPage(asin) {
-    const data = await this._stealthCheckAsin(asin);
+    // Priority 0: the watchlist/hot lane is what restock latency is measured on, so it wins the
+    // shared AOD budget over the background sweep.
+    const data = await this._stealthCheckAsin(asin, 0);
     if (!data) return null;
 
     // Apply game name + TCG filters
@@ -956,7 +1065,9 @@ class AmazonAdapter extends BaseAdapter {
     if (!hasGameName) return null;
     if (!isTCGProduct(data.name)) return null;
 
-    return this.classify({
+    if (data.inStock) this._lastInStockAt.set(asin, Date.now()); // keeps it in the fast lane
+
+    const product = this.classify({
       sku: asin,
       name: data.name,
       price: data.price,
@@ -967,6 +1078,12 @@ class AmazonAdapter extends BaseAdapter {
       canAddToCart: data.inStock,
       shipsToHome: true,
     });
+    // Reconcile _knownProducts with what the fast loop just read. The sweep SKIPS hot ASINs, so
+    // without this the main poll would keep carrying a stale cached row for a fast-lane ASIN and
+    // diff it against the fresh row the watchlist loop wrote to Redis — a false-OOS state write
+    // that then arms a false RESTOCK. Keeping both writers on the same value makes them agree.
+    this._knownProducts.set(asin, product);
+    return product;
   }
 
   /**

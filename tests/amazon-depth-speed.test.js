@@ -68,11 +68,10 @@ describe('amazon speed: AOD sweep uses a persistent cursor (no restart-at-0 star
     const checked = [];
     // Simulate AOD throttling after 2 checks each sweep (so it breaks and cursor must advance).
     let callsThisSweep = 0;
-    a._stealthCheckAsin = async (asin) => {
+    a._stealthCheckAsin = async (asin, priority, ctx) => {
       checked.push(asin);
       callsThisSweep++;
-      if (callsThisSweep >= 2) { a._lastFetchThrottled = true; return null; } // 503-like
-      a._lastFetchThrottled = false;
+      if (callsThisSweep >= 2) { if (ctx) ctx.throttled = true; return null; } // 503-like: signal via per-call ctx
       return { price: 10, inStock: true, olid: 'o', name: 'Pokemon TCG Box' };
     };
     // Two 503s trip the cooldown and break the pass. Clear cooldown between sweeps so we can see resume.

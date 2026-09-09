@@ -165,11 +165,16 @@ class Scheduler {
   async pollWatchlist(adapter) {
     const watchlistKey = `${adapter.id}:watchlist`;
     if (this.polling.has(watchlistKey)) return;
-    if (!adapter.watchlist || adapter.watchlist.size === 0) return;
+    // Adapters may expose a dynamic fast-poll set (e.g. Amazon's auto-hot lane: config watchlist +
+    // the recently-in-stock ASINs). Fall back to the static watchlist for adapters that don't.
+    const fastList = typeof adapter.getFastPollAsins === 'function'
+      ? adapter.getFastPollAsins()
+      : adapter.watchlist;
+    if (!fastList || fastList.size === 0) return;
 
     this.polling.add(watchlistKey);
     try {
-      for (const productId of adapter.watchlist) {
+      for (const productId of fastList) {
         // Timed from before the fetch, so the reported speed includes the request that
         // actually found the change rather than just the bookkeeping after it.
         const fetchStart = Date.now();
