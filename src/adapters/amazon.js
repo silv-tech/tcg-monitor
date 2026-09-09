@@ -207,7 +207,7 @@ class AmazonAdapter extends BaseAdapter {
     if (!granted) { mark(false); return null; }
 
     const url = `https://www.amazon.ca/gp/product/ajax/aodAjaxMain/?asin=${asin}&pc=dp`;
-    const proxyUrl = getProxyUrl('residential');
+    const proxyUrl = getProxyUrl('residential-us');
 
     try {
       const html = await stealthGet(url, {
@@ -1138,7 +1138,7 @@ class AmazonAdapter extends BaseAdapter {
       }
 
       if (i + BATCH < asins.length) {
-        const px = getProxyUrl('residential');
+        const px = getProxyUrl('residential-us');
         if (px) _clearCache(px);
         await sleep(1600 + Math.floor(Math.random() * 600));
       }
