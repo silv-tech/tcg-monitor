@@ -106,6 +106,10 @@ class AmazonAdapter extends BaseAdapter {
     this._monitorSuccessRate = 0;    // track product page stealth success %
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
+    this._aodCursor = 0;             // persistent round-robin position for the known-ASIN sweep,
+                                     // so a throttle-break resumes the tail instead of restarting
+                                     // at 0 and starving late ASINs (that is why a tracked ASIN's
+                                     // restock — B0H78BB9TY — was never AOD-checked and missed)
     this._lastFetchThrottled = false;
     this._searchWindow = [];         // rolling free-search success
     this._searchSkip = 0;
@@ -308,9 +312,12 @@ class AmazonAdapter extends BaseAdapter {
         logger.warn(`Amazon: guessed-row scan failed: ${err.message}`));
     }
 
-    // Back off the enrichment sweep while search is struggling — they share a pool
-    const searchRate = this._searchSuccessRate();
-    if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs && (searchRate ?? 1) >= 0.5) {
+    // The AOD known-ASIN sweep is our ONLY reliable restock detector for tracked products, and
+    // it uses a different endpoint (AOD) over a different pool (residential-us) than search (ISP
+    // exits). It was previously skipped whenever SEARCH looked unhealthy — which blinded restock
+    // detection during a search block for no reason, since the two do not share a pool. Gate it
+    // only on its own cadence and its own AOD cooldown (handled inside _monitorKnownAsins).
+    if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs) {
       this._lastAodSweepAt = now;
       await this._monitorKnownAsins(products);
     }
@@ -418,10 +425,21 @@ class AmazonAdapter extends BaseAdapter {
     // report their products; only the discovery of a brand-new listing waits for its turn.
     if (!this._rateLogged) { this._rateLogged = true; this._logSearchRate(); }
 
+    // Relevance queries walk a list of (query, page) pairs — every query at page 1 AND page 2 —
+    // so a product ranked below the page-1 fold is still seen (B0H7818RCM sat at relevance rank
+    // ~25/83, on page 2, and was structurally invisible when we only ever read page 1). The
+    // cursor cycles all 2×queries pairs, so requests/poll are UNCHANGED — same count, same
+    // per-exit rate — depth just doubles over two passes of the list. Rate-neutral by design.
+    const qp = this.searchQueries.length * 2; // each query contributes a page-1 and a page-2 slot
     const batch = [];
-    for (let i = 0; i < QUERIES_PER_POLL && i < this.searchQueries.length; i++) {
-      batch.push({ query: this.searchQueries[this._queryCursor % this.searchQueries.length], newest: false });
-      this._queryCursor = (this._queryCursor + 1) % this.searchQueries.length;
+    for (let i = 0; i < QUERIES_PER_POLL && i < qp; i++) {
+      const idx = this._queryCursor % qp;
+      batch.push({
+        query: this.searchQueries[idx % this.searchQueries.length],
+        newest: false,
+        page: 1 + Math.floor(idx / this.searchQueries.length), // first pass = page 1, second = page 2
+      });
+      this._queryCursor = (this._queryCursor + 1) % qp;
     }
 
     // One extra probe per poll, newest-first, walking the query list on its own cursor. This is
@@ -429,12 +447,14 @@ class AmazonAdapter extends BaseAdapter {
     // request: at four queries over eight exits that is 0.083 -> 0.104 req/s per exit, still
     // six times under the rate that blocked this IP.
     if (this.searchQueries.length > 0) {
-      batch.push({ query: this.searchQueries[this._newestCursor % this.searchQueries.length], newest: true });
+      // Newest-first probe stays on page 1: its whole value is the freshest listings, which are
+      // at the top of the date-desc sort — page 2 of "newest" is just older items already seen.
+      batch.push({ query: this.searchQueries[this._newestCursor % this.searchQueries.length], newest: true, page: 1 });
       this._newestCursor = (this._newestCursor + 1) % this.searchQueries.length;
     }
 
     const results = await Promise.allSettled(
-      batch.map(({ query, newest }) => this._freeSearch(query, newest).then(items => ({ query, items })))
+      batch.map(({ query, newest, page }) => this._freeSearch(query, newest, page).then(items => ({ query, items })))
     );
 
     let hits = 0;
@@ -523,7 +543,7 @@ class AmazonAdapter extends BaseAdapter {
    * for up to half an hour. Plain search returns ASIN, title, price and stock for ~40
    * products per query and is not gated, so this can run on every poll for nothing.
    */
-  async _freeSearch(query, newestFirst = false) {
+  async _freeSearch(query, newestFirst = false, page = 1) {
     // Amazon's default sort is RELEVANCE, and a brand-new listing has no traction yet, so it
     // does not rank — which is how three "30th Celebration" products were listed, sold out and
     // gone before we ever saw one. Measured 2026-09-09 on the same query: the newest-first sort
@@ -531,7 +551,8 @@ class AmazonAdapter extends BaseAdapter {
     // overlap, so this is not a marginal gain — it is a different view of the catalogue, and it
     // is the one where a new listing appears immediately.
     const sort = newestFirst ? '&s=date-desc-rank' : '';
-    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys${sort}`;
+    const pageParam = page > 1 ? `&page=${page}` : ''; // Amazon paginates in the query string
+    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys${sort}${pageParam}`;
 
     // Spread across this retailer's ISP exits, and never fall back to residential.
     //
@@ -783,11 +804,17 @@ class AmazonAdapter extends BaseAdapter {
    * Returns cached data for ASINs where the fetch fails (prevents false OOS).
    */
   async _monitorKnownAsins(products) {
-    const asins = [...this._knownProducts.keys()];
-    if (asins.length === 0) {
+    const all = [...this._knownProducts.keys()];
+    if (all.length === 0) {
       logger.debug('Amazon: no known ASINs — waiting for discovery');
       return;
     }
+    // Start where the last sweep stopped, not at index 0. A clean full pass still covers every
+    // ASIN (the rotation wraps back to the start); the difference is that a throttle-break now
+    // resumes at the tail on the next sweep instead of re-walking the front and starving the
+    // back of the list.
+    const start = this._aodCursor % all.length;
+    const asins = all.slice(start).concat(all.slice(0, start));
 
     // AOD is cheap per request but Amazon throttles it per-endpoint: 12 ASINs in ~7s
     // earned a 503 redirect to /error/500 on every call, direct and proxied alike.
@@ -805,10 +832,12 @@ class AmazonAdapter extends BaseAdapter {
     let checked = 0;
     let updated = 0;
     let throttled = 0;
+    let processed = 0; // ASINs attempted this sweep, to advance the persistent cursor
     const BATCH = 1;
 
     for (let i = 0; i < asins.length; i += BATCH) {
       const batch = asins.slice(i, i + BATCH);
+      processed += batch.length;
       const results = await Promise.allSettled(
         batch.map(asin => this._stealthCheckAsin(asin).then(data => ({ asin, data })))
       );
@@ -904,6 +933,10 @@ class AmazonAdapter extends BaseAdapter {
         await sleep(1600 + Math.floor(Math.random() * 600));
       }
     }
+
+    // Advance the persistent cursor past what we attempted, so the next sweep continues from
+    // here — a break leaves it at the tail, a full pass wraps it back to the start.
+    this._aodCursor = (start + processed) % all.length;
 
     this.reportFreshness(updated, checked);
     this._monitorSuccessRate = checked > 0 ? Math.round((updated / checked) * 100) : 0;
