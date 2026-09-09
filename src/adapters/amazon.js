@@ -125,6 +125,7 @@ class AmazonAdapter extends BaseAdapter {
     super(config);
     this.domain = 'www.amazon.ca';
     this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
+    this._hydrated = false;          // catalogue reloaded from Redis once per process
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
@@ -294,9 +295,63 @@ class AmazonAdapter extends BaseAdapter {
    * The AOD sweep only tops up offer ids and sellers, and only when Amazon is not
    * throttling it — search alone is enough to fire a restock alert.
    */
+  /**
+   * Reload the catalogue from Redis once per process.
+   *
+   * Without this, every restart is a false-RESTOCK storm. `_knownProducts` is in-memory only, so
+   * a cold start reports a handful of products while Redis still holds hundreds; poll-adapter's
+   * stale cleanup concludes the rest were delisted and writes inStock:false across the
+   * catalogue, and the next poll — finding them again on the same search pages — fires RESTOCK
+   * for every one. Its only guard is `newCount < oldCount * 0.3`, and a warming cache crosses
+   * that long before the query cursor has been round the 13 queries.
+   *
+   * Measured on the 2026-09-09 17:04 deploy: 322 rows written out of stock at 17:04:47, 37
+   * events seven seconds later, the limiter muted Amazon at 17:04:54 having spent all three
+   * restock escapes in the SAME MILLISECOND, and the mute then ran for its full ten minutes.
+   * The stale counter decayed 285 -> 208 as each falsely-dead product was rediscovered: 77
+   * recoveries against 75 suppressed + 3 escaped. Every deploy reproduced it, and deploys
+   * cluster exactly when someone is chasing a drop.
+   *
+   * Shopify (_loadHandleIndex) and EB Games already do this; Amazon was the only large adapter
+   * that did not. Scope is re-applied on the way in, because Redis holds rows written by older
+   * builds under older rules.
+   */
+  async _hydrateFromRedis() {
+    if (this._hydrated) return;
+    this._hydrated = true;
+    try {
+      // Bounded: a slow Redis must delay the first poll, never hang it.
+      const cached = await Promise.race([
+        state.getAllProducts(this.id),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('redis timeout')), 5000)),
+      ]);
+
+      let loaded = 0;
+      let outOfScope = 0;
+      for (const [asin, product] of Object.entries(cached || {})) {
+        if (!product || !product.name) continue;
+        if (!isInScopeName(product.name)) { outOfScope++; continue; }
+        if (this._knownProducts.has(asin)) continue;
+        this._knownProducts.set(asin, product);
+        loaded++;
+      }
+      logger.info(`${this.name}: hydrated ${loaded} products from Redis`
+        + `${outOfScope ? ` (${outOfScope} out of scope, skipped)` : ''}`);
+    } catch (err) {
+      // Degraded, not broken: the catalogue rebuilds as the query cursor rotates. Say it loudly,
+      // because this is precisely the condition that produces the restart flood.
+      logger.warn(`${this.name}: catalogue hydration failed (${err.message}) — cold start, `
+        + 'stale cleanup may fire spuriously this cycle');
+    }
+  }
+
   async _collectProducts() {
     const products = {};
     const now = Date.now();
+
+    // Before anything else, and before the search-blocked early return below — a cold cache is
+    // what turns a restart into a flood, and that is true whether or not search is available.
+    await this._hydrateFromRedis();
 
     // Amazon throttles by endpoint, as the AOD sweep found out the hard way. If search starts
     // failing, go properly quiet rather than hammering it into a deeper block.

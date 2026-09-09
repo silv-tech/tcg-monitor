@@ -367,6 +367,16 @@ async function main() {
     if (sitemapTimer) clearInterval(sitemapTimer);
     scheduler.stop();
     adminServer.close();
+    // Send what is already queued BEFORE the Discord client is destroyed. deliver() enqueues
+    // without awaiting the send, and poll-adapter has already written the new product state —
+    // so an alert still in the queue at exit is lost permanently and silently. Bounded, and it
+    // names anything it has to abandon.
+    try {
+      const abandoned = await delivery.drain(10000);
+      if (abandoned) logger.error(`Shutdown abandoned ${abandoned} queued alert(s)`);
+    } catch (err) {
+      logger.error(`Queue drain failed during shutdown: ${err.message}`);
+    }
     await shutdownBot();
     if (closeBrowser) await closeBrowser();
     await shutdownState();

@@ -20,6 +20,7 @@ function isBlockedImageHost(url) {
 }
 const { filterDuplicates, markSent } = require('./dedup');
 const alertLimiter = require('./alert-limiter');
+const { HIGH_VALUE_TYPES } = require('./alert-limiter');
 const { recordAlertLatency } = require('../core/proxy');
 const state = require('../core/state');
 const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, cacheSellerInfo } = state;
@@ -51,7 +52,8 @@ class DeliveryQueue {
     this.processing = false;
     this.client = null;
     this.channelCache = new Map();
-    this.pendingFreeCount = 0; // track in-flight free-tier delays (best-effort, lost on restart)
+    this.pendingFreeCount = 0;
+    this.inFlight = null;       // event currently being sent, for drain() to account for // track in-flight free-tier delays (best-effort, lost on restart)
   }
 
   setClient(client) {
@@ -108,7 +110,19 @@ class DeliveryQueue {
       // Outbound volume cap — a bad diff must never become a flood in a customer's server
       const verdict = alertLimiter.allow(event);
       if (!verdict.allowed) {
-        if (verdict.suppressed === 1 || verdict.suppressed % 50 === 0) {
+        // A suppressed RESTOCK or PREORDER_LIVE is gone for good — poll-adapter writes the new
+        // state right after delivery, so events.js can never re-fire it. Those are logged
+        // UNTHROTTLED, with everything needed to check the product by hand afterwards.
+        //
+        // The throttle below hid exactly this. On 2026-09-09 Amazon was muted and 75 alerts were
+        // suppressed; only the 1st and the 50th were ever written down, so which products they
+        // were could not be established afterwards even in principle. Losing an alert is bad;
+        // losing it without a record is worse, because nobody can tell whether it mattered.
+        if (HIGH_VALUE_TYPES.has(event.type)) {
+          const p = event.product || {};
+          logger.warn(`ALERT LOST (limiter muted ${p.retailerId || 'unknown'}): ${event.type} — `
+            + `${p.name || 'unknown'} | sku=${p.sku || '?'} | price=${p.price ?? '?'} | ${p.url || 'no url'}`);
+        } else if (verdict.suppressed === 1 || verdict.suppressed % 50 === 0) {
           logger.warn(`Alert suppressed by limiter (${verdict.suppressed} so far): ${event.type} — ${event.product?.name || 'unknown'}`);
         }
         continue;
@@ -129,6 +143,36 @@ class DeliveryQueue {
     }
   }
 
+  /**
+   * Finish sending whatever is already queued, then resolve.
+   *
+   * deliver() enqueues and returns without awaiting the send, and shutdown used to stop the
+   * scheduler, destroy the Discord client and exit — so anything still in the queue died with
+   * the process. Silently: poll-adapter had already written the new product state, so a restock
+   * lost this way can never re-fire, and nothing recorded that it happened. Measured queue
+   * latency on 2026-09-09 reached 8.5s end to end, and this project deploys on every push.
+   *
+   * Bounded, because a shutdown that hangs is its own outage: past the deadline we report what
+   * is being abandoned rather than blocking the process from exiting.
+   */
+  async drain(timeoutMs = 10000) {
+    const deadline = Date.now() + timeoutMs;
+    while ((this.queue.length > 0 || this.processing) && Date.now() < deadline) {
+      if (!this.processing && this.queue.length > 0) this.processQueue();
+      await sleep(50);
+    }
+    // The in-flight event has already been shifted out of the queue, so it must be reported
+    // separately — otherwise a shutdown landing mid-send loses an alert with no record, which
+    // is the exact failure this method exists to close.
+    const abandoned = [...(this.inFlight ? [this.inFlight] : []), ...this.queue.map((q) => q.event)];
+    for (const event of abandoned) {
+      const p = event.product || {};
+      logger.error(`ALERT LOST (shutdown before send): ${event.type} — ${p.name || 'unknown'} `
+        + `| sku=${p.sku || '?'} | ${p.url || 'no url'}`);
+    }
+    return abandoned.length;
+  }
+
   async processQueue() {
     if (this.processing) return;
     this.processing = true;
@@ -141,6 +185,10 @@ class DeliveryQueue {
         return pa - pb;
       });
       const { event, queuedAt } = this.queue.shift();
+      // Held so drain() can name an alert that was mid-send when the process was told to stop.
+      // Without this the in-flight event is invisible: it has already left the queue, so a
+      // shutdown during an Amazon enrichment abandoned it with no record at all.
+      this.inFlight = event;
       try {
         await this.routeEvent(event, queuedAt);
         // Don't pollute dedup for scan events — organic alerts must still fire
@@ -155,6 +203,8 @@ class DeliveryQueue {
           sku: event.product.sku,
           error: err.message,
         });
+      } finally {
+        this.inFlight = null;
       }
     }
 

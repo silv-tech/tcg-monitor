@@ -115,6 +115,21 @@ function allow(event) {
   const mute = muted.get(retailerId);
   if (mute) {
     if (now < mute.until) {
+      // Refill the escape budget once per window rather than once per mute.
+      //
+      // It was per-mute, which meant three restocks per TEN MINUTES. On 2026-09-09 a restart
+      // flood spent all three in the same millisecond it tripped the mute, leaving Amazon with
+      // no protection at all for the remaining ten minutes — and a suppressed restock is gone
+      // for good, because poll-adapter writes the new state immediately after delivery.
+      //
+      // Per-window keeps the limiter's purpose intact: a genuine mass-RESTOCK regression still
+      // costs at most MUTE_ESCAPE_BUDGET messages a minute and still trips and holds the mute,
+      // so it stays visible rather than being exempted into invisibility.
+      if (now - mute.escapeWindowAt >= WINDOW_MS) {
+        mute.escapeWindowAt = now;
+        mute.escapes = MUTE_ESCAPE_BUDGET;
+      }
+
       // Let a bounded number of genuine restocks through. This is the only alert that cannot
       // be recovered later, so it is the only one worth spending the budget on.
       if (mute.escapes > 0 && HIGH_VALUE_TYPES.has(event.type) && event.product?.inStock) {
@@ -151,7 +166,14 @@ function allow(event) {
   const limit = limitFor(retailerId);
   if (w.count > limit) {
     const reason = `${w.count} alerts in ${Math.round((now - w.startedAt) / 1000)}s (limit ${limit}/min)`;
-    muted.set(retailerId, { until: now + COOLDOWN_MS, suppressed: 1, reason, products: [event.product?.name].filter(Boolean), escapes: MUTE_ESCAPE_BUDGET });
+    muted.set(retailerId, {
+      until: now + COOLDOWN_MS,
+      suppressed: 1,
+      reason,
+      products: [event.product?.name].filter(Boolean),
+      escapes: MUTE_ESCAPE_BUDGET,
+      escapeWindowAt: now,          // refilled every WINDOW_MS while the mute holds
+    });
     logger.error(`ALERT LIMITER: muting ${retailerId} for ${Math.round(COOLDOWN_MS / 60000)}min — ${reason}`);
     if (onTrip) {
       try { onTrip(retailerId, reason); } catch (err) { logger.warn(`Alert limiter trip handler failed: ${err.message}`); }
@@ -181,4 +203,6 @@ function reset(retailerId) {
 module.exports = {
   allow, getStatus, reset, setTripHandler, setRecoverHandler, setCatalogueSize, limitFor,
   LIMITS, DEFAULT_MAX_PER_WINDOW, MIN_LIMIT, MAX_LIMIT, CATALOGUE_SHARE,
+  // Exported so delivery.js can log an unrecoverable loss differently from ordinary noise.
+  HIGH_VALUE_TYPES, MUTE_ESCAPE_BUDGET,
 };
