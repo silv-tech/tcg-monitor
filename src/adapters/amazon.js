@@ -425,6 +425,23 @@ class AmazonAdapter extends BaseAdapter {
       const viaIsp = await this._searchOnce(url, isp.url);
       if (viaIsp) return viaIsp;
     }
+
+    // Direct is ONE address, and it is the address Amazon already blocked once for 14 hours.
+    //
+    // Widening the pool divides the proxied rate but does nothing for this leg: every exit
+    // that fails falls through to here, so the worse things get, the harder this runs. At 13
+    // queries per poll a bad patch would land 2.17 req/s on Railway's single IP — 3.2x the
+    // 0.67 req/s that caused the original block. Paced to one request per poll interval, the
+    // rate this adapter ran safely for weeks. Skipping costs one query for one cycle; not
+    // skipping costs the address.
+    //
+    // Only paced when a pool EXISTS. With no ISP proxies configured, direct is the only route
+    // there is and throttling it would silently disable Amazon search altogether.
+    if (isp) {
+      const now = Date.now();
+      if (now - (this._lastDirectAt || 0) < this.intervalMs) return null;
+      this._lastDirectAt = now;
+    }
     return this._searchOnce(url, null);
   }
 

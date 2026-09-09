@@ -61,6 +61,12 @@ const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 60 * 1000;
 const MAX_MISSES = 3;
 
+// How many of the shared search queries go out per poll. Four is what this adapter ran with for
+// weeks, back when the shared list happened to hold exactly four; the list is now 13, and the
+// safe figure is the per-poll COUNT, not the list length. Env-overridable so it can be tuned
+// without a deploy.
+const QUERIES_PER_POLL = Number(process.env.COSTCO_QUERIES_PER_POLL) || 4;
+
 class CostcoAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
@@ -96,6 +102,7 @@ class CostcoAdapter extends BaseAdapter {
     ];
     this.searchQueries = config.searchQueries || SEARCH_QUERIES;
     this.knownProductIds = new Set();
+    this._queryCursor = 0;   // rotates the search slice across polls
     this.lastSitemapScan = 0;
 
     // Conditional-GET validators per sitemap URL. Costco serves ETag + Last-Modified and
@@ -250,19 +257,34 @@ class CostcoAdapter extends BaseAdapter {
 
     // Primary path: Costco's own search API, every poll. This is what makes a brand-new
     // listing visible within one cycle instead of waiting for the nightly sitemap.
-    const searches = await Promise.allSettled(
-      this.searchQueries.map((q) => this._searchOnce(q)),
-    );
+    //
+    // ROTATED, not fanned out. This used to fire every query at once, which was 4 simultaneous
+    // requests when the shared list held 4. The list is now 13, and firing all of them every 5s
+    // is 2.6 req/s delivered as a 13-connection burst — against ONE address, because
+    // getNextIspProxy pins this adapter to a single sticky exit rather than spreading it. More
+    // exits do not divide that; only sending fewer at a time does. "Failed to connect to the
+    // server", which is how this store has been failing, is what a gateway does to a caller
+    // opening connections faster than it wants, so this is not a theoretical limit.
+    //
+    // A rotating slice keeps the per-poll load where it was proven, and every query still runs
+    // — just spread over ceil(13/N) polls instead of all at once.
+    const batch = [];
+    for (let i = 0; i < QUERIES_PER_POLL && i < this.searchQueries.length; i++) {
+      batch.push(this.searchQueries[this._queryCursor % this.searchQueries.length]);
+      this._queryCursor = (this._queryCursor + 1) % this.searchQueries.length;
+    }
+
+    const searches = await Promise.allSettled(batch.map((q) => this._searchOnce(q)));
     let okQueries = 0;
     for (let i = 0; i < searches.length; i++) {
       if (searches[i].status !== 'fulfilled') {
-        logger.warn(`Costco: search failed for "${this.searchQueries[i]}": ${searches[i].reason.message}`);
+        logger.warn(`Costco: search failed for "${batch[i]}": ${searches[i].reason.message}`);
         continue;
       }
       okQueries++;
       for (const product of searches[i].value) products[product.sku] = product;
     }
-    this.reportFreshness(okQueries, this.searchQueries.length);
+    this.reportFreshness(okQueries, batch.length);
 
     // Safety net: the sitemap still catches anything no query surfaces, and watchlisted IDs
     // still need their product page because search cannot see an item before it is listed.
