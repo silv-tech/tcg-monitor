@@ -217,18 +217,49 @@ describe('adapter enrichment trigger', () => {
     assert.strictEqual(a._storesRunning, false, 'a no-op must not leave the guard latched');
   });
 
-  test('a catalogue with in-stock products does start a pass', () => {
+  test('a catalogue with products does start a pass', () => {
+    const scraperApi = require('../src/utils/scraper-api');
+    const wasConfigured = scraperApi.isConfigured;
+    const wasFetch = scraperApi.scraperFetch;
+    scraperApi.isConfigured = () => true;
+    scraperApi.scraperFetch = async () => JSON.stringify({ isSuccess: true, errors: [], data: [] });
+    try {
+      const a = adapter();
+      a._known.set('L1', { sku: 'L1', url: 'https://x/p/L1', inStock: true });
+      a._maybeEnrichStores();
+      assert.ok(a._storesAt > 0, 'a real pass must stamp the clock so it is not repeated every poll');
+    } finally {
+      scraperApi.isConfigured = wasConfigured;
+      scraperApi.scraperFetch = wasFetch;
+    }
+  });
+
+  // This used to assert the opposite — that an out-of-stock catalogue was a no-op. That was the
+  // bug: London Drugs is pickup-only, so shelf stock is independent of the website, and the two
+  // 30th Celebration SKUs we missed had no online stock and no product page at all.
+  test('an OUT-OF-STOCK catalogue still starts a pass — shelf stock is independent of the website', () => {
+    const scraperApi = require('../src/utils/scraper-api');
+    const wasConfigured = scraperApi.isConfigured;
+    const wasFetch = scraperApi.scraperFetch;
+    scraperApi.isConfigured = () => true;
+    scraperApi.scraperFetch = async () => JSON.stringify({ isSuccess: true, errors: [], data: [] });
+    try {
+      const a = adapter();
+      a._known.set('L1', { sku: 'L1', url: null, inStock: false });
+      a._maybeEnrichStores();
+      assert.ok(a._storesAt > 0,
+        'skipping these is exactly how in-store-only drops went unnoticed');
+    } finally {
+      scraperApi.isConfigured = wasConfigured;
+      scraperApi.scraperFetch = wasFetch;
+    }
+  });
+
+  test('with no scraper transport the pass is skipped and the clock is kept', () => {
     const a = adapter();
     a._known.set('L1', { sku: 'L1', url: 'https://x/p/L1', inStock: true });
     a._maybeEnrichStores();
-    assert.ok(a._storesAt > 0, 'a real pass must stamp the clock so it is not repeated every poll');
-  });
-
-  test('out-of-stock-only catalogues are also a no-op that keeps the clock', () => {
-    const a = adapter();
-    a._known.set('L1', { sku: 'L1', url: 'https://x/p/L1', inStock: false });
-    a._maybeEnrichStores();
-    assert.strictEqual(a._storesAt, 0);
+    assert.strictEqual(a._storesAt, 0, 'a pass that cannot run must not burn the interval');
   });
 });
 

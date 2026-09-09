@@ -98,7 +98,11 @@ function parseStoreResponse(text) {
 function storesWithStock(stores) {
   return (stores || [])
     .filter((s) => s && s.stockAvailable > 0)
-    .sort((a, b) => (a.distanceM ?? Infinity) - (b.distanceM ?? Infinity));
+    // Distance first where we have it (the server-action path). The plain-GET inventory path has
+    // no geography at all, so every row ties on Infinity — there the tiebreak decides, and naming
+    // the store holding the MOST units is the useful answer rather than the lowest store number.
+    .sort((a, b) => ((a.distanceM ?? Infinity) - (b.distanceM ?? Infinity))
+      || (b.stockAvailable - a.stockAvailable));
 }
 
 /**
@@ -235,6 +239,86 @@ function createBrightDataSession(seedUrl) {
   };
 }
 
+
+// ─── Plain-GET inventory (replaces the server action) ────────────────────────
+//
+// The site never calls this endpoint itself — it drives store stock through a Next.js server
+// action needing a `Next-Action` header, which ScraperAPI cannot send (keep_headers=true 500s on
+// this domain) and which needed a Bright Data browser session. This does the same job with one
+// header-free GET, so it works through the same fetcher every other London Drugs call uses.
+//
+// The `locationCodes` parameter is what makes it usable. WITHOUT it the response is capped at 50
+// rows — store codes 002..056 — silently hiding 28 stores including all of Saskatchewan and
+// Manitoba. Measured on L3445613: 46 stores in stock nationally, 17 of them above the cap holding
+// 924 of 2,628 units. A third of the country's stock was invisible. The SINGULAR `locationCode`
+// is ignored by the endpoint, which is why an earlier probe concluded the cap was immovable.
+const STORE_MAP = require('../config/ld-stores.json').stores;
+const ALL_LOCATION_CODES = Object.keys(STORE_MAP).sort();
+
+function buildInventoryUrl(productCode, codes) {
+  const list = (codes && codes.length ? codes : ALL_LOCATION_CODES).join(',');
+  return `https://www.londondrugs.com/api/product/${productCode}/inventory?locationCodes=${list}`;
+}
+
+/**
+ * Turn an inventory response into store rows.
+ *
+ * A locationCode we have no store for keeps its stock but gets NO name — it still counts toward
+ * the totals, and it can never render as the wrong shop. Silently dropping it would understate
+ * national stock; guessing a name is worse than showing none.
+ */
+function parseInventoryRows(payload) {
+  let json = payload;
+  if (typeof json === 'string') {
+    try { json = JSON.parse(json); } catch { return []; }
+  }
+  const rows = json && Array.isArray(json.data) ? json.data : null;
+  if (!rows) return [];
+
+  const out = [];
+  for (const r of rows) {
+    if (!r || typeof r !== 'object' || !r.locationCode) continue;
+    const qty = Number(r.stockAvailable);
+    const store = STORE_MAP[r.locationCode] || null;
+    out.push({
+      code: r.locationCode,
+      name: store ? store.name : null,
+      distanceM: null,                       // this endpoint has no geography
+      stockAvailable: Number.isFinite(qty) ? qty : 0,
+      address1: store ? store.address1 : '',
+      city: store ? store.city : '',
+      province: store ? store.province : '',
+      postal: store ? store.postal : '',
+      phone: '',
+    });
+  }
+  return out;
+}
+
+/**
+ * Fetch per-store stock for one product code.
+ *
+ * `fetcher` is injected so this module never owns a transport: the adapter passes the same
+ * ScraperAPI-backed fetch it uses everywhere else, and the tests drive it with no network.
+ * Returns [] on any failure — a lookup that failed must leave the previous state alone rather
+ * than read as "no stock anywhere".
+ */
+async function fetchInventory(productCode, opts = {}) {
+  const { fetcher, codes } = opts;
+  if (!productCode || typeof fetcher !== 'function') return [];
+  try {
+    const body = await fetcher(buildInventoryUrl(productCode, codes));
+    return parseInventoryRows(body);
+  } catch {
+    return [];
+  }
+}
+
+/** Total units across every store, used for the 0 -> in-stock transition. */
+function totalUnits(rows) {
+  return (rows || []).reduce((sum, r) => sum + (r && r.stockAvailable > 0 ? r.stockAvailable : 0), 0);
+}
+
 module.exports = {
   createBrightDataSession,
   parseStoreResponse,
@@ -242,6 +326,12 @@ module.exports = {
   formatStoreField,
   buildActionRequest,
   fetchStoreAvailability,
+  buildInventoryUrl,
+  parseInventoryRows,
+  fetchInventory,
+  totalUnits,
+  ALL_LOCATION_CODES,
+  STORE_MAP,
   ACTION_ID,
   POSTAL_CODES,
 };

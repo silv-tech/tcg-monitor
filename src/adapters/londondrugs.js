@@ -2,7 +2,9 @@ const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const scraperApi = require('../utils/scraper-api');
 const storeAvail = require('../utils/ld-store-availability');
+const discovery = require('../utils/ld-discovery');
 const state = require('../core/state');
+const { sleep } = require('../utils/helpers');
 
 /**
  * London Drugs — Next.js App Router storefront behind DataDome.
@@ -55,6 +57,16 @@ const STORE_ENRICH_FLOOR = 10 * 60 * 1000;
 // standard here is that a wrong value is worse than a missing one. The cap is a sanity bound
 // against a pathological response, not a display limit: 40 rows is roughly 8KB per product.
 const STORE_ROWS_KEPT = 40;
+
+// Discovery cadence and reach. Codes land before stock does, so this is deliberately unhurried:
+// 200 codes twice a day settles the frontier far faster than London Drugs issues new SKUs, and
+// settled codes are never re-probed.
+const DISCOVERY_DEFAULT = 12 * 60 * 60 * 1000;
+const DISCOVERY_FLOOR = 60 * 60 * 1000;
+const DISCOVERY_BATCH = Number(process.env.LD_DISCOVERY_BATCH || 200);
+// Highest code observed on 2026-09-09. Only ever moves forward, and is overridden by the
+// persisted frontier as soon as one exists.
+const DISCOVERY_START = process.env.LD_DISCOVERY_START || 'L3445540';
 
 const GAME_NAMES = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
 const PRODUCT_FORMS = [
@@ -177,6 +189,9 @@ class LondonDrugsAdapter extends BaseAdapter {
     this._lastSweepAt = 0;
     this._sweepRunning = false;
     this._stores = new Map();        // sku -> store rows with stock, from the enrichment pass
+    this._hidden = new Set();        // in-store-only codes found by discovery
+    this._discoveryAt = 0;
+    this._discoveryRunning = false;
     this._storesAt = 0;
     this._storesRunning = false;
     this._deriveTiming();
@@ -185,6 +200,8 @@ class LondonDrugsAdapter extends BaseAdapter {
   _deriveTiming() {
     this.sweepIntervalMs = this.timingValue('sweepIntervalMs', SWEEP_INTERVAL_DEFAULT, SWEEP_INTERVAL_FLOOR);
     this.storeEnrichIntervalMs = this.timingValue('storeEnrichIntervalMs', STORE_ENRICH_DEFAULT, STORE_ENRICH_FLOOR);
+    this.discoveryIntervalMs = this.timingValue('discoveryIntervalMs', DISCOVERY_DEFAULT, DISCOVERY_FLOOR);
+    this.discoveryBatch = DISCOVERY_BATCH;
   }
 
   applyTiming(timing) {
@@ -323,37 +340,173 @@ class LondonDrugsAdapter extends BaseAdapter {
   _maybeEnrichStores() {
     const due = Date.now() - this._storesAt >= this.storeEnrichIntervalMs;
     if (!due || this._storesRunning) return;
+    if (!scraperApi.isConfigured()) return;   // no transport — alerts simply omit the store
 
-    // Work out the targets BEFORE stamping the clock. This runs at the top of the poll, so on
-    // the first pass after a restart the catalogue is still empty — stamping first meant that
-    // empty pass consumed the whole 30-minute interval and store data never appeared at all.
-    const targets = [...this._known.values()].filter((p) => p.inStock && p.url)
-      .map((p) => ({ sku: p.sku, url: p.url }));
-    if (targets.length === 0) return; // nothing to enrich yet — try again next poll
-
-    // Seed the session on a PRODUCT page, never the homepage. Next.js server actions are
-    // route-scoped: posting one from the wrong route returns a different payload entirely,
-    // which parsed into rows that had no stockAvailable and therefore no stock. It logged a
-    // confident "9/9 products" while producing nothing usable.
-    const openSession = storeAvail.createBrightDataSession(targets[0].url);
-    if (!openSession) return; // no browser endpoint configured — alerts simply omit the store
+    // EVERY tracked product, not just the online-in-stock ones. The old pass filtered on
+    // `p.inStock && p.url`, which is exactly backwards for shelf stock: London Drugs is
+    // pickup-only, and a product can read 0 online while sitting in 28 stores. That filter is
+    // also why in-store-only items could never be covered — they have no product URL at all.
+    // Hidden codes are watched alongside the published catalogue. They ARE the point: a code
+    // exists before its shipment lands, so watching it is how the drop is caught at all.
+    const targets = [...new Set([
+      ...[...this._known.values()].filter((p) => p && p.sku).map((p) => p.sku),
+      ...this._hidden,
+    ])];
+    if (targets.length === 0) return;         // catalogue still empty — try again next poll
 
     this._storesRunning = true;
     this._storesAt = Date.now();
 
-    storeAvail.fetchStoreAvailability(targets, { openSession })
-      .then((map) => {
-        let kept = 0;
-        for (const [sku, rows] of map) {
-          const withStock = storeAvail.storesWithStock(rows).slice(0, STORE_ROWS_KEPT);
-          if (withStock.length) { this._stores.set(sku, withStock); kept++; }
-          else this._stores.delete(sku);
+    const fetcher = (url) => scraperApi.scraperFetch(url, {
+      ...SCRAPER_OPTS, retailerId: this.id, minIntervalMs: 0, timeoutMs: 45000,
+    });
+
+    (async () => {
+      let kept = 0;
+      let failed = 0;
+      for (const sku of targets) {
+        const rows = await storeAvail.fetchInventory(sku, { fetcher });
+        // [] means the lookup failed OR the product genuinely has no stock anywhere, and those
+        // must not be treated alike: overwriting on failure would drop every store from the
+        // alert the moment one request 403s. Only a response we actually parsed rewrites state.
+        if (rows.length === 0) { failed++; continue; }
+        const withStock = storeAvail.storesWithStock(rows).slice(0, STORE_ROWS_KEPT);
+        if (withStock.length) { this._stores.set(sku, withStock); kept++; }
+        else this._stores.delete(sku);
+
+        // An in-store-only code that has landed in force: report it once, for a human to
+        // confirm before it can reach the client channel.
+        if (this._hidden.has(sku) && discovery.isAlertworthy(rows)) {
+          await this._queueCandidate(sku, rows);
         }
-        logger.info(`${this.name}: store data kept for ${kept}/${map.size} product(s)`);
-        return this._saveStores();
-      })
+        await sleep(250 + Math.floor(Math.random() * 250));
+      }
+      logger.info(`${this.name}: store stock kept for ${kept}/${targets.length} product(s)`
+        + (failed ? ` (${failed} lookup(s) returned nothing)` : ''));
+      await this._saveStores();
+    })()
       .catch((err) => logger.warn(`${this.name}: store enrichment failed: ${err.message}`))
       .finally(() => { this._storesRunning = false; });
+  }
+
+  // ─── Discovery of in-store-only (hidden) product ───────────────────────────
+  //
+  // London Drugs ships TCG to shelves without publishing it online. Those codes are absent from
+  // the category, from every sitemap, and have no product page — so the only way to find them is
+  // to walk the code space. One request settles a code, and settled codes are never re-probed,
+  // so this costs a few hundred requests a day and shrinks as the map fills in.
+  //
+  // Codes are provisioned BEFORE stock lands (two 30th Celebration SKUs existed with zero units
+  // everywhere), so discovery does not need to be fast — it only has to happen before the
+  // shipment. Monitoring is what needs to be prompt, and that is the inventory pass.
+
+  get _discoveryKey() { return `tcg:discovery:${this.id}`; }
+
+  async _loadDiscovery() {
+    const empty = { frontier: DISCOVERY_START, resolved: {}, reported: {} };
+    try {
+      const redis = state.getRedis();
+      if (!redis) return empty;
+      const raw = await redis.get(this._discoveryKey);
+      if (!raw) return empty;
+      const d = JSON.parse(raw);
+      return {
+        frontier: d.frontier || DISCOVERY_START,
+        resolved: d.resolved && typeof d.resolved === 'object' ? d.resolved : {},
+        reported: d.reported && typeof d.reported === 'object' ? d.reported : {},
+      };
+    } catch { return empty; }
+  }
+
+  async _saveDiscovery(d) {
+    try {
+      const redis = state.getRedis();
+      if (!redis) return;
+      await redis.set(this._discoveryKey, JSON.stringify(d));
+    } catch (err) {
+      logger.warn(`${this.name}: could not persist discovery state: ${err.message}`);
+    }
+  }
+
+  /** Hidden codes we have found, so the inventory pass watches them for stock landing. */
+  hiddenCodes() { return [...this._hidden]; }
+
+  _maybeDiscover() {
+    const due = Date.now() - this._discoveryAt >= this.discoveryIntervalMs;
+    if (!due || this._discoveryRunning) return;
+    if (!scraperApi.isConfigured()) return;
+
+    this._discoveryRunning = true;
+    this._discoveryAt = Date.now();
+
+    (async () => {
+      const d = await this._loadDiscovery();
+      const batch = discovery.nextScanBatch(d.frontier, d.resolved, this.discoveryBatch);
+      if (batch.length === 0) { return; }
+
+      let found = 0;
+      let settled = 0;
+      for (const code of batch) {
+        let body;
+        try {
+          body = await scraperApi.scraperFetch(discovery.productUrl(code), {
+            ...SCRAPER_OPTS, retailerId: this.id, minIntervalMs: 0, timeoutMs: 30000,
+          });
+        } catch { body = null; }
+
+        const { klass } = discovery.classifyProductResponse(body);
+        // UNKNOWN is not recorded. A transient origin 500 ran at ~1% during measurement, and
+        // writing that down as "never issued" would permanently skip a real product.
+        if (klass === discovery.CLASS.UNKNOWN) continue;
+
+        d.resolved[code] = klass;
+        settled++;
+        if (klass === discovery.CLASS.HIDDEN) { this._hidden.add(code); found++; }
+        // A VISIBLE code needs nothing here: the category poll already finds published product.
+
+        const n = discovery.codeNumber(code);
+        if (n && n > discovery.codeNumber(d.frontier)) d.frontier = code;
+        await sleep(200 + Math.floor(Math.random() * 200));
+      }
+
+      await this._saveDiscovery(d);
+      logger.info(`${this.name}: DISCOVERY — probed ${batch.length}, settled ${settled}, `
+        + `${found} new hidden code(s), frontier ${d.frontier}, ${this._hidden.size} hidden tracked`);
+    })()
+      .catch((err) => logger.warn(`${this.name}: discovery failed: ${err.message}`))
+      .finally(() => { this._discoveryRunning = false; });
+  }
+
+  /**
+   * A hidden code that has landed in force is worth a human's eyes.
+   *
+   * It goes to the ADMIN queue, never straight to the client channel: a hidden code carries no
+   * name from any endpoint, and hidden does not mean Pokemon — one window turned up a NETGEAR
+   * switch and a bag of marshmallows. The stock screen removes those, but n=7 is not enough to
+   * put an unnamed product in front of paying members on its own.
+   */
+  async _queueCandidate(code, rows) {
+    const d = await this._loadDiscovery();
+    if (d.reported[code]) return false;
+    const { stores, units } = discovery.stockShape(rows);
+    try {
+      const redis = state.getRedis();
+      if (!redis) return false;
+      await redis.rpush('tcg:ld:candidates', JSON.stringify({
+        code, stores, units, at: Date.now(),
+        image: discovery.imageUrl(code),
+        url: `https://www.londondrugs.com/api/product/${code}/inventory`,
+        top: storeAvail.storesWithStock(rows).slice(0, 5)
+          .map((r) => ({ name: r.name, city: r.city, qty: r.stockAvailable })),
+      }));
+      d.reported[code] = Date.now();
+      await this._saveDiscovery(d);
+      logger.info(`${this.name}: NEW IN-STORE CANDIDATE ${code} — ${units} units across ${stores} store(s)`);
+      return true;
+    } catch (err) {
+      logger.warn(`${this.name}: could not queue candidate ${code}: ${err.message}`);
+      return false;
+    }
   }
 
   /** Wide sweep — replaces the catalogue so delisted products actually disappear. */
@@ -391,6 +544,7 @@ class LondonDrugsAdapter extends BaseAdapter {
     }
 
     this._maybeEnrichStores();
+    this._maybeDiscover();
 
     const html = await this._fetchCategory(FAST_PATH);
     const found = this._toProducts(html);

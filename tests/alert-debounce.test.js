@@ -25,6 +25,11 @@ health.getZeroProductPolls = () => new Map();
 health.getComposition = () => ({});
 health.persistComposition = async () => {};
 
+// alerts.js now drains the London Drugs in-store candidate queue, which reaches for Redis.
+// These tests are about health paging, so keep Redis out of the process entirely.
+const state = require('../src/core/state');
+state.getRedis = () => null;
+
 const config = require('../src/config');
 config.discord = { ...config.discord, adminChannelId: 'admin-chan', adminUserId: 'u1' };
 
