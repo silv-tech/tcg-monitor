@@ -94,7 +94,7 @@ const ADAPTER_MAP = {
 // The cadence rule itself lives in core/shop-tiers.js so it can be tested: index.js calls
 // main() on load and therefore cannot be required from a test, which is why the rule went
 // weeks silently reverting deliberate per-shop slowdowns with nothing covering it.
-const { clampShopInterval } = require('./core/shop-tiers');
+const { clampShopInterval, shopTiers } = require('./core/shop-tiers');
 
 async function main() {
   logger.info('Nocturne Monitors starting...');
@@ -222,7 +222,7 @@ async function main() {
   if (clamped.length > 0) {
     logger.info(
       `Shop cadence: ${clamped.length} shop(s) set by measured listing activity — `
-      + Object.entries(SHOP_TIERS)
+      + Object.entries(shopTiers())
         .map(([t, v]) => `${t} ${v.intervalMs}ms x${clamped.filter(r => r._tier === t).length}`)
         .join(', ')
       + '. Bounded by the shared Shopify budget; the big six are unaffected.',
