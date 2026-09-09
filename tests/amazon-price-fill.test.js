@@ -162,3 +162,52 @@ describe('amazon price-fill: the trigger is reachable from real search HTML', ()
     assert.ok(!(products[priceless.asin].price > 0));
   });
 });
+
+/**
+ * The follow-on fault, found by asking what happens on the NEXT poll.
+ *
+ * _buildFromSearch set inStock straight from the tile. A priceless tile reports false, so the
+ * poll after a successful price-fill overwrote AOD's true with false; the item was no longer
+ * queued for a lookup (it had a cached price by then), and the five-minute AOD sweep flipped it
+ * back to true. Restock, out-of-stock, restock — a flap on a paid channel, which is worse than
+ * the silent miss it replaced.
+ */
+describe('amazon price-fill: a resolved item stays resolved', () => {
+  test('a second poll on the same priceless tile does not flip it out of stock', async () => {
+    const a = adapter();
+    a._freeSearch = async () => [item()];
+    a._stealthCheckAsin = async () => ({ name: 'x', price: 39.95, inStock: true, olid: 'o' });
+
+    const first = {};
+    await a._runDiscovery(first);
+    assert.strictEqual(first['B0GW2DK37Q'].inStock, true, 'precondition: the fill worked');
+
+    // Same tile again: still no price shown, and now no lookup because the price is cached.
+    const checked = [];
+    a._stealthCheckAsin = async (asin) => { checked.push(asin); return null; };
+    const second = {};
+    await a._runDiscovery(second);
+
+    assert.strictEqual(checked.length, 0, 'cached price means no second lookup');
+    assert.strictEqual(second['B0GW2DK37Q'].inStock, true, 'must not flap back to out of stock');
+    assert.strictEqual(second['B0GW2DK37Q'].price, 39.95);
+  });
+
+  test('a tile that never resolved stays out of stock', async () => {
+    const a = adapter();
+    a._freeSearch = async () => [item()];
+    a._stealthCheckAsin = async () => null;
+    const products = {};
+    await a._runDiscovery(products);
+    assert.strictEqual(products['B0GW2DK37Q'].inStock, false, 'unknown is not in stock');
+  });
+
+  test('a real tile that says "unavailable" is still out of stock', async () => {
+    const a = adapter();
+    a._freeSearch = async () => [item({ _priceUnknown: false, inStock: false, price: null })];
+    a._stealthCheckAsin = async () => ({ name: 'x', price: 10, inStock: true, olid: 'o' });
+    const products = {};
+    await a._runDiscovery(products);
+    assert.strictEqual(products['B0GW2DK37Q'].inStock, false, 'an explicit OOS tile is believed');
+  });
+});

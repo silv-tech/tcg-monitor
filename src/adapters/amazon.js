@@ -595,8 +595,14 @@ class AmazonAdapter extends BaseAdapter {
       currency: 'CAD',
       url: `https://www.amazon.ca/dp/${item.asin}`,
       image: item.image || cached.image || '',
-      inStock: item.inStock,
-      canAddToCart: item.inStock,
+      // A tile with no price carries NO stock signal, so it must not assert "out of stock"
+      // over what AOD established from a real buy box. Without this guard the poll right after
+      // a successful price-fill overwrote inStock:true with false; the item was no longer
+      // queued for a lookup (it now had a cached price), and the five-minute AOD sweep flipped
+      // it back — producing alert, out-of-stock, alert, on a loop. A tile that knows nothing
+      // must say nothing, and an item never resolved simply stays false as before.
+      inStock: item._priceUnknown ? (cached.inStock ?? false) : item.inStock,
+      canAddToCart: item._priceUnknown ? (cached.canAddToCart ?? false) : item.inStock,
       shipsToHome: true,
       lastSeen: Date.now(),
     });
