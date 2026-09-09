@@ -133,3 +133,50 @@ describe('sweep cursor survives a restart', () => {
     assert.strictEqual(a._sweepCursor, 12);
   });
 });
+
+/**
+ * The sweep must stop exploring pages the shop does not have.
+ *
+ * maxProducts is a CEILING from config, not a measurement: 25000 implies 100 pages while the
+ * real catalogue is nearer 64. The explorer already detected the end — but only used it to wrap
+ * its own cursor, never to shrink the search space. So the sweep kept spending its ten slots on
+ * pages that have never existed, and at ten pages per run a 100-page space takes ten sweeps
+ * (3+ hours) to map. That cold-read burst is what earns the 429s.
+ */
+describe('sweep search space is capped at the observed end of the catalogue', () => {
+  test('before anything is known, the config ceiling is used', () => {
+    const a = shop();
+    assert.strictEqual(a._knownLastPage, 0);
+    const { pages } = a._selectSweepPages(100, 10);
+    assert.strictEqual(pages.length, 10, 'a shop of unknown size still gets mapped');
+  });
+
+  test('once the end is known, exploration stops one page past it', async () => {
+    const a = shop();
+    a._knownLastPage = 12;
+    // Everything inside the real catalogue is already known and barren.
+    const now = Date.now();
+    for (let p = 1; p <= 13; p++) a._pageYield.set(String(p), { n: 0, at: now });
+    const { pages } = a._selectSweepPages(13, 10);   // 13 = knownLastPage + 1
+    assert.ok(pages.every((p) => p <= 13),
+      `must not explore beyond the catalogue — got ${pages.join(',')}`);
+  });
+
+  test('the known end survives a restart', async () => {
+    const before = shop();
+    before._knownLastPage = 41;
+    await before._saveSweepCursor();
+    const after = shop();
+    await after._loadSweepCursor();
+    assert.strictEqual(after._knownLastPage, 41,
+      'a restart must not go back to exploring the config ceiling');
+  });
+
+  test('a payload without lastPage still loads (older builds)', async () => {
+    store.set('tcg:sweepcursor:infinitycards', JSON.stringify({ cursor: 3, handles: {}, yield: {} }));
+    const a = shop();
+    await a._loadSweepCursor();
+    assert.strictEqual(a._knownLastPage, 0, 'unknown, so fall back to the ceiling');
+    assert.strictEqual(a._sweepCursor, 3);
+  });
+});

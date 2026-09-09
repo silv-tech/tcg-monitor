@@ -242,6 +242,7 @@ class ShopifyAdapter extends BaseAdapter {
     this.searchTerms = config.searchTerms || SEARCH_TERMS;
     this._handleToSku = new Map();
     this._pageYield = new Map();   // page -> { n: in-scope found there, at: when }
+    this._knownLastPage = 0;       // last page the explorer proved exists (0 = not yet known)
     // Read one collection per poll instead of all of them, for shops that refuse more than
     // one request per poll. Off unless the shop config asks for it.
     this.rotateCollections = config.rotateCollections === true;
@@ -922,7 +923,16 @@ class ShopifyAdapter extends BaseAdapter {
   async fetchAllProducts(products) {
     await this._loadSweepCursor();
     this._sweepRateLimited = false;   // describes THIS run only
-    const maxPages = Math.max(1, Math.ceil(this.maxProducts / this.pageLimit));
+    // maxProducts is a CEILING from config, not a measurement: 25000 implies 100 pages while
+    // the real catalogue is nearer 64. The sweep spent its budget exploring pages that have
+    // never existed, and with ten pages per run a 100-page space takes ten sweeps (3+ hours) to
+    // map — which is why the cold-read burst that earns the 429s persisted. Once the explorer
+    // has actually seen where the catalogue ends, look one page past it and no further; that
+    // one page is what notices the shop growing.
+    const configuredMax = Math.max(1, Math.ceil(this.maxProducts / this.pageLimit));
+    const maxPages = this._knownLastPage
+      ? Math.min(configuredMax, this._knownLastPage + 1)
+      : configuredMax;
     const { pages: plan, explore } = this._selectSweepPages(maxPages, this._sweepPages);
     let pagesRead = 0;
     let reachedEnd = false;
@@ -983,7 +993,7 @@ class ShopifyAdapter extends BaseAdapter {
       if (!data.products || data.products.length === 0) {
         // Only the sequential explorer proves where the catalogue ends. A productive page
         // coming back empty just means its contents shifted.
-        if (page === explore) reachedEnd = true;
+        if (page === explore) { reachedEnd = true; this._knownLastPage = Math.max(1, page - 1); }
         this._pageYield.set(String(page), { n: 0, at: Date.now() });
         continue;
       }
@@ -1008,7 +1018,7 @@ class ShopifyAdapter extends BaseAdapter {
 
       pagesRead++;
       // A short page is the last one the shop has.
-      if (page === explore && data.products.length < this.pageLimit) reachedEnd = true;
+      if (page === explore && data.products.length < this.pageLimit) { reachedEnd = true; this._knownLastPage = page; }
     }
 
     // The explorer advances one page per sweep and wraps at the end.
@@ -1064,6 +1074,9 @@ class ShopifyAdapter extends BaseAdapter {
         for (const [h, sku] of Object.entries(saved.handles)) this._handleToSku.set(h, sku);
       }
       if (Number.isFinite(saved.priceAgreements)) this._searchPriceAgreements = saved.priceAgreements;
+      // Where the catalogue actually ends. Without this a restart goes back to exploring the
+      // config ceiling, which is the whole 100-page space again.
+      if (Number.isFinite(saved.lastPage) && saved.lastPage >= 1) this._knownLastPage = saved.lastPage;
       // Which pages hold product. Without this the sweep relearns the whole catalogue after
       // every deploy, spending its budget on empty pages while tracked products go stale.
       if (saved.yield && typeof saved.yield === 'object') {
@@ -1099,6 +1112,7 @@ class ShopifyAdapter extends BaseAdapter {
       }
       const payload = JSON.stringify({
         cursor: this._sweepCursor,
+        lastPage: this._knownLastPage || 0,
         handles,
         yield: productive,
         barren,
