@@ -100,6 +100,7 @@ class AmazonAdapter extends BaseAdapter {
     this._searchWindow = [];         // rolling free-search success
     this._searchSkip = 0;
     this._queryCursor = 0;
+    this._newestCursor = 0;   // independent walk for the newest-first probe
     this._searchStrikes = 0;
     this._searchBlockedUntil = 0;
     this._lastAodSweepAt = 0;
@@ -409,12 +410,21 @@ class AmazonAdapter extends BaseAdapter {
 
     const batch = [];
     for (let i = 0; i < QUERIES_PER_POLL && i < this.searchQueries.length; i++) {
-      batch.push(this.searchQueries[this._queryCursor % this.searchQueries.length]);
+      batch.push({ query: this.searchQueries[this._queryCursor % this.searchQueries.length], newest: false });
       this._queryCursor = (this._queryCursor + 1) % this.searchQueries.length;
     }
 
+    // One extra probe per poll, newest-first, walking the query list on its own cursor. This is
+    // the only path that sees a listing before it earns relevance ranking, and it costs one
+    // request: at four queries over eight exits that is 0.083 -> 0.104 req/s per exit, still
+    // six times under the rate that blocked this IP.
+    if (this.searchQueries.length > 0) {
+      batch.push({ query: this.searchQueries[this._newestCursor % this.searchQueries.length], newest: true });
+      this._newestCursor = (this._newestCursor + 1) % this.searchQueries.length;
+    }
+
     const results = await Promise.allSettled(
-      batch.map(query => this._freeSearch(query).then(items => ({ query, items })))
+      batch.map(({ query, newest }) => this._freeSearch(query, newest).then(items => ({ query, items })))
     );
 
     let hits = 0;
@@ -494,7 +504,7 @@ class AmazonAdapter extends BaseAdapter {
       this._searchBlockedUntil = 0;
     }
 
-    logger.info(`Amazon: SEARCH — ${hits}/${batch.length} queries (${batch.join(', ')}), ${found} results, ${this._knownProducts.size} known ASINs ($0)`);
+    logger.info(`Amazon: SEARCH — ${hits}/${batch.length} queries (${batch.map(b => b.newest ? b.query + ' [newest]' : b.query).join(', ')}), ${found} results, ${this._knownProducts.size} known ASINs ($0)`);
   }
 
   /**
@@ -503,8 +513,15 @@ class AmazonAdapter extends BaseAdapter {
    * for up to half an hour. Plain search returns ASIN, title, price and stock for ~40
    * products per query and is not gated, so this can run on every poll for nothing.
    */
-  async _freeSearch(query) {
-    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys`;
+  async _freeSearch(query, newestFirst = false) {
+    // Amazon's default sort is RELEVANCE, and a brand-new listing has no traction yet, so it
+    // does not rank — which is how three "30th Celebration" products were listed, sold out and
+    // gone before we ever saw one. Measured 2026-09-09 on the same query: the newest-first sort
+    // returned 24 tiles of which 23 do not appear in relevance results at all. Almost no
+    // overlap, so this is not a marginal gain — it is a different view of the catalogue, and it
+    // is the one where a new listing appears immediately.
+    const sort = newestFirst ? '&s=date-desc-rank' : '';
+    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys${sort}`;
 
     // Spread across this retailer's ISP exits, and never fall back to residential.
     //

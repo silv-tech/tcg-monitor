@@ -65,8 +65,24 @@ const NON_TCG_KEYWORDS = [
   'sorry!', 'skip-bo', 'skip bo', 'skipbo', 'sequence', 'apples to apples',
 ];
 
+/**
+ * Sealed product forms that must WIN over a generic exclusion word.
+ *
+ * 'poster collection' is listed in TCG_KEYWORDS and 'poster ' in NON_TCG_KEYWORDS, and because
+ * the exclusion is tested first it always won — so "Pokemon TCG: 30th Celebration Poster
+ * Collection" was rejected as merchandise. It is not merchandise: it is a sealed box of packs
+ * with a promo, it was BUYABLE on amazon.ca at $27.99 while we ignored it, and a competitor
+ * alerted on it. scope.js already treats poster/sticker collections as sealed forms; this is
+ * the same rule applied to the older list the two disagreed on.
+ *
+ * A bare "Charizard Wall Poster" still has no sealed form in it and stays excluded.
+ */
+const SEALED_FORM_RESCUE = ['poster collection', 'sticker collection'];
+
 function isTCGProduct(name) {
   const lower = name.toLowerCase();
+  // A named sealed form settles it, whatever else the title happens to contain.
+  if (SEALED_FORM_RESCUE.some(kw => lower.includes(kw))) return true;
   // Explicit non-TCG trumps everything
   if (NON_TCG_KEYWORDS.some(kw => lower.includes(kw))) return false;
   // Must contain at least one TCG keyword
