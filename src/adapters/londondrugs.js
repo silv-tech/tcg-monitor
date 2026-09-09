@@ -44,8 +44,9 @@ const SCRAPER_OPTS = { render: false, premium: false, ultraPremium: false };
 const IMAGE_BASE = process.env.LD_IMAGE_BASE
   || 'https://cdn-tp2.mozu.com/28945-m4/cms/files';
 
-// Store enrichment cadence. Each pass costs one Bright Data browser session, so the floor is
-// deliberately high — this is background colour on an alert, not a detection path.
+// Store enrichment cadence. One plain GET per tracked product, so a pass costs one ScraperAPI
+// credit per product — cheap, but not free. Shelf stock at a pickup-only chain is not a
+// checkout race, so the floor keeps a misconfigured interval from becoming a credit sink.
 const STORE_ENRICH_DEFAULT = 30 * 60 * 1000;
 const STORE_ENRICH_FLOOR = 10 * 60 * 1000;
 // Enough to name the nearest store and count the rest without bloating every Redis row.
@@ -53,10 +54,13 @@ const STORE_ENRICH_FLOOR = 10 * 60 * 1000;
 //
 // This was 5, and the embed's "+N other stores in stock" is derived from what is kept — so a
 // product in stock at 16 stores advertised "+4". Understating is still a wrong number, and the
-// standard here is that a wrong value is worse than a missing one. The cap is a sanity bound
-// against a pathological response, not a display limit: 40 rows is roughly 8KB per product.
-const STORE_ROWS_KEPT = 40;
-
+// standard here is that a wrong value is worse than a missing one.
+//
+// It was then 40, which was still short: on 2026-09-09 the Pitch Black Sleeved Booster was in
+// stock at 69 stores and the embed advertised "+39 other stores". The cap is a sanity bound
+// against a pathological response, not a display limit, so the honest bound is the number of
+// stores that exist — past that, a response is malformed rather than merely large.
+const STORE_ROWS_KEPT = storeAvail.ALL_LOCATION_CODES.length;
 
 const GAME_NAMES = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
 const PRODUCT_FORMS = [
@@ -317,21 +321,24 @@ class LondonDrugsAdapter extends BaseAdapter {
   /**
    * Refresh per-store availability in the background, on a slow timer.
    *
-   * Never awaited by the poll. A lookup costs a Bright Data browser session — measured 22.1s to
-   * open plus ~1.5-4s per product — so it is far too slow to sit in front of an alert, and it is
-   * billed per GB. Only in-stock products are looked up: a store cannot hold units of something
-   * the chain does not have online, and skipping the other ~17 products cuts the pass by most of
-   * its cost.
+   * Never awaited by the poll: it is one request per tracked product, so it lags the stock number
+   * by up to one interval. Acceptable only because London Drugs is pickup-only and therefore not
+   * a checkout race.
+   *
+   * This used to drive a Next.js server action through a Bright Data browser session (~22s to
+   * open, billed per GB). That path is gone, and it had been failing silently: the action id it
+   * stored no longer exists in the store bundles. A plain GET carrying the PLURAL locationCodes
+   * parameter returns the same per-store numbers, for all 78 stores rather than the first 50.
    */
   _maybeEnrichStores() {
     const due = Date.now() - this._storesAt >= this.storeEnrichIntervalMs;
     if (!due || this._storesRunning) return;
     if (!scraperApi.isConfigured()) return;   // no transport — alerts simply omit the store
 
-    // EVERY tracked product, not just the online-in-stock ones. The old pass filtered on
+    // EVERY listed product, not just the online-in-stock ones. The old pass filtered on
     // `p.inStock && p.url`, which is exactly backwards for shelf stock: London Drugs is
-    // pickup-only, and a product can read 0 online while sitting in 28 stores. That filter is
-    // also why in-store-only items could never be covered — they have no product URL at all.
+    // pickup-only, and a product can read 0 online while sitting on shelves — which is exactly
+    // the case a buyer needs told about.
     const targets = [...this._known.values()].filter((p) => p && p.sku).map((p) => p.sku);
     if (targets.length === 0) return;         // catalogue still empty — try again next poll
 
@@ -400,7 +407,6 @@ class LondonDrugsAdapter extends BaseAdapter {
 
     this._maybeEnrichStores();
 
-
     const html = await this._fetchCategory(FAST_PATH);
     const found = this._toProducts(html);
 
@@ -424,9 +430,29 @@ class LondonDrugsAdapter extends BaseAdapter {
     await this._loadStores();
 
     let attached = 0;
+    let inStoreOnly = 0;
     for (const p of found) {
       const stores = this._stores.get(p.sku);
-      if (stores && stores.length) { p._stores = stores; attached++; }
+      if (!stores || !stores.length) continue;
+      p._stores = stores;
+      attached++;
+
+      // Shelf stock decides availability, not the website.
+      //
+      // `isAvailable` is an ONLINE flag, and London Drugs does not ship TCG — every item is
+      // pickup-only. So a product can read isAvailable:false while sitting on shelves and being
+      // perfectly buyable today, and we were reporting those as out of stock and saying nothing.
+      // Measured 2026-09-09: 8 of 25 tracked products were in that state, including the Pitch
+      // Black Elite Trainer Box with 41 units across 2 stores. Being able to walk in and buy it
+      // is the whole point of tracking a pickup-only retailer.
+      const units = storeAvail.totalUnits(stores);
+      if (units > 0) {
+        if (!p.inStock) inStoreOnly++;
+        p.inStock = true;
+        // The number a buyer can act on. `stockCount` is onlineStockLevel, which understates
+        // shelf reality by 2x-58x here — it read "Stock: 2" against 117 units in 12 stores.
+        p._stockQty = units;
+      }
     }
     // The cache filling but nothing reaching an alert is a silent failure, and it already cost
     // three rounds of guessing. Say it out loud whenever the cache has entries: if attached is
@@ -443,7 +469,8 @@ class LondonDrugsAdapter extends BaseAdapter {
     this.reportFreshness(found.length, Math.max(found.length, this._known.size ? found.length : 0));
 
     const inStock = found.filter((p) => p.inStock).length;
-    logger.info(`${this.name}: FAST — ${found.length} tracked products (${inStock} in stock), ${Date.now() - start}ms`);
+    logger.info(`${this.name}: FAST — ${found.length} tracked products (${inStock} in stock`
+      + `${inStoreOnly ? `, ${inStoreOnly} in stores only` : ''}), ${Date.now() - start}ms`);
 
     return Object.fromEntries(this._known);
   }
