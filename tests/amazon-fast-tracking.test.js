@@ -188,17 +188,18 @@ describe('throttle accounting is per-call (immune to sibling-lane writes) — fi
     for (let i = 0; i < 5; i++) {
       a._knownProducts.set('B0C' + i, { sku: 'B0C' + i, name: 'Pokemon TCG Box ' + i, category: 'pokemon', price: 10, inStock: false });
     }
-    // Every AOD read is a genuine 503 (signalled on the per-call ctx), while a "sibling lane"
-    // simultaneously clears the shared _lastFetchThrottled field — the exact race that could
-    // otherwise mask the strike and stop the cooldown from ever firing.
+    // Every AOD read is a genuine 503 — mirror what the real _stealthCheckAsin does on a 503
+    // (signal ctx AND count the strike centrally), while a "sibling lane" simultaneously clears the
+    // shared _lastFetchThrottled field — the exact race that could otherwise mask the strike.
     a._stealthCheckAsin = async (asin, priority, ctx) => {
-      if (ctx) ctx.throttled = true;   // this call's real 503
-      a._lastFetchThrottled = false;   // sibling lane clobbers the shared field
+      if (ctx) ctx.throttled = true;   // this call's real 503 (drives the sweep's break)
+      a._lastFetchThrottled = false;   // sibling lane clobbers the shared field (must not matter)
+      a._aodStrike();                  // centralised cooldown trip — any lane's 503 counts
       return null;
     };
     await a._monitorKnownAsins({});
     assert.ok(a._aodCooldownUntil > Date.now(),
-      'two per-call 503s must trip the cooldown despite the shared field being cleared to false');
+      'two 503s must trip the cooldown despite the shared field being cleared to false');
   });
 });
 

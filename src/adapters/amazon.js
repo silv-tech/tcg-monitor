@@ -97,6 +97,7 @@ const MAX_PRICE_FILL_PER_POLL = Number(process.env.AMAZON_MAX_PRICE_FILL_PER_POL
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 const AOD_COOLDOWN_MS = 10 * 60 * 1000;
+const AOD_THROTTLE_STRIKES = 2;   // consecutive 503s (any lane) before every AOD lane goes quiet
 
 // ONE shared budget for EVERY AOD call — the sweep, the watchlist fast-poll, and the price-fill
 // all hit the same endpoint, which Amazon throttles endpoint-wide (measured: sequential ~0.5
@@ -130,6 +131,7 @@ class AmazonAdapter extends BaseAdapter {
     this._monitorSuccessRate = 0;    // track product page stealth success %
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
+    this._aodThrottleStreak = 0;     // consecutive AOD 503s across ALL lanes; trips the shared cooldown
     this._aodCursor = 0;             // persistent round-robin position for the known-ASIN sweep,
                                      // so a throttle-break resumes the tail instead of restarting
                                      // at 0 and starving late ASINs (that is why a tracked ASIN's
@@ -186,6 +188,12 @@ class AmazonAdapter extends BaseAdapter {
     // which the sweep reads per-call and cannot be corrupted by a sibling lane.
     const mark = (v) => { this._lastFetchThrottled = v; if (ctx) ctx.throttled = v; };
 
+    // Go quiet on the shared cooldown — EVERY AOD lane, not just the sweep. An endpoint-wide block
+    // only decays when we STOP hitting it; the hot lane and price-fill used to keep knocking through
+    // the cooldown (fetchProductPage never checked it) and held the block open — the search-quiet
+    // ladder learned this same lesson. A cooldown skip is not a throttle: mark(false), keep the cache.
+    if (Date.now() < this._aodCooldownUntil) { mark(false); return null; }
+
     // A miss means "out of budget", NOT "endpoint throttled": mark false so the sweep never
     // counts it toward the 2-strike cooldown, and return null so callers keep the cached row.
     const granted = await rateBudget.acquire(AOD_BUDGET_KEY, AOD_ACQUIRE_WAIT_MS, priority,
@@ -217,6 +225,7 @@ class AmazonAdapter extends BaseAdapter {
       // Amazon answers an over-used AOD endpoint with a 503 that redirects to /error/500
       if (html && html.includes('/error/500')) {
         mark(true);
+        this._aodStrike();
         return null;
       }
       if (!html || html.length < 1000) return null;
@@ -232,12 +241,31 @@ class AmazonAdapter extends BaseAdapter {
         return null;
       }
 
+      this._aodThrottleStreak = 0; // a real buy-box read: the endpoint is healthy again
       return this._parseAod(html, asin);
     } catch (err) {
       // stealthGet throws on 503 before we can read the body
-      mark(/50[03]|Blocked after/.test(err.message || ''));
+      const throttled = /50[03]|Blocked after/.test(err.message || '');
+      mark(throttled);
+      if (throttled) this._aodStrike();
       if (proxyUrl) _clearCache(proxyUrl);
       return null;
+    }
+  }
+
+  /**
+   * Count a 503 from ANY AOD lane and, at the strike threshold, pause every lane for the cooldown.
+   *
+   * Centralised here (not just in the sweep) so the hot/watchlist lane and price-fill can BOTH trip
+   * and observe the block — otherwise, when the block began between sweeps, the hot lane kept
+   * knocking for up to a full sweep interval and stopped the endpoint from ever decaying.
+   */
+  _aodStrike() {
+    if (++this._aodThrottleStreak >= AOD_THROTTLE_STRIKES) {
+      this._aodCooldownUntil = Date.now() + AOD_COOLDOWN_MS;
+      this._aodThrottleStreak = 0;
+      logger.warn(`Amazon: AOD throttled (${AOD_THROTTLE_STRIKES}x 503) — pausing ALL AOD lanes for `
+        + `${AOD_COOLDOWN_MS / 60000}min so the block can decay`);
     }
   }
 
@@ -1078,11 +1106,11 @@ class AmazonAdapter extends BaseAdapter {
         }
       }
 
-      // Back off the whole pass as soon as Amazon starts throttling, rather than
-      // walking the rest of the list into the same wall
-      if (throttled >= 2) {
-        this._aodCooldownUntil = Date.now() + AOD_COOLDOWN_MS;
-        logger.warn(`Amazon: AOD throttled (${throttled} x 503) — pausing the monitor for ${AOD_COOLDOWN_MS / 60000}min`);
+      // Back off the whole pass as soon as Amazon starts throttling, rather than walking the rest
+      // of the list into the same wall. The cooldown itself is set centrally in _aodStrike (so the
+      // hot lane and price-fill trip and observe it too) — here we just stop this pass and carry
+      // the cache forward so nothing diffs as a false OOS.
+      if (throttled >= AOD_THROTTLE_STRIKES) {
         for (const [asin, cached] of this._knownProducts) {
           if (!(asin in products)) products[asin] = cached;
         }
