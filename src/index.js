@@ -91,65 +91,10 @@ const ADAPTER_MAP = {
  * observed listing rate, which is the same change autotune needs: allocate a shared budget by
  * where the value is, rather than tuning each store in isolation.
  */
-// Env-tunable so the cadence can be probed and, more importantly, REVERTED without a deploy.
-// Finding this configuration meant several rounds of changing a number, watching the circuit
-// breakers, and backing out; each of those cost a deploy plus five minutes of observation.
-// Anything that can put all 31 shops back into an outage should be a one-command undo.
-const tierMs = (envVar, fallback) => {
-  const v = Number(process.env[envVar]);
-  return Number.isFinite(v) && v >= 1000 ? v : fallback;
-};
-
-/**
- * Shops promoted to the fast interval one small batch at a time, by id.
- *
- * The budget ceiling was originally found by moving the global rate and watching for five
- * minutes at each step. That was too short: 4.2 req/sec looked clean at every check and then
- * 429s reappeared roughly an hour later, with the backoff climbed to 594s and the container
- * out of local sockets. Shopify's throttle accumulates over a much longer window than a
- * single observation.
- *
- * So promotion is now incremental and reversible. Add three ids, let them soak, confirm they
- * are under 10s AND that nothing else degraded, then add three more. A bad batch costs one
- * step back rather than every shop, and it finds the sustainable ceiling instead of
- * overshooting it.
- */
-const promotedIds = new Set(
-  String(process.env.SHOP_FAST_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
-);
-
-// Tiers hold only shops that still exist. Twenty were removed on 2026-09-05, which emptied the
-// quiet tier entirely — every store in it (cardlegendstcg at 352 days since a listing,
-// poketherapy, catchacard, spshop, cardcycle, hastycards, tonkatomtcg) was one of the dead ones.
-// It is kept rather than deleted because it is the control surface for backing a specific shop
-// off without slowing the rest, which is a better first move than a global slowdown.
-const SHOP_TIERS = {
-  active: {
-    intervalMs: tierMs('SHOP_ACTIVE_MS', 9000),
-    ids: new Set(['pokejeux', 'infinitycards', 'zardocards', '401games', 'hobbiesville',
-      'remicardtrader', 'kanzengames', 'gameshack']),
-  },
-  quiet: {
-    intervalMs: tierMs('SHOP_QUIET_MS', 9000),
-    ids: new Set(),
-  },
-  medium: { intervalMs: tierMs('SHOP_MEDIUM_MS', 9000), ids: null },
-};
-
-function clampShopInterval(retailer) {
-  if (retailer.adapter !== 'shopify') return retailer;
-
-  // Deliberately overrides Redis rather than taking a floor from it. The live intervals in
-  // Redis are a flat 8000ms left over from before the budget existed; honouring them would
-  // put demand at ~4 req/sec and queue every poll behind the budget again.
-  // An explicitly promoted shop takes the active interval regardless of its measured tier.
-  const tier = (promotedIds.has(retailer.id) || SHOP_TIERS.active.ids.has(retailer.id)) ? 'active'
-    : SHOP_TIERS.quiet.ids.has(retailer.id) ? 'quiet'
-      : 'medium';
-  const intervalMs = SHOP_TIERS[tier].intervalMs;
-  if (intervalMs === retailer.intervalMs) return retailer;
-  return { ...retailer, intervalMs, _tier: tier, _clampedFrom: retailer.intervalMs };
-}
+// The cadence rule itself lives in core/shop-tiers.js so it can be tested: index.js calls
+// main() on load and therefore cannot be required from a test, which is why the rule went
+// weeks silently reverting deliberate per-shop slowdowns with nothing covering it.
+const { clampShopInterval } = require('./core/shop-tiers');
 
 async function main() {
   logger.info('Nocturne Monitors starting...');
