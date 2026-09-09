@@ -2,12 +2,17 @@
   "_searchQueriesComment": "searchQueries + setQueries are concatenated and sent to each retailer's own search engine (Walmart, Amazon, Best Buy all use the identical list). Results are relevance-ranked and capped (~40 Walmart, 100 Best Buy), so a broad term alone does NOT guarantee a brand-new listing appears — that is what setQueries is for. Rotate setQueries when a set stops being the current drop; each extra query costs a request per Walmart cycle and 5 ScraperAPI credits per Amazon discovery.",
   "searchQueries": [
     "pokemon tcg",
-    "pokemon elite trainer box",
     "one piece card game",
+    "pokemon blister pack",
     "pokemon tin",
+    "pokemon elite trainer box",
+    "pokemon league battle deck",
     "one piece booster box",
-    "pokemon booster box",
-    "pokemon premium collection"
+    "pokemon premium collection",
+    "pokemon build battle box",
+    "pokemon booster pack",
+    "pokemon ex box",
+    "pokemon booster box"
   ],
   "_setQueriesComment": "The set currently dropping. A narrow query puts a brand-new listing at rank 1 instead of rank 200. Current window: 30th Celebration waves Sep 16 / Oct 2 / Oct 30 / Dec 4, Delta Reign Nov 6. Swap 'pokemon 30th celebration' for 'pokemon delta reign' in November, or run both.",
   "setQueries": [
