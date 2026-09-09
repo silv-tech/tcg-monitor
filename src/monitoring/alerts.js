@@ -3,7 +3,6 @@ const logger = require('../monitoring/logger');
 const { isSystemHealthy, checkRedisHealth, getZeroProductPolls, getComposition, persistComposition } = require('./health');
 const { getBudgetStatus } = require('../utils/scraper-api');
 const { EmbedBuilder } = require('discord.js');
-const { reportLdCandidates } = require('./ld-candidates');
 
 // Per-retailer alert state. Alerting ONCE per episode meant a store could sit broken for an
 // hour with nothing further said: Costco went DETECTION DOWN at 19:44 and the next word about
@@ -60,10 +59,6 @@ const ALERT_COOLDOWN_MS = 10 * 60 * 1000; // 10 min cooldown for budget/redis
 
 async function checkAndAlert(discordClient) {
   if (!discordClient || !config.discord.adminChannelId) return;
-
-  // In-store-only London Drugs finds go out first: they are time-sensitive drops, and they
-  // must not be delayed behind the health sweep.
-  await reportLdCandidates(discordClient);
 
   const now = Date.now();
   const adminPing = config.discord.adminUserId ? `<@${config.discord.adminUserId}>` : '';
