@@ -65,9 +65,13 @@
     "color": "#ff9900",
     "timing": {
       "aodSweepIntervalMs": 300000,
-      "watchlistIntervalMs": 8000
+      "watchlistIntervalMs": 30000
     },
-    "watchlist": []
+    "watchlist": [
+      "B0H77W4411",
+      "B0H77VZBX4",
+      "B0H7FDBNSB"
+    ]
   },
   {
     "_phase": 1,
