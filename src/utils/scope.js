@@ -34,6 +34,13 @@ const SET_NAMES = [
   'ascended heroes', 'perfect order', 'evolving skies', 'lost origin', 'silver tempest',
   'crown zenith', 'astral radiance', 'brilliant stars', 'fusion strike', 'vivid voltage',
   'celebrations', 'first partner', 'poke ball tin', 'pokeball tin',
+  // Pokémon's 30th-anniversary line (2026). Added because Amazon's search tiles drop the
+  // accented "Pokémon" prefix ("Pokémon TCG: 30th Celebration ETB" -> "TCG: 30th Celebration
+  // ETB"), and without a set-name match the game-name gate then rejects it — which is exactly
+  // why B0H7818RCM / B0H78BB9TY / B0H77W4411 were missed. These phrases are specific to the
+  // anniversary line, so they establish Pokémon scope without over-matching. "celebrations"
+  // (the 2021 set) is deliberately kept separate — it does not contain "30th".
+  '30th celebration', '30th anniversary',
 ];
 
 // Unambiguous sealed product types. No accessory is named any of these, so their presence

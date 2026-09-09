@@ -14,10 +14,20 @@ const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 // here, which is exactly why Walmart never had one.
 const {
   GAME_NAMES,
+  SET_NAMES,
   ACCESSORY_KEYWORDS,
   PRINT_KEYWORDS,
   isInScopeName,
 } = require('../utils/scope');
+
+// Game scope for the discovery paths: a franchise word OR a known set name. Amazon's search
+// tiles drop the accented "Pokémon" prefix ("Pokémon TCG: 30th Celebration ETB" -> "TCG: 30th
+// Celebration ETB"), so requiring GAME_NAMES alone silently dropped whole product lines whose
+// set name we DO recognise (this is why the 30th-anniversary items were missed). Mirrors the
+// canonical isInScopeName game-name gate so discovery agrees with the cache/relist checks.
+function hasGameScope(lowerText) {
+  return GAME_NAMES.some(g => lowerText.includes(g)) || SET_NAMES.some(k => lowerText.includes(k));
+}
 
 // If more than this share of the stored catalogue looks out of scope, the scope test is the
 // thing that is wrong. Amazon's real run removed 159 of 371 (43%); Walmart's first run has
@@ -716,7 +726,7 @@ class AmazonAdapter extends BaseAdapter {
     // accented brand prefixes — "Pokémon TCG: Mega Evolution" arrives as "TCG: Mega Evolution".
     // The alt keeps the full title, so real Pokemon products with truncated titles still pass.
     const haystack = `${item.name} ${item._alt || ''}`.toLowerCase();
-    if (!GAME_NAMES.some(g => haystack.includes(g))) return null;
+    if (!hasGameScope(haystack)) return null;
 
     const cached = this._knownProducts.get(item.asin) || {};
     const product = this.classify({
@@ -909,7 +919,7 @@ class AmazonAdapter extends BaseAdapter {
 
     // Apply game name + TCG filters
     const lowerName = data.name.toLowerCase();
-    const hasGameName = GAME_NAMES.some(g => lowerName.includes(g));
+    const hasGameName = hasGameScope(lowerName);
     if (!hasGameName) return null;
     if (!isTCGProduct(data.name)) return null;
 
@@ -943,7 +953,7 @@ class AmazonAdapter extends BaseAdapter {
         const lowerName = name.toLowerCase();
 
         // Layer 1: Must mention a game we actually track
-        const hasGameName = GAME_NAMES.some(g => lowerName.includes(g));
+        const hasGameName = hasGameScope(lowerName);
         if (!hasGameName) continue;
 
         // Layer 2: Must pass shared TCG product filter (sealed products, not figures/toys)
