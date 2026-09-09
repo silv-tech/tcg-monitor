@@ -179,3 +179,28 @@ describe('it cannot be pointed at anything else', () => {
     await refused({ retailerId: 'amazon', sku: '' });
   });
 });
+
+describe('an identity can be denied by hand while the automatic guard is blind', () => {
+  test('a denial requires a reason', async () => {
+    const routePath = firstMatch('POST', '/identity-denylist/amazon/B0F1T9ND7G');
+    assert.strictEqual(routePath, '/identity-denylist/:retailerId/:sku');
+    const layer = routes.stack.find((l) => l.route && l.route.path === routePath && l.route.methods.post);
+    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+    const res = { statusCode: 200, body: null };
+    const fakeRes = { status(c) { res.statusCode = c; return fakeRes; }, json(b) { res.body = b; return fakeRes; } };
+    await handler({ params: { retailerId: 'amazon', sku: 'B0F1T9ND7G' }, body: {} }, fakeRes, () => {});
+    assert.strictEqual(res.statusCode, 400,
+      'an entry nobody can explain later is an entry nobody will dare remove');
+  });
+
+  test('the deny and clear routes are symmetric and do not shadow anything', () => {
+    assert.strictEqual(firstMatch('POST', '/identity-denylist/amazon/B0F1T9ND7G'),
+      '/identity-denylist/:retailerId/:sku');
+    assert.strictEqual(firstMatch('DELETE', '/identity-denylist/amazon/B0F1T9ND7G'),
+      '/identity-denylist/:retailerId/:sku');
+    assert.strictEqual(firstMatch('GET', '/identity-denylist/amazon'),
+      '/identity-denylist/:retailerId');
+    assert.strictEqual(firstMatch('DELETE', '/products/keywords/pokemon'),
+      '/products/keywords/:keyword', 'still no shadowing');
+  });
+});

@@ -269,6 +269,40 @@ router.delete('/catalogue/:retailerId/:sku', async (req, res) => {
 });
 
 /**
+ * Deny an identity by hand.
+ *
+ * The adapter adds entries itself when a live title proves an ASIN no longer holds the product we
+ * stored — but that check runs through AOD, and while AOD is blocked it cannot run at all. This is
+ * the manual path for a drift confirmed out-of-band, which is exactly the situation B0F1T9ND7G was
+ * in: proven a car jump starter by its product page, yet still on page 1 of "pokemon booster pack"
+ * carrying the stale Pokemon title, with no working guard to catch the re-admit.
+ *
+ * Requires a reason. An entry nobody can explain later is an entry nobody will dare remove.
+ */
+router.post('/identity-denylist/:retailerId/:sku', async (req, res) => {
+  const { retailerId, sku } = req.params;
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!/^[a-z0-9_-]+$/.test(retailerId)) return res.status(400).json({ error: 'invalid retailer id' });
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sku)) return res.status(400).json({ error: 'invalid sku' });
+  if (!reason) return res.status(400).json({ error: 'reason is required' });
+  try {
+    await state.denyIdentity(retailerId, sku, reason);
+    try {
+      const adapter = scheduler.getAdapter(retailerId);
+      if (adapter?._denied?.add) {
+        adapter._denied.add(sku);
+        adapter._knownProducts?.delete?.(sku);
+        adapter._lastInStockAt?.delete?.(sku);
+      }
+    } catch { /* not running is fine — the persisted entry is what matters */ }
+    logger.warn(`Admin denied identity ${retailerId}/${sku}: ${reason}`);
+    res.json({ ok: true, retailerId, sku, reason });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * Undo an identity denial.
  *
  * The adapter adds an ASIN here when a live title proves it no longer holds the product we
