@@ -149,7 +149,21 @@ function cooldownRemaining(url, proxyUrl) {
     if (left <= 0) { hostCooldowns.delete(k); return 0; }
     return left;
   }
-  const prefix = `${hostOf(url)}|`;
+  // A bare retailer root — "https://hobbiesville.com", which is what retailers.json holds and
+  // what health.js passes — has pathname "/", so hostOf() returns "hobbiesville.com/" and the
+  // prefix became "hobbiesville.com/|". Real keys carry the POLLED path
+  // ("hobbiesville.com/products.json|isp:1.2.3.4"), so that matched nothing and
+  // cooldownRemaining returned 0 for every shop, every time. The throttle grace in health.js
+  // was therefore dead code in production: a shop sitting in an honoured backoff was reported
+  // as an outage, which is precisely the "monitor alerting on its own backoff" regression that
+  // grace was added to prevent. The covering test passed a full page URL, so it never caught it.
+  //
+  // With no specific path, match EVERY path on that host.
+  let prefix = `${hostOf(url)}|`;
+  try {
+    const u = new URL(url);
+    if (u.pathname === '/' || u.pathname === '') prefix = `${u.host}/`;
+  } catch { /* not a URL — fall back to the exact-key prefix above */ }
   let best = Infinity;
   for (const [k, until] of hostCooldowns) {
     if (!k.startsWith(prefix)) continue;

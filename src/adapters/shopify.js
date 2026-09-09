@@ -1,7 +1,7 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { isInScopeName } = require('../utils/scope');
-const { stealthGet, isRateLimited, cooldownRemaining } = require('../utils/stealth-http');
+const { stealthGet, isRateLimited, isSelfSkip, cooldownRemaining } = require('../utils/stealth-http');
 const { markProxyBlocked, markProxySuccess } = require('../core/proxy');
 const state = require('../core/state');
 
@@ -473,6 +473,7 @@ class ShopifyAdapter extends BaseAdapter {
     // That is what let a burst of 429s raise "PARSER SUSPECT — 0% of products have a price"
     // and, on recovery, an alert flood. Track WHY we came back empty.
     let throttled = false;
+    let throttleErr = null;   // the original refusal, so its classification survives
     // Set when the catalogue sweep covered only part of the shop by design (rotating window),
     // as opposed to `incomplete`, which means something actually went wrong.
     let windowed = false;
@@ -491,7 +492,7 @@ class ShopifyAdapter extends BaseAdapter {
       try {
         await this.fetchCollection(collection, products);
       } catch (err) {
-        if (isRateLimited(err)) throttled = true;
+        if (isRateLimited(err)) { throttled = true; throttleErr = throttleErr || err; }
         incomplete = true;
         logger.warn(`${this.name}: collection "${collection}" failed: ${err.message}`);
       }
@@ -506,7 +507,7 @@ class ShopifyAdapter extends BaseAdapter {
         // mark real stock out of stock and then fire it all back as false restocks.
         windowed = !(await this.fetchAllProducts(products));
       } catch (err) {
-        if (isRateLimited(err)) throttled = true;
+        if (isRateLimited(err)) { throttled = true; throttleErr = throttleErr || err; }
         incomplete = true;
         logger.warn(`${this.name}: /products.json failed: ${err.message}`);
       }
@@ -515,7 +516,22 @@ class ShopifyAdapter extends BaseAdapter {
     // Empty because the retailer refused us is a failed poll, not a catalogue of nothing.
     // Throwing keeps it out of the diff, the health ratio and the event stream alike.
     if (throttled && Object.keys(products).length === 0) {
-      throw new Error(`${this.name}: rate limited — skipping poll rather than reporting an empty catalogue`);
+      // Rethrow the ORIGINAL refusal, not a new message.
+      //
+      // This used to throw `${this.name}: rate limited — ...`, and that name prefix broke
+      // every classifier downstream: isRateLimited and isSelfSkip are ^-anchored on
+      // "Rate limited"/"Cooling down" (stealth-http.js), so a message starting with the shop
+      // name matched neither. The scheduler therefore counted our OWN budget refusal or our
+      // OWN cooldown as a retailer failure — consecutiveErrors++, healthy=false at 5, circuit
+      // tripped at 5 — and every recovery probe landed in the same cooldown and threw the same
+      // unrecognised message, so the breaker could never close. That is verbatim the loop
+      // documented as already fixed for the other three rate-limit messages; this one string
+      // slipped through.
+      //
+      // Rethrowing also preserves WHICH refusal it was: "Rate limited (429)" is the shop
+      // refusing us and counts as a retailer signal, while "Rate limited (budget)" and
+      // "Cooling down" are our own decisions and are exempt as self-skips.
+      throw throttleErr || new Error(`Rate limited: ${this.name} — empty catalogue, not reporting it`);
     }
 
     // Partly-read sweep. Declaring it partial makes poll-adapter overlay what we DID read on
@@ -878,6 +894,15 @@ class ShopifyAdapter extends BaseAdapter {
         data = { products: (await this._fetchPage(url)).products };
       } catch (err) {
         if (!isRateLimited(err)) throw err;
+        // A request WE declined to send is not the shop pushing back. Our own token bucket
+        // being busy, or a cooldown from an earlier 429, used to narrow this window exactly as
+        // a real 429 does — and because _sweepRateLimited then blocks the widen-back, a shop
+        // under nothing worse than budget contention sweeps 2 pages per run permanently, losing
+        // catalogue coverage for a limit we imposed on ourselves. Skip and try again next run.
+        if (isSelfSkip(err)) {
+          logger.debug(`${this.name}: page ${page} skipped by our own backoff — window unchanged`);
+          break;
+        }
         // The shop pushed back. Two things follow, and both matter.
         //
         // First, narrow the window. Rotating into pages that have never been read replaced a
