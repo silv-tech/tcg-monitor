@@ -24,6 +24,12 @@ const assert = require('node:assert');
 
 const AmazonAdapter = require('../src/adapters/amazon');
 const state = require('../src/core/state');
+// The identity denylist is Redis-backed, and state.js calls its own internal getRedis(), so a
+// real connection opens unless the exported functions are stubbed — an open socket keeps the
+// test process alive after every assertion has passed.
+state.getDeniedIdentities = async () => new Map();
+state.denyIdentity = async () => {};
+
 
 // The AOD path caches offer ids and sellers into Redis as a side effect.
 state.cacheOfferListingId = async () => {};

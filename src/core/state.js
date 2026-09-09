@@ -136,6 +136,54 @@ async function setChannelsConfig(config) {
   await getRedis().set(CHANNELS_KEY, JSON.stringify(config));
 }
 
+// ─── Identity denylist ───────────────────────────────────────────
+//
+// SKUs proven to no longer be the product we stored. Amazon repurposes ASINs: B0D2JGYX3F was
+// tracked as "Pokémon TCG: Gardevoir ex League Battle Deck" while /dp/B0D2JGYX3F served a Nex
+// Playground games console, and it alerted to a paying customer's channel.
+//
+// The adapter already detects this — it compares the LIVE title against the scope rule and drops
+// the ASIN. But it dropped it from memory only, so every restart re-hydrated the row from Redis
+// and the guard had to re-discover the same fact, and in between, search could re-admit it. One
+// ASIN was measured still sitting on Amazon's own page 1 carrying the stale Pokemon title while
+// the product page served a car jump starter, so search alone WILL bring it back.
+//
+// Persisting the decision is what makes the guard stick. Written only on a CONFIRMED live
+// out-of-scope title — never on a failed, throttled or titleless read, which prove nothing.
+const DENYLIST_KEY = `${PREFIX}identity:denied`;
+
+async function denyIdentity(retailerId, sku, reason) {
+  if (!retailerId || !sku) return;
+  const redis = getRedis();
+  if (!redis) return;                     // no store: the in-memory guard still holds this process
+  await redis.hset(DENYLIST_KEY, `${retailerId}:${sku}`,
+    JSON.stringify({ at: Date.now(), reason: String(reason || '').slice(0, 200) }));
+}
+
+async function getDeniedIdentities(retailerId) {
+  const redis = getRedis();
+  if (!redis) return new Map();           // degrade to "nothing denied", never throw
+  const all = await redis.hgetall(DENYLIST_KEY);
+  const out = new Map();
+  for (const [key, value] of Object.entries(all || {})) {
+    const idx = key.indexOf(':');
+    if (idx === -1) continue;
+    if (key.slice(0, idx) !== retailerId) continue;
+    let meta = null;
+    try { meta = JSON.parse(value); } catch { meta = null; }
+    out.set(key.slice(idx + 1), meta);
+  }
+  return out;
+}
+
+/** Reversible on purpose: a denylist nobody can undo is a denylist nobody should trust. */
+async function allowIdentity(retailerId, sku) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const removed = await redis.hdel(DENYLIST_KEY, `${retailerId}:${sku}`);
+  return removed > 0;
+}
+
 // ─── Products config persistence ─────────────────────────────────
 async function getProductsConfig() {
   const data = await getRedis().get(PRODUCTS_KEY);
@@ -608,6 +656,10 @@ module.exports = {
   deleteRetailerOverride,
   getChannelsConfig,
   setChannelsConfig,
+  denyIdentity,
+  getDeniedIdentities,
+  allowIdentity,
+  DENYLIST_KEY,
   getProductsConfig,
   setProductsConfig,
   recordRestock,

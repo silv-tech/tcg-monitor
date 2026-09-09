@@ -22,6 +22,12 @@ const AmazonAdapter = require('../src/adapters/amazon');
 // (_findGuessedRows), so without these the adapter opens a real ioredis client whose retry
 // timer holds the test process open forever.
 const stateModule = require('../src/core/state');
+// The identity denylist is Redis-backed, and state.js calls its own internal getRedis(), so a
+// real connection opens unless the exported functions are stubbed — an open socket keeps the
+// test process alive after every assertion has passed.
+stateModule.getDeniedIdentities = async () => new Map();
+stateModule.denyIdentity = async () => {};
+
 stateModule.getRedis = () => null;
 stateModule.getAllProducts = async () => ({});
 stateModule.setProduct = async () => {};
@@ -42,6 +48,13 @@ function adapter() {
 // price is marked inStock:false by construction (a price is the only stock signal a tile
 // carries), so "inStock && no price" is unsatisfiable on this path. Measured on 90 live tiles:
 // 43 priceless, 0 of them in stock. The shape below is the real one.
+// The live AOD title the stubs return. It must match the tile: price-fill now verifies
+// identity before adopting a price, because it used to adopt price AND stock without ever
+// reading data.name — which is how a repurposed ASIN could be filled under the name of the
+// product it replaced. A placeholder title here would exercise that guard instead of this
+// feature; the guard has its own tests in amazon-identity-guards.test.js.
+const TILE_NAME = 'Pokémon TCG: First Partner Illustration Collection';
+
 function item(over = {}) {
   return {
     asin: 'B0GW2DK37Q',
@@ -60,7 +73,7 @@ describe('amazon price-fill for buyable-but-priceless items', () => {
   function wire(a, { items, price }) {
     calls = { search: 0, check: [] };
     a._freeSearch = async () => { calls.search++; return items; };
-    a._stealthCheckAsin = async (asin) => { calls.check.push(asin); return price === undefined ? null : { name: 'x', price, inStock: true, olid: 'o' }; };
+    a._stealthCheckAsin = async (asin) => { calls.check.push(asin); return price === undefined ? null : { name: TILE_NAME, price, inStock: true, olid: 'o' }; };
   }
   beforeEach(() => { calls = null; });
 
@@ -147,7 +160,10 @@ describe('amazon price-fill: the trigger is reachable from real search HTML', ()
     a._freeSearch = async () => items;
     a._stealthCheckAsin = async (asin) => {
       checked.push(asin);
-      return { name: 'x', price: 74.95, inStock: true, olid: 'o' };
+      // Echo the tile's own title: a healthy AOD read agrees with the listing, and price-fill
+      // now verifies identity before adopting a price.
+      const own = items.find((i) => i.asin === asin);
+      return { name: own ? own.name : null, price: 74.95, inStock: true, olid: 'o' };
     };
     const products = {};
     await a._runDiscovery(products);
@@ -184,7 +200,7 @@ describe('amazon price-fill: a resolved item stays resolved', () => {
   test('a second poll on the same priceless tile does not flip it out of stock', async () => {
     const a = adapter();
     a._freeSearch = async () => [item()];
-    a._stealthCheckAsin = async () => ({ name: 'x', price: 39.95, inStock: true, olid: 'o' });
+    a._stealthCheckAsin = async () => ({ name: TILE_NAME, price: 39.95, inStock: true, olid: 'o' });
 
     const first = {};
     await a._runDiscovery(first);
@@ -213,7 +229,7 @@ describe('amazon price-fill: a resolved item stays resolved', () => {
   test('a real tile that says "unavailable" is still out of stock', async () => {
     const a = adapter();
     a._freeSearch = async () => [item({ _priceUnknown: false, inStock: false, price: null })];
-    a._stealthCheckAsin = async () => ({ name: 'x', price: 10, inStock: true, olid: 'o' });
+    a._stealthCheckAsin = async () => ({ name: TILE_NAME, price: 10, inStock: true, olid: 'o' });
     const products = {};
     await a._runDiscovery(products);
     assert.strictEqual(products['B0GW2DK37Q'].inStock, false, 'an explicit OOS tile is believed');
@@ -255,7 +271,7 @@ describe('amazon: an unresolved item is withheld, not guessed as out of stock', 
   test('once the fill resolves it, it IS reported — with real stock and price', async () => {
     const a = adapter();
     a._freeSearch = async () => [item()];
-    a._stealthCheckAsin = async () => ({ name: 'x', price: 39.95, inStock: true, olid: 'o' });
+    a._stealthCheckAsin = async () => ({ name: TILE_NAME, price: 39.95, inStock: true, olid: 'o' });
     const products = await a.fetchProducts();
     assert.strictEqual(products['B0GW2DK37Q'].price, 39.95);
     assert.strictEqual(products['B0GW2DK37Q'].inStock, true);

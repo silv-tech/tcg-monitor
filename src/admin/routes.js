@@ -216,6 +216,95 @@ router.post('/retailers', (req, res) => {
  * Deliberately its own endpoint rather than folded into DELETE, so it can be run for
  * retailers that were already taken out of the config.
  */
+/**
+ * Remove ONE product from a retailer's catalogue.
+ *
+ * Amazon repurposes ASINs, and a repurposed listing leaves a row whose name, price and image all
+ * describe a product that is no longer there — B0D2JGYX3F alerted as "Pokémon TCG: Gardevoir ex
+ * League Battle Deck" while /dp/B0D2JGYX3F served a Nex Playground games console, and
+ * B0BCC6N8YL alerted as a Pokemon booster while serving a PopSockets phone grip on 2026-09-08.
+ *
+ * Until now the only removal tool was /retailers/:id/purge, which deletes the entire catalogue —
+ * 613 rows to remove one, and on Amazon that also empties the store the boot hydration reloads
+ * from. This is the scalpel that incident needed.
+ *
+ * Mounted at /catalogue, NOT /products/:retailerId/:sku. That shape sits in front of the existing
+ * /products/keywords/:keyword and would swallow it — Express takes the first match and this
+ * handler never calls next(), so DELETE /products/keywords/pokemon answered 200 "ok" while
+ * deleting nothing, and a keyword containing a space 400'd on the sku pattern. Verified against
+ * the real router before this comment was written.
+ *
+ * Deleting the Redis row is NOT enough on its own. The adapter keeps its catalogue in memory and
+ * republishes it every poll, so on Amazon's 6s cadence a deleted row is written straight back —
+ * the delete would appear to succeed and change nothing. The in-memory copy goes too.
+ */
+router.delete('/catalogue/:retailerId/:sku', async (req, res) => {
+  const { retailerId, sku } = req.params;
+  if (!/^[a-z0-9_-]+$/.test(retailerId)) return res.status(400).json({ error: 'invalid retailer id' });
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sku)) return res.status(400).json({ error: 'invalid sku' });
+  try {
+    const existing = await state.getProduct(retailerId, sku);
+    await state.deleteProduct(retailerId, sku);
+
+    // Evict from the running adapter too, or the next poll puts it straight back.
+    let evicted = false;
+    try {
+      const adapter = scheduler.getAdapter(retailerId);
+      if (adapter) {
+        if (adapter._knownProducts?.delete?.(sku)) evicted = true;
+        adapter._lastInStockAt?.delete?.(sku);
+        adapter._known?.delete?.(sku);
+      }
+    } catch (err) {
+      logger.warn(`Could not evict ${retailerId}/${sku} from the running adapter: ${err.message}`);
+    }
+
+    logger.warn(`Admin deleted product ${retailerId}/${sku}`
+      + (existing ? ` — was "${existing.name || 'unnamed'}"` : ' — was not in Redis')
+      + (evicted ? ' (also evicted from the running adapter)' : ''));
+    res.json({ ok: true, retailerId, sku, existed: Boolean(existing), evicted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Undo an identity denial.
+ *
+ * The adapter adds an ASIN here when a live title proves it no longer holds the product we
+ * stored. That call is measured safe (0 false positives across 320 live titles), but a denylist
+ * nobody can reverse is a denylist nobody should trust — and Amazon can repurpose a listing BACK.
+ * The in-memory copy clears on the next restart; this clears the persisted one.
+ */
+router.delete('/identity-denylist/:retailerId/:sku', async (req, res) => {
+  const { retailerId, sku } = req.params;
+  if (!/^[a-z0-9_-]+$/.test(retailerId)) return res.status(400).json({ error: 'invalid retailer id' });
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sku)) return res.status(400).json({ error: 'invalid sku' });
+  try {
+    const removed = await state.allowIdentity(retailerId, sku);
+    try {
+      const adapter = scheduler.getAdapter(retailerId);
+      adapter?._denied?.delete?.(sku);
+    } catch { /* not running is fine — the persisted copy is what matters */ }
+    logger.warn(`Admin cleared identity denial for ${retailerId}/${sku} (was denied: ${removed})`);
+    res.json({ ok: true, retailerId, sku, removed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** What the adapter currently refuses to re-admit, and why. */
+router.get('/identity-denylist/:retailerId', async (req, res) => {
+  const { retailerId } = req.params;
+  if (!/^[a-z0-9_-]+$/.test(retailerId)) return res.status(400).json({ error: 'invalid retailer id' });
+  try {
+    const denied = await state.getDeniedIdentities(retailerId);
+    res.json({ retailerId, count: denied.size, entries: Object.fromEntries(denied) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/retailers/:id/purge', async (req, res) => {
   const id = req.params.id;
   if (!/^[a-z0-9_-]+$/.test(id)) return res.status(400).json({ error: 'invalid retailer id' });

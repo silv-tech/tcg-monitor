@@ -26,6 +26,13 @@ const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert');
 
 const state = require('../src/core/state');
+// The adapter reaches for Redis on hydration (catalogue + identity denylist); an open
+// connection keeps this test process alive after every assertion has passed.
+state.getRedis = () => null;
+// state.js calls its OWN internal getRedis(), so stubbing the exported getRedis does not stop
+// a real connection opening — the exported functions the adapter calls must be stubbed instead.
+state.getDeniedIdentities = async () => new Map();
+state.denyIdentity = async () => {};
 const AmazonAdapter = require('../src/adapters/amazon');
 
 const CFG = {

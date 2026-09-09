@@ -132,6 +132,7 @@ class AmazonAdapter extends BaseAdapter {
     this.domain = 'www.amazon.ca';
     this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
     this._hydrated = false;          // catalogue reloaded from Redis once per process
+    this._denied = new Set();        // ASINs proven to serve a different product now
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
@@ -364,27 +365,56 @@ class AmazonAdapter extends BaseAdapter {
    * that did not. Scope is re-applied on the way in, because Redis holds rows written by older
    * builds under older rules.
    */
+  /**
+   * Record that an ASIN no longer holds the product we stored.
+   *
+   * Fire-and-forget: the in-memory set is what the next poll reads, and a Redis hiccup must not
+   * take down a poll. The persisted copy is what survives a restart, so the guard does not have
+   * to re-discover the same drift after every deploy.
+   */
+  _denyIdentity(sku, liveTitle) {
+    this._denied.add(sku);
+    state.denyIdentity(this.id, sku, liveTitle).catch((err) =>
+      logger.warn(`Amazon: could not persist identity denial for ${sku}: ${err.message}`));
+  }
+
   async _hydrateFromRedis() {
     if (this._hydrated) return;
     this._hydrated = true;
     try {
       // Bounded: a slow Redis must delay the first poll, never hang it.
+      // The timer is cleared explicitly. An uncleared 5s timer is a live handle, and in a test
+      // runner a live handle keeps the whole process alive after the assertions pass.
+      let timer;
       const cached = await Promise.race([
         state.getAllProducts(this.id),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('redis timeout')), 5000)),
-      ]);
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('redis timeout')), 5000); }),
+      ]).finally(() => clearTimeout(timer));
+
+      // Load the proven-wrong set FIRST, so a denied ASIN is never hydrated back in. Its stored
+      // name is the stale in-scope one, so isInScopeName below cannot recognise it.
+      try {
+        const denied = await state.getDeniedIdentities(this.id);
+        for (const sku of denied.keys()) this._denied.add(sku);
+        if (this._denied.size) logger.info(`${this.name}: ${this._denied.size} ASIN(s) on the identity denylist`);
+      } catch (err) {
+        logger.warn(`${this.name}: could not load the identity denylist: ${err.message}`);
+      }
 
       let loaded = 0;
       let outOfScope = 0;
+      let denied = 0;
       for (const [asin, product] of Object.entries(cached || {})) {
         if (!product || !product.name) continue;
+        if (this._denied.has(asin)) { denied++; continue; }
         if (!isInScopeName(product.name)) { outOfScope++; continue; }
         if (this._knownProducts.has(asin)) continue;
         this._knownProducts.set(asin, product);
         loaded++;
       }
       logger.info(`${this.name}: hydrated ${loaded} products from Redis`
-        + `${outOfScope ? ` (${outOfScope} out of scope, skipped)` : ''}`);
+        + `${outOfScope ? ` (${outOfScope} out of scope, skipped)` : ''}`
+        + `${denied ? ` (${denied} on the identity denylist, skipped)` : ''}`);
     } catch (err) {
       // Degraded, not broken: the catalogue rebuilds as the query cursor rotates. Say it loudly,
       // because this is precisely the condition that produces the restart flood.
@@ -669,6 +699,32 @@ class AmazonAdapter extends BaseAdapter {
       for (const product of toFill) {
         try {
           const data = await this._stealthCheckAsin(product.sku);
+
+          // Check WHAT we are filling before filling it.
+          //
+          // AOD returns the live title in the same response this already parses, and this path
+          // threw it away — it adopted a price and could raise inStock without ever asking
+          // whether the ASIN still holds the product we stored. Amazon repurposes listings:
+          // B0D2JGYX3F alerted as "Pokémon TCG: Gardevoir ex League Battle Deck" while
+          // /dp/B0D2JGYX3F served a Nex Playground games console, and B0BCC6N8YL alerted as a
+          // Pokemon booster while serving a PopSockets phone grip. The sweep already makes
+          // exactly these two checks at the AOD update branch; this path simply skipped them.
+          if (data && data.name && !isInScopeName(data.name)) {
+            logger.warn(`Amazon: ASIN ${product.sku} is no longer the product we stored — dropping. `
+              + `Was "${product.name}", now "${data.name}"`);
+            this._denyIdentity(product.sku, data.name);
+            this._knownProducts.delete(product.sku);
+            this._lastInStockAt.delete(product.sku);
+            delete products[product.sku];
+            continue;
+          }
+          if (data && data.name && product.name && !sameProductName(product.name, data.name)) {
+            logger.warn(`Amazon: ASIN ${product.sku} was relisted — "${product.name}" -> "${data.name}"`);
+            product.name = data.name;
+            const reclassified = this.classify({ name: data.name }).category;
+            if (reclassified !== 'other') product.category = reclassified;
+          }
+
           if (data && data.price > 0) {
             product.price = data.price;
             // AOD settles STOCK too, not just price. The tile marked this out of stock only
@@ -906,6 +962,15 @@ class AmazonAdapter extends BaseAdapter {
    */
   _buildFromSearch(item, query) {
     if (!item.name || !item.asin) return null;
+
+    // An ASIN we have PROVEN serves a different product cannot be re-admitted by a search tile.
+    //
+    // Amazon's search index lags its product pages. B0F1T9ND7G was still on page 1 of "pokemon
+    // booster pack" carrying the stale Pokemon title AND its old $22.96 price, while
+    // /dp/B0F1T9ND7G served a car jump starter. Without this gate, dropping the ASIN on a live
+    // title and deleting its row both get undone by the next sighting of that stale tile — and
+    // the re-admit arrives as inStock:true, which is exactly the wrong-product alert.
+    if (this._denied.has(item.asin)) return null;
     const lower = item.name.toLowerCase();
     if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return null;
     if (PRINT_KEYWORDS.some(k => lower.includes(k))) return null;
@@ -1079,7 +1144,9 @@ class AmazonAdapter extends BaseAdapter {
           // being a product we track leaves the same way any other out-of-scope product does.
           if (data.name && !isInScopeName(data.name)) {
             logger.warn(`Amazon: ASIN ${asin} is no longer the product we stored — dropping. Was "${cached?.name}", now "${data.name}"`);
+            this._denyIdentity(asin, data.name);
             this._knownProducts.delete(asin);
+            this._lastInStockAt.delete(asin);
             delete products[asin];
             continue;
           }
@@ -1102,14 +1169,39 @@ class AmazonAdapter extends BaseAdapter {
             if (reclassified !== 'other') category = reclassified;
           }
 
+          // A titleless read may not RAISE stock.
+          //
+          // Both identity checks above require `data.name`, and _parseAod returns a row with
+          // name:null whenever the title regex misses but an offer parses. So a titleless read
+          // skips the drop check AND the relist check, yet still adopted inStock — which is the
+          // one transition that fires an alert. That is how a repurposed listing announces
+          // itself under the name of the product it replaced.
+          //
+          // Only the upward direction is withheld: a titleless read may still take a product
+          // OUT of stock, still update price and image, and a read that does carry a title is
+          // unaffected.
+          //
+          // Cost: normally one fast-lane re-check (~30s), because the ASIN is stamped hot below.
+          // But BOTH lanes go through _stealthCheckAsin, which returns null for everything while
+          // the AOD cooldown holds — and that ladder escalates 10/20/40min. So a withheld restock
+          // landing just before a deep block can wait as long as the current rung. That is
+          // acceptable only because a titleless read is rare by construction: _parseAod discards
+          // a read with no title unless an offer id AND a price parsed, and those sit in the same
+          // block as the title.
+          const raisesStockBlind = data.inStock && !cached?.inStock && !data.name;
+          if (raisesStockBlind) {
+            logger.warn(`Amazon: ASIN ${asin} read in stock with NO title — holding the restock `
+              + `until the identity is confirmed (stored as "${cached?.name || 'unknown'}")`);
+          }
+
           // Keep cached identity (category, retailer) — update name, price + stock
           const product = {
             ...cached,
             name: name || cached?.name,
             category: category || cached?.category,
             price: data.price || cached.price,
-            inStock: data.inStock,
-            canAddToCart: data.inStock,
+            inStock: raisesStockBlind ? cached.inStock : data.inStock,
+            canAddToCart: raisesStockBlind ? cached.canAddToCart : data.inStock,
             image: data.image || cached.image,
             lastSeen: Date.now(),
           };
@@ -1117,7 +1209,13 @@ class AmazonAdapter extends BaseAdapter {
           products[asin] = product;
           // Fresh in-stock read → keep the ASIN in the auto-hot lane (stamped only on a real
           // sighting, never from a carried-forward row, so hotness genuinely decays after 48h).
-          if (product.inStock) this._lastInStockAt.set(asin, Date.now());
+          //
+          // A withheld blind restock is stamped too, deliberately. We saw stock but refused to
+          // publish it for want of a title, so the useful thing is to look again SOON: the hot
+          // lane re-reads in ~30s rather than waiting out the ~5min cold sweep, and the next
+          // read that carries a title either confirms the restock or drops the ASIN. Without
+          // this, the guard's cost would be a genuine restock delayed by a full sweep.
+          if (product.inStock || raisesStockBlind) this._lastInStockAt.set(asin, Date.now());
         } else {
           // Fetch failed — return cached data unchanged (no false OOS events)
           if (wasThrottled) throttled++;
@@ -1160,7 +1258,13 @@ class AmazonAdapter extends BaseAdapter {
     // Priority 0: the watchlist/hot lane is what restock latency is measured on, so it wins the
     // shared AOD budget over the background sweep.
     const data = await this._stealthCheckAsin(asin, 0);
-    if (!data) return null;
+    // A titleless read is not usable here and must not throw. `data.name` is null whenever the
+    // title regex missed but an offer parsed, and the next line called .toLowerCase() on it —
+    // a TypeError that escapes into pollWatchlist, whose try wraps the WHOLE loop, so one bad
+    // read aborted the entire fast-poll pass. Every hot ASIN after it is then polled by neither
+    // lane, because the sweep deliberately skips hot ASINs. This is also the exact input the
+    // sweep's blind-restock guard now steers into this path, so it has to be safe.
+    if (!data || !data.name) return null;
 
     // Apply game name + TCG filters
     const lowerName = data.name.toLowerCase();
