@@ -180,3 +180,60 @@ describe('sweep search space is capped at the observed end of the catalogue', ()
     assert.strictEqual(a._sweepCursor, 3);
   });
 });
+
+/**
+ * The cap has to arrive FAST or it is useless.
+ *
+ * The first version learned the catalogue end only from the sequential explorer, which advances
+ * one page per sweep — 64 sweeps, over twenty hours at the 20-minute backstop, for a 64-page
+ * shop. The cold-read burst that earns the 429s would have continued for a day. Pages are
+ * contiguous, so ANY empty page proves the catalogue is shorter than it.
+ */
+describe('the catalogue end is learned from any page, not just the explorer', () => {
+  function sweeper(lastRealPage) {
+    const a = shop();
+    a.pageLimit = 250;
+    a.requested = [];
+    // A shop with `lastRealPage` full pages and nothing beyond.
+    a._fetchPage = async (url) => {
+      const page = Number((url.match(/[?&]page=(\d+)/) || [])[1] || 1);
+      a.requested.push(page);
+      const n = page <= lastRealPage ? 250 : 0;
+      return { products: Array.from({ length: n }, (_, i) => ({
+        id: page * 1000 + i, handle: `h${page}-${i}`, title: 'Pokemon TCG: Booster Box',
+        variants: [{ id: page * 1000 + i, price: '10.00', available: true, sku: `s${page}-${i}` }],
+        images: [], published_at: new Date().toISOString(),
+      })) };
+    };
+    return a;
+  }
+
+  test('one empty page collapses the search space immediately', async () => {
+    const a = sweeper(3);              // real catalogue: 3 pages; config ceiling: 100
+    await a.fetchAllProducts({});
+    assert.ok(a._knownLastPage > 0 && a._knownLastPage <= 3,
+      `expected the end to be learned in ONE sweep — got ${a._knownLastPage}`);
+  });
+
+  test('the next sweep no longer explores beyond it', async () => {
+    const a = sweeper(3);
+    await a.fetchAllProducts({});
+    a.requested = [];
+    await a.fetchAllProducts({});
+    assert.ok(a.requested.every((p) => p <= 4),
+      `must stay within the catalogue (+1 for growth) — got ${a.requested.join(',')}`);
+  });
+
+  test('a shop that grows raises its own cap', async () => {
+    const a = sweeper(3);
+    await a.fetchAllProducts({});
+    const before = a._knownLastPage;
+    // The shop grows to 6 pages.
+    const grown = sweeper(6);
+    grown._knownLastPage = before;
+    grown._pageYield = a._pageYield;
+    await grown.fetchAllProducts({});
+    assert.ok(grown._knownLastPage >= before,
+      'a full page proves the catalogue reaches at least that far');
+  });
+});

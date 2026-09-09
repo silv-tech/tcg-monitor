@@ -993,7 +993,15 @@ class ShopifyAdapter extends BaseAdapter {
       if (!data.products || data.products.length === 0) {
         // Only the sequential explorer proves where the catalogue ends. A productive page
         // coming back empty just means its contents shifted.
-        if (page === explore) { reachedEnd = true; this._knownLastPage = Math.max(1, page - 1); }
+        // ANY empty page proves the catalogue is shorter than this, not just the explorer's.
+        // Pages are contiguous, so page N empty means fewer than 250*(N-1) products right now.
+        // Learning this only from the explorer took one page per sweep — 64 sweeps, over 20
+        // hours, for a 64-page shop — so the cap never arrived in time to matter. The discovery
+        // pass reads up to ten unread pages a sweep, and any one of them coming back empty now
+        // collapses the search space immediately.
+        if (page === explore) reachedEnd = true;
+        const end = Math.max(1, page - 1);
+        this._knownLastPage = this._knownLastPage ? Math.min(this._knownLastPage, end) : end;
         this._pageYield.set(String(page), { n: 0, at: Date.now() });
         continue;
       }
@@ -1018,7 +1026,18 @@ class ShopifyAdapter extends BaseAdapter {
 
       pagesRead++;
       // A short page is the last one the shop has.
-      if (page === explore && data.products.length < this.pageLimit) { reachedEnd = true; this._knownLastPage = page; }
+      // A FULL page is a LOWER bound: it proves the catalogue reaches at least this far, and
+      // says nothing about where it stops. It must never lower the cap — an earlier version let
+      // it set the cap outright, so after one sweep of full pages the ceiling collapsed to the
+      // highest page seen and the shop could never explore past it. The existing rotation test
+      // caught that. It only ever RAISES a cap that a shrink had set too low, which is how a
+      // shop that grows recovers its coverage.
+      if (data.products.length >= this.pageLimit) {
+        if (this._knownLastPage && page >= this._knownLastPage) this._knownLastPage = page;
+      } else if (page === explore) {
+        reachedEnd = true;
+        this._knownLastPage = page;
+      }
     }
 
     // The explorer advances one page per sweep and wraps at the end.
