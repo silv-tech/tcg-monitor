@@ -32,9 +32,21 @@ function eventKeys(event) {
   const base = `${PREFIX}${type}:${product.retailer}:${product.sku}`;
 
   if (type === 'RESTOCK') {
-    // Include stock state so OOS→restock→OOS→restock generates unique keys
+    // Key off the FROZEN transition value, never the live product.
+    //
+    // `event.product` is a reference into the adapter's own long-lived cache, which the next poll
+    // mutates in place. This key used to read `product.inStock`, and it is evaluated TWICE — once
+    // by isDuplicate() when the event is queued, and again by markSent() after the Discord send
+    // returns. A poll landing between those two reads flipped inStock to false, so the check asked
+    // for `:1` and the mark wrote `:0`. The `:1` key was therefore never written, and the next
+    // genuine restock passed dedup and alerted a second time. Reproduced against this exact
+    // function on 2026-09-10: check `...:1` -> miss, mark wrote `...:0`, recheck `...:1` -> miss.
+    //
+    // `event.newValue` is a literal `true` set once at detection (events.js) and never touched
+    // again, so both reads now agree by construction no matter what the adapter does meanwhile.
+    const inStock = typeof event.newValue === 'boolean' ? event.newValue : product.inStock;
     const ttl = product?._watchlist ? WATCHLIST_RESTOCK_TTL : DEDUP_TTL;
-    return [[`${base}:${product.inStock ? '1' : '0'}`, ttl]];
+    return [[`${base}:${inStock ? '1' : '0'}`, ttl]];
   }
 
   if (type === 'PRICE_CHANGE' && event.oldValue != null && event.newValue != null) {

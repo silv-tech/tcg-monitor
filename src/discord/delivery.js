@@ -56,6 +56,23 @@ try {
   channelsConfig = null;
 }
 
+// id -> display name, e.g. 'titantoyz' -> 'Titan Toyz'. embeds.js does
+// `embed.setAuthor({ name: product.retailer })`, and discord.js REJECTS an undefined name — so a
+// row missing `retailer` throws during embed construction, which is the same escaped-throw that
+// skipped markSent and made a failed alert retry forever. Recovering the real name keeps the embed
+// correct rather than merely non-crashing.
+let RETAILER_NAMES = {};
+try {
+  // The file's top level is the retailer list itself, keyed by index.
+  RETAILER_NAMES = Object.fromEntries(
+    Object.values(require('../config/retailers.json'))
+      .filter((r) => r && r.id && r.name)
+      .map((r) => [r.id, r.name])
+  );
+} catch {
+  RETAILER_NAMES = {};
+}
+
 class DeliveryQueue {
   constructor() {
     this.queue = [];
@@ -82,6 +99,16 @@ class DeliveryQueue {
   }
 
   async deliver(events, { skipDedup } = {}) {
+    // Repair the retailer name BEFORE dedup runs, never after.
+    //
+    // The dedup key is built from `product.retailer` (dedup.js), and it is computed twice: once by
+    // filterDuplicates() below, and again by markSent() once the send completes. Backfilling the
+    // name in routeEvent — i.e. BETWEEN those two — would make the check and the mark disagree and
+    // would have turned a crash fix into a duplicate-alert bug, which is the very failure this
+    // release also fixes. Normalising up front keeps both reads identical.
+    for (const e of events) {
+      if (e && e.product) this.normalizeRetailer(e.product);
+    }
     const toSend = skipDedup ? events : await filterDuplicates(events);
     if (!toSend.length) return;
 
@@ -399,8 +426,29 @@ class DeliveryQueue {
     }
 
     const { product } = event;
+    // Idempotent belt-and-braces. deliver() has already done this before dedup ran, so this is a
+    // no-op on every production path — both callers of routeEvent live inside deliver(). It exists
+    // so a future direct caller cannot resurrect the crash. Because it only ever FILLS EMPTY
+    // fields, it can never move a dedup key that deliver() already settled.
+    this.normalizeRetailer(product);
     const category = product.category || 'default';
-    const retailerId = product.retailerId || this.retailerIdFromName(product.retailer);
+    // Three sources, cheapest first. A row missing every one of them must not take the whole
+    // delivery path down with it — see the ALERT LOST guard below.
+    const retailerId = product.retailerId
+      || this.retailerIdFromName(product.retailer)
+      || this.retailerIdFromUrl(product.url);
+
+    if (!retailerId) {
+      // Recorded UNTHROTTLED and then allowed to fall through to a normal return, NOT a throw.
+      // Throwing here is what made this permanent: the catch in processQueue skips markSent, so an
+      // unroutable event is retried and re-thrown on every single poll for the life of the process.
+      // Returning lets dedup mark it, which costs us this one alert instead of an endless loop.
+      logger.warn(`ALERT LOST (unroutable — no retailerId, retailer or usable url): ${event.type} — `
+        + `${product.name || 'unknown'} | sku=${product.sku || '?'} | price=${product.price ?? '?'}`);
+      return;
+    }
+
+
 
     // --- CATEGORY FILTER: only send alerts for active categories ---
     // Scan/test/watchlist/early events bypass this filter
@@ -572,7 +620,31 @@ class DeliveryQueue {
     return pings.length > 0 ? pings.join(' ') : null;
   }
 
+  /**
+   * Give a product a usable retailer id and display name, in place.
+   *
+   * 150 of 515 stored Titan Toyz rows carry neither field. Without a name, embeds.js's
+   * `setAuthor({ name: product.retailer })` is rejected by discord.js and the throw escapes
+   * routeEvent, skipping markSent — so the alert is lost AND retried forever. The host in the
+   * product's own URL is enough to recover both.
+   */
+  normalizeRetailer(product) {
+    if (!product.retailerId) {
+      product.retailerId = this.retailerIdFromName(product.retailer) || this.retailerIdFromUrl(product.url) || null;
+    }
+    if (!product.retailer && product.retailerId) {
+      product.retailer = RETAILER_NAMES[product.retailerId] || product.retailerId;
+    }
+    return product;
+  }
+
   retailerIdFromName(retailerName) {
+    // Returns null rather than throwing on a missing name. It used to end in
+    // `retailerName.toLowerCase()`, which threw TypeError on undefined — and that throw escaped
+    // routeEvent, so markSent() never ran, so dedup never recorded the event, so the SAME restock
+    // re-fired and re-crashed on every poll, forever. Measured in production 2026-09-10: two
+    // Titan Toyz RESTOCKs failing every ~3m18s, permanently undeliverable and permanently retried.
+    if (!retailerName || typeof retailerName !== 'string') return null;
     const map = {
       'EB Games': 'ebgames',
       'Best Buy Canada': 'bestbuy',
@@ -581,7 +653,27 @@ class DeliveryQueue {
       'Walmart Canada': 'walmart',
       'Amazon Canada': 'amazon',
     };
-    return map[retailerName] || retailerName.toLowerCase().replace(/\s+/g, '');
+    return map[retailerName] || retailerName.toLowerCase().replace(/\s+/g, '') || null;
+  }
+
+  /**
+   * Last-resort retailer id, recovered from the product's own URL host.
+   *
+   * 150 of 515 stored Titan Toyz rows carry neither `retailerId` nor `retailer`, so name-based
+   * resolution cannot work for them. The host is still right there in the URL we are about to put
+   * in front of a customer, and `titantoyz.com` -> `titantoyz` matches the configured retailer id.
+   * Recovering it means these alerts are DELIVERED rather than merely not-crashing.
+   */
+  retailerIdFromUrl(url) {
+    if (!url || typeof url !== 'string') return null;
+    let host;
+    try {
+      host = new URL(url).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+    const bare = host.replace(/^www\./, '').split('.')[0].replace(/[^a-z0-9]/g, '');
+    return bare || null;
   }
 
   /**
