@@ -220,7 +220,7 @@ function isSingleCard(name) {
  * Everything tracked must name a game we follow, and must not be an accessory, a book, a
  * sponsored ad slot, or a single card. Names are mojibake-repaired first.
  */
-function isInScopeName(name) {
+function isInScopeName(name, extraGameNames = []) {
   const repaired = repairMojibake(name);
   const lower = repaired.toLowerCase();
   if (!lower) return false;
@@ -232,7 +232,8 @@ function isInScopeName(name) {
   // is still rejected ("Eevee (173) - Prismatic Evolutions Pokemon Center ETB - Promo").
   if (isSingleCard(repaired)) return false;
 
-  const namesGame = GAME_NAMES.some(g => lower.includes(g)) || SET_NAMES.some(k => lower.includes(k));
+  const namesGame = GAME_NAMES.some(g => lower.includes(g)) || SET_NAMES.some(k => lower.includes(k))
+    || extraGameNames.some(g => lower.includes(g)); // per-retailer additive scope (default none)
   if (!namesGame) return false;
 
   // An unambiguous sealed product type settles it. Sealed boxes describe their own contents,

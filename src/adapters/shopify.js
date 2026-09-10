@@ -705,7 +705,7 @@ class ShopifyAdapter extends BaseAdapter {
           // search result: products/<handle>.js returns the same product id, variant id and
           // sku that products.json does, so the key derived below is identical to the one
           // pagination would produce, and no second identity can appear.
-          if (isInScopeName(item.title) && discovered < SEARCH_DISCOVERY_PER_TICK) {
+          if (isInScopeName(item.title, this.extraGameNames) && discovered < SEARCH_DISCOVERY_PER_TICK) {
             discovered++;
             try {
               const { products: one } = await this._fetchPage(`${this.url}/products/${item.handle}.js`);
@@ -1175,7 +1175,7 @@ class ShopifyAdapter extends BaseAdapter {
     // coarse category screen that deliberately RESCUED every trading card game and singles
     // ('yugioh', 'lorcana', 'mtg', 'single', 'psa ', 'graded'), which is why the shops were
     // alerting on MTG, Lorcana, hockey boxes and 50,000 single cards. Scope is decided here.
-    if (!isInScopeName(item.title)) return;
+    if (!isInScopeName(item.title, this.extraGameNames)) return;
 
     // Each Shopify product can have multiple variants
     for (const variant of item.variants) {

@@ -25,6 +25,10 @@ class BaseAdapter {
     this.enabled = retailerConfig.enabled;
     this.maxProducts = retailerConfig.maxProducts || 500; // Configurable cap (#17)
     this.timing = retailerConfig.timing || {}; // Per-store cadence overrides (retailers.json / Redis)
+    // Per-retailer additive game scope. Empty for every retailer by default, so the shared global
+    // scope is unchanged; a store may opt into an extra franchise (e.g. Titan Toyz + Dragon Ball)
+    // without widening scope for anyone else. Passed into isInScopeName wherever this adapter checks.
+    this.extraGameNames = retailerConfig.extraGameNames || [];
     this._lastFreshness = null; // set via reportFreshness() by adapters that serve cached data
     // Opt out where a priceless catalogue is expected rather than a parser fault
     this.parseCanary = retailerConfig.parseCanary !== false;
@@ -316,7 +320,7 @@ class BaseAdapter {
     // A watchlist SKU is a hand-picked product; no name heuristic gets to delete it.
     const watched = this.watchlist instanceof Set ? this.watchlist : new Set();
     const doomed = entries.filter(([sku, p]) =>
-      p && p.name && !watched.has(String(sku)) && !p._watchlist && !isInScopeName(p.name));
+      p && p.name && !watched.has(String(sku)) && !p._watchlist && !isInScopeName(p.name, this.extraGameNames));
 
     // Repair runs first and unconditionally. It used to sit after the purge, so once a
     // catalogue was clean the early return below skipped it forever — which is precisely the

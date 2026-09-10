@@ -376,6 +376,8 @@
     "proxyTier": "isp",
     "enabled": true,
     "color": "#9b59b6",
+    "extraGameNames": ["dragon ball", "dbs "],
+    "maxProducts": 8000,
     "collections": [],
     "searchKeywords": [
       "pokemon",
@@ -384,6 +386,8 @@
       "elite trainer",
       "one piece",
       "dragon ball",
+      "dragon ball super",
+      "fusion world",
       "lorcana",
       "yugioh",
       "yu-gi-oh",
