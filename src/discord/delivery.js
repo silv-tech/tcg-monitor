@@ -83,7 +83,7 @@ class DeliveryQueue {
     this.inFlight = null;       // event currently being sent, for drain() to account for // track in-flight free-tier delays (best-effort, lost on restart)
     // Injectable so the identity gate can be tested without a network call or an API key. The
     // fail-open path is the one that must be provable, and it is unprovable against a live fetch.
-    this.verifyListing = (asin) => verifyAmazonListing(asin, { fetcher: offersFetcher, timeoutMs: VERIFY_TIMEOUT_MS });
+    this.verifyListing = (asin, storedName) => verifyAmazonListing(asin, { fetcher: offersFetcher, timeoutMs: VERIFY_TIMEOUT_MS, storedName });
   }
 
   setClient(client) {
@@ -365,7 +365,7 @@ class DeliveryQueue {
       // confirmed mismatch suppresses; anything we could not read fires anyway — see routeEvent.
       if (product.retailerId === 'amazon' && product.sku && !event._scanTier
           && VERIFY_TYPES.has(event.type)) {
-        event._identity = await this.verifyListing(product.sku);
+        event._identity = await this.verifyListing(product.sku, product.name);
       }
     } catch (err) {
       logger.debug(`Event enrichment failed: ${err.message}`);
@@ -410,6 +410,13 @@ class DeliveryQueue {
       state.denyIdentity('amazon', p.sku, `alert-time: ${event._identity.reason}`.slice(0, 200))
         .catch((err) => logger.warn(`Could not denylist ${p.sku}: ${err.message}`));
       return;
+    }
+    if (event._identity && event._identity.verdict === 'scope-mismatch') {
+      // The live title still matches what we stored, so nothing drifted — the scope rule simply
+      // rejects a product we are legitimately tracking. Sending is correct. Logged unthrottled
+      // because each occurrence is a concrete scope false positive worth fixing at the source.
+      logger.warn(`SCOPE MISMATCH (sending anyway — not drift): ${event.type} — `
+        + `stored "${event.product?.name}" | live "${event._identity.title}" | sku=${event.product?.sku}`);
     }
     if (event._identity && event._identity.verdict === 'no-stock') {
       // Deliberately not a suppression — logged so the RESTOCK race is measurable rather than

@@ -186,6 +186,39 @@ function parseOffers(payload) {
 }
 
 /**
+ * How much of the stored name survives in the live title, 0..1.
+ *
+ * Containment (shared / smaller side), NOT Jaccard. Amazon titles are far longer than the names we
+ * store — "Pokemon TCG Gardevoir ex League Battle Deck" against a 30-word Amazon title would score
+ * a low Jaccard while plainly being the same product. What we actually want to ask is whether the
+ * stored name is still essentially present, and containment asks exactly that.
+ *
+ * Tokens shorter than 2 characters are dropped so punctuation and stray initials do not inflate
+ * the score.
+ */
+function nameTokens(s) {
+  return new Set(
+    String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter((t) => t.length > 1)
+  );
+}
+
+function nameOverlap(a, b) {
+  const A = nameTokens(a);
+  const B = nameTokens(b);
+  if (!A.size || !B.size) return 0;
+  let shared = 0;
+  for (const t of A) if (B.has(t)) shared++;
+  return shared / Math.min(A.size, B.size);
+}
+
+// Above this, the live title still describes the stored product, so nothing DRIFTED — whatever the
+// scope rule thinks of it. Set well clear of both observed populations rather than split between
+// them: real drifts measure ~0.0-0.1 (different product categories share almost no vocabulary) and
+// same-product pairs measure ~0.8-1.0. Anything in between is treated as drift, which is the
+// conservative direction for a check whose false ADMIT costs one junk alert.
+const SAME_PRODUCT_OVERLAP = 0.6;
+
+/**
  * Check one ASIN.
  *
  * The fetcher is injected, which is what keeps every spend decision on the caller's side: when a
@@ -195,11 +228,11 @@ function parseOffers(payload) {
  *
  * @param {string} asin
  * @param {{fetcher:(url:string)=>Promise<string|null>, timeoutMs?:number}} opts
- * @returns {Promise<{verdict:'good'|'wrong-identity'|'no-stock'|'inconclusive', reason:string,
+ * @returns {Promise<{verdict:'good'|'wrong-identity'|'no-stock'|'scope-mismatch'|'inconclusive', reason:string,
  *   title?:string, price?:number, inStock?:boolean, seller?:string, olid?:string}>}
  */
 async function verifyAmazonListing(asin, opts = {}) {
-  const { fetcher, timeoutMs = 4000 } = opts;
+  const { fetcher, timeoutMs = 4000, storedName = null } = opts;
   if (!asin || typeof fetcher !== 'function') {
     return { verdict: 'inconclusive', reason: 'no fetcher' };
   }
@@ -246,7 +279,30 @@ async function verifyAmazonListing(asin, opts = {}) {
   // Distinguishing them by verdict rather than by matching the reason string is deliberate: a
   // reworded reason must not be able to silently re-introduce that behaviour.
   if (!isInScopeName(p.title)) {
-    return { verdict: 'wrong-identity', reason: `live title is out of scope: "${p.title.slice(0, 80)}"`, ...fields };
+    // Out of scope is NOT the same question as drifted, and only drift may suppress an alert.
+    //
+    // This check shares isInScopeName with the ingestion filter, and that function has a confirmed
+    // false-positive class: a sealed product whose title lists a promo card among its contents is
+    // rejected as a single (three real ASINs hit so far). Without the guard below, such a product
+    // would be suppressed AND permanently denylisted here — losing every future restock of a real
+    // product. That is a worse outcome than the drift this gate exists to stop.
+    //
+    // The gate's actual job is detecting that the product BEHIND THE LINK CHANGED. If the live
+    // title still contains the stored name, nothing changed, and a scope verdict against it is our
+    // own filter being wrong rather than Amazon having repurposed the ASIN. Structurally this
+    // cannot blind the gate: it only ever fires on out-of-scope drift, i.e. a jump to a different
+    // product CATEGORY, and a dart board cannot be titled like a Pokemon card lot. Measured on all
+    // four known drifts: overlap 0.00-0.06 against a 0.6 threshold.
+    const overlap = storedName ? nameOverlap(storedName, p.title) : 0;
+    if (overlap >= SAME_PRODUCT_OVERLAP) {
+      return {
+        verdict: 'scope-mismatch',
+        reason: `live title matches the stored name (${overlap.toFixed(2)}) but fails the scope rule`,
+        overlap,
+        ...fields,
+      };
+    }
+    return { verdict: 'wrong-identity', reason: `live title is out of scope: "${p.title.slice(0, 80)}"`, overlap, ...fields };
   }
   if (!p.inStock) {
     return { verdict: 'no-stock', reason: 'page has no buy box and no offer — nothing to buy', ...fields };
@@ -254,4 +310,4 @@ async function verifyAmazonListing(asin, opts = {}) {
   return { verdict: 'good', reason: 'title in scope and a live offer exists', ...fields };
 }
 
-module.exports = { verifyAmazonListing, parseListing, parseOffers };
+module.exports = { verifyAmazonListing, parseListing, parseOffers, nameOverlap, SAME_PRODUCT_OVERLAP };
