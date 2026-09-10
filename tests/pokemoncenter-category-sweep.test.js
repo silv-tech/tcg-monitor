@@ -65,8 +65,15 @@ describe('category listing parser', () => {
 });
 
 describe('sweep marks stock and clears safely', () => {
+  // The sweep is DISABLED in production as of 2026-09-11: `?availability=true` stopped being a
+  // real server-side filter (measured — the filtered and unfiltered URLs now return an
+  // identical product set), so membership of the listing no longer means "in stock" and the
+  // lane would mark the whole category in stock. The mechanics below are still correct and are
+  // what will run if the filter is ever verified working again, so these tests opt in
+  // explicitly rather than being deleted.
   const stubFetch = (a, pages) => {
     const brightData = require('../src/utils/brightdata');
+    process.env.PC_CATEGORY_SWEEP = '1';
     a._origConfigured = brightData.isConfigured;
     brightData.isConfigured = () => true;
     let i = 0;

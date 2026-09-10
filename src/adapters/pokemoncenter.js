@@ -94,6 +94,9 @@ class PokemonCenterAdapter extends BaseAdapter {
     this._consecutiveFailures = 0;
     this._failStreak = new Map();     // sku -> consecutive total failures
     this._unfetchable = new Map();    // sku -> { until } while parked
+    this._freshAttempts = 0;          // stock reads attempted since the last freshness report
+    this._freshSuccesses = 0;         // ...and how many produced data. Health reads these.
+    this._sweepDisabledLogged = false;
 
     // SKUs the last COMPLETE category sweep reported in stock. Only these can be cleared by a
     // later sweep, which keeps the absent-means-out-of-stock inference to products the sweep
@@ -211,6 +214,10 @@ class PokemonCenterAdapter extends BaseAdapter {
   }
 
   _noteCheckOutcome(sku, ok) {
+    // Every stock read passes through here, which makes it the honest place to count what
+    // freshness reports. See the note at the reportFreshness call site.
+    this._freshAttempts = (this._freshAttempts || 0) + 1;
+    if (ok) this._freshSuccesses = (this._freshSuccesses || 0) + 1;
     if (ok) {
       if (this._failStreak.delete(sku)) this._unfetchable.delete(sku);
       return;
@@ -476,8 +483,24 @@ class PokemonCenterAdapter extends BaseAdapter {
       });
     }
 
-    // The sitemap phase is what this poll actually does, and it succeeded if we got here.
-    this.reportFreshness(this.availabilityCache.size, this.sitemapProducts.size);
+    // Freshness must describe STOCK DETECTION, not the sitemap.
+    //
+    // This used to report `availabilityCache.size` against `sitemapProducts.size`. The cache is
+    // restored from Redis at boot and only ever grows, so the fresh count could never fall to
+    // zero and `zeroFreshPolls` could never trip. The consequence was measured on 2026-09-11:
+    // Bright Data's account had been suspended, 188 consecutive stock checks returned nothing,
+    // every one of 805 products read out of stock — and /api/health still said
+    // `healthy: true, stale: false, servingStaleData: false`. The store was totally blind and
+    // the one signal built to say so was reporting the size of a cache.
+    //
+    // Report the outcome of the checks instead: of the stock reads attempted since the last
+    // poll, how many actually produced data. When nothing was due, say nothing at all rather
+    // than inventing a healthy sample — poll-adapter simply skips a null reading.
+    if (this._freshAttempts > 0) {
+      this.reportFreshness(this._freshSuccesses, this._freshAttempts);
+      this._freshAttempts = 0;
+      this._freshSuccesses = 0;
+    }
 
     // A store that cannot check anything cannot detect a restock, and must not read as a
     // normal cycle. Kept from the previous shape because the failure it warns about is real.
@@ -611,6 +634,34 @@ class PokemonCenterAdapter extends BaseAdapter {
    */
   async _sweepCategories() {
     if (!brightData.isConfigured()) return;
+
+    // DISABLED 2026-09-11 — this lane's premise is no longer true.
+    //
+    // Everything below rests on `?availability=true` being a real server-side filter, so that
+    // MEMBERSHIP of the returned listing means "in stock". That was measured true when this was
+    // written (973 -> 137, matching the facet). It is now measured FALSE: on 2026-09-11 the
+    // filtered and unfiltered URLs returned a byte-identical product set — same 31 products in
+    // the same order — via a real browser navigation AND via a raw same-origin fetch. The
+    // per-product `availability` sitting beside them is a constant `OutOfStock` (verified
+    // against a product whose own page says InStock) and its currency is USD, not CAD.
+    //
+    // So the sweep would now read the WHOLE category and mark every product in it inStock:true.
+    // Redis currently holds all 805 rows as out of stock, so the first sweep after the Bright
+    // Data account is un-suspended would fire a mass false RESTOCK — up to ~973 events against
+    // a limiter that mutes at 120/min and then discards the remainder PERMANENTLY.
+    //
+    // Only the FACET counts on that page are still accurate (IN_STOCK 136 / OUT_OF_STOCK 837),
+    // which is why this is disabled rather than deleted: re-verify that the filter filters, and
+    // this lane can come back. Set PC_CATEGORY_SWEEP=1 to re-enable after verifying.
+    if (process.env.PC_CATEGORY_SWEEP !== '1') {
+      if (!this._sweepDisabledLogged) {
+        this._sweepDisabledLogged = true;
+        logger.warn('Pokemon Center: category sweep is DISABLED — the ?availability=true filter '
+          + 'no longer filters, so listing membership would mark the whole category in stock. '
+          + 'Re-verify the filter, then set PC_CATEGORY_SWEEP=1.');
+      }
+      return;
+    }
 
     const fresh = new Map();  // sku -> { price, name }
     let complete = true;
@@ -889,7 +940,10 @@ class PokemonCenterAdapter extends BaseAdapter {
           return {
             inStock: availability.includes('InStock'),
             price: typeof json.offers?.price === 'number' ? json.offers.price : normalizePrice(String(json.offers?.price || '')),
-            image: json.image || '',
+            // PC ships `image` as an ARRAY of five-plus gallery URLs. Stored raw it reaches
+            // embeds.setThumbnail(), which throws on an array and loses the alert permanently
+            // (see the note there). Take the first URL — it is the primary product shot.
+            image: Array.isArray(json.image) ? (json.image[0] || '') : (json.image || ''),
           };
         }
       } catch (err) { logger.debug(`Pokemon Center: malformed JSON-LD: ${err.message}`); }
