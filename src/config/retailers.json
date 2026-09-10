@@ -61,7 +61,7 @@
     "adapter": "amazon",
     "intervalMs": 6000,
     "proxyTier": "residential-us",
-    "maxProducts": 577,
+    "maxProducts": 599,
     "enabled": true,
     "color": "#ff9900",
     "timing": {
