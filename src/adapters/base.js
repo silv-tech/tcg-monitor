@@ -40,6 +40,11 @@ class BaseAdapter {
     // scope is unchanged; a store may opt into an extra franchise (e.g. Titan Toyz + Dragon Ball)
     // without widening scope for anyone else. Passed into isInScopeName wherever this adapter checks.
     this.extraGameNames = retailerConfig.extraGameNames || [];
+    // A store whose ENTIRE catalogue is in scope, so no name rule is consulted for it at all.
+    // Pokemon Center is the case this exists for: the client asked to track everything it sells,
+    // and everything it sells is Pokemon — plush, apparel, homeware included. Opt-in per retailer
+    // and default false, so the shared rule and the other 17 stores are untouched.
+    this.trackAllProducts = retailerConfig.trackAllProducts === true;
     this._lastFreshness = null; // set via reportFreshness() by adapters that serve cached data
     // Opt out where a priceless catalogue is expected rather than a parser fault
     this.parseCanary = retailerConfig.parseCanary !== false;
@@ -359,6 +364,11 @@ class BaseAdapter {
    * see. Fire-and-forget: a maintenance sweep must never delay or fail a poll.
    */
   _maybePurgeOutOfScope(opts = {}) {
+    // A track-everything store has nothing out of scope, so a scope purge could only delete real
+    // products. Do NOT rely on the maxShare abort below to catch this: at Pokemon Center's
+    // measured 8,415 SKUs of which 805 pass the TCG rule, the purge share is 7,610/8,415 = 0.904
+    // against a 0.9 ceiling — it would abort by four thousandths. That is not a safety margin.
+    if (this.trackAllProducts) return;
     if (!SCOPE_PURGE_ENABLED || this._scopePurgeDone) return;
     this._scopePurgeDone = true;
     this._purgeOutOfScopeState({ dryRun: !SCOPE_INGESTION_ENFORCE, ...opts }).catch((err) =>
@@ -445,6 +455,19 @@ class BaseAdapter {
   classify(product) {
     product.category = classifyCategory(product.name, productsConfig.categories);
     product.isTCG = isTCGProduct(product.name);
+    // A track-everything store's catalogue is in scope by definition, so the name heuristics
+    // must not quietly veto it downstream. Two of them would:
+    //   delivery.js drops any event whose product has isTCG === false — a plush or a clog names
+    //   no TCG keyword, so every one of those alerts would vanish at a logger.debug.
+    //   classifyCategory returns 'other' for a name matching none of the seven games, and
+    //   delivery.js only routes the categories in ALL_CATEGORIES, so 'other' is dropped too.
+    // Forcing 'pokemon' here is truthful rather than a workaround: everything Pokemon Center
+    // sells is Pokemon. It also means channels.json and ALL_CATEGORIES stay untouched, which
+    // matters because those are shared by all 18 retailers.
+    if (this.trackAllProducts) {
+      product.isTCG = true;
+      if (product.category === 'other') product.category = 'pokemon';
+    }
     product.retailer = this.name;
     product.retailerId = this.id;
     product.lastSeen = Date.now();

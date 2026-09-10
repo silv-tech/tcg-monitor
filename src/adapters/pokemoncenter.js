@@ -8,6 +8,13 @@ const state = require('../core/state');
 const brightData = require('../utils/brightdata');
 const { isInScopeName } = require('../utils/scope');
 
+// How long a catalogue may go with no successful stock read before health calls it down.
+// Covers BOTH failure modes: every check failing, and no check being attempted at all
+// (budget spent, everything parked). Measured 2026-09-11, the store sat in the second
+// state reporting healthy:true. Generous, because a slow rotation can legitimately be
+// quiet for hours; a browser bridge makes it minutes.
+const STOCK_BLIND_MS = Number(process.env.PC_STOCK_BLIND_MS) || 6 * 60 * 60 * 1000;
+
 // One Redis key for the whole availability cache — written at most once per poll.
 const PC_AVAILABILITY_KEY = 'tcg:pokemoncenter:availability';
 const PC_UNFETCHABLE_KEY = 'tcg:pokemoncenter:unfetchable';
@@ -96,6 +103,10 @@ class PokemonCenterAdapter extends BaseAdapter {
     this._unfetchable = new Map();    // sku -> { until } while parked
     this._freshAttempts = 0;          // stock reads attempted since the last freshness report
     this._freshSuccesses = 0;         // ...and how many produced data. Health reads these.
+    // Seeded to process start so a fresh boot is given STOCK_BLIND_MS to read something before
+    // it is called blind; _loadAvailability advances it to the newest stored checkedAt.
+    this._lastGoodReadAt = Date.now();
+    this._blindWarned = false;
     this._sweepDisabledLogged = false;
 
     // SKUs the last COMPLETE category sweep reported in stock. Only these can be cleared by a
@@ -213,11 +224,104 @@ class PokemonCenterAdapter extends BaseAdapter {
     logger.info(`Pokemon Center: parking ${sku} for ${UNFETCHABLE_COOLDOWN_MS / 3600000}h — ${reason}`);
   }
 
+  /**
+   * Hand the browser bridge the next products to read, stalest first.
+   *
+   * The bridge exists because pokemoncenter.com is behind DataDome, which refuses every HTTP
+   * client and every proxy — but NOT a real browser. Measured 2026-09-11 in the user's own
+   * Chrome: a same-origin fetch of a product page returns the full server HTML with correct
+   * ld+json (`sku`, real `offers.availability`, `price`, `priceCurrency: CAD`), and four in
+   * parallel completed in 3.6s with no challenge. That is ~1.1 products/sec, so the whole
+   * 8,415-product catalogue is readable in ~2.1 hours. The paid transport it replaces manages
+   * 1,459 checks/day — 21 DAYS for one pass — which is why no amount of budget could deliver
+   * "track every product" and a browser can.
+   *
+   * Ordering is the same rule the paid rotation used: never-checked first, then stalest. The
+   * cache is the clock, and it is persisted, so progress survives a restart.
+   *
+   * This is a READ. It is deliberately a GET so the bridge polling for work cannot consume the
+   * 30-writes-per-minute-per-IP budget that the pushes themselves need.
+   */
+  getWorkBatch(limit = 100) {
+    const n = Math.max(1, Math.min(500, Number(limit) || 100));
+    const now = Date.now();
+    const candidates = [];
+    for (const [sku, meta] of this.sitemapProducts) {
+      // Parking is a Bright Data artifact — it counts unlock failures, and `expect_element`
+      // parks on a selector the unlocker never saw. None of that describes a browser, so a
+      // parked SKU is still perfectly readable here and must not be skipped.
+      const cached = this.availabilityCache.get(sku);
+      candidates.push([sku, (cached && cached.checkedAt) || 0, meta.url]);
+    }
+    candidates.sort((a, b) => a[1] - b[1]);
+    return candidates.slice(0, n).map(([sku, checkedAt, url]) => ({ sku, url, checkedAt }));
+  }
+
+  /**
+   * Accept stock read by the browser.
+   *
+   * Records are `{ sku, ld }`, where `ld` is the raw text of the product page's ld+json block.
+   * The bridge sends that block rather than the page: a PC product page is ~440KB but its
+   * ld+json is ~1.3KB, so a full catalogue pass is ~11MB instead of ~3.7GB. Parsing still
+   * happens HERE, through the same parseJsonLd the paid path used, so there is no second copy
+   * of the extraction to drift out of step with the site.
+   *
+   * @returns {{accepted:number, rejected:number, changed:number}}
+   */
+  async ingestPushed(records) {
+    if (!Array.isArray(records) || records.length === 0) throw new Error('no records');
+    if (records.length > 500) throw new Error(`too many records (${records.length} > 500)`);
+
+    let accepted = 0;
+    let rejected = 0;
+    let changed = 0;
+
+    for (const rec of records) {
+      const sku = rec && typeof rec.sku === 'string' ? rec.sku.trim() : '';
+      const ld = rec && typeof rec.ld === 'string' ? rec.ld : '';
+      if (!sku || !ld) { rejected++; continue; }
+
+      // Only ever write stock for a product the sitemap actually lists. A mis-targeted tab
+      // would otherwise write one product's stock under another's SKU, straight into a paid
+      // alert source.
+      if (!this.sitemapProducts.has(sku)) { rejected++; continue; }
+
+      // parseJsonLd expects a document to scan, not a bare JSON object.
+      const parsed = this._parseProductHtml(`<script type="application/ld+json">${ld}</script>`);
+      if (!parsed) { rejected++; this._noteCheckOutcome(sku, false); continue; }
+
+      const prev = this.availabilityCache.get(sku);
+      if (!prev || prev.inStock !== parsed.inStock || prev.price !== parsed.price) changed++;
+
+      this.availabilityCache.set(sku, {
+        inStock: parsed.inStock,
+        price: parsed.price,
+        image: parsed.image,
+        checkedAt: Date.now(),
+        source: 'bridge',
+      });
+      // A successful read clears the fail streak and un-parks the SKU in one step.
+      this._noteCheckOutcome(sku, true);
+      accepted++;
+    }
+
+    if (accepted > 0) {
+      this._lastPushAt = Date.now();
+      this._pushes = (this._pushes || 0) + 1;
+      await this._saveAvailability();
+    }
+    return { accepted, rejected, changed };
+  }
+
   _noteCheckOutcome(sku, ok) {
     // Every stock read passes through here, which makes it the honest place to count what
     // freshness reports. See the note at the reportFreshness call site.
     this._freshAttempts = (this._freshAttempts || 0) + 1;
-    if (ok) this._freshSuccesses = (this._freshSuccesses || 0) + 1;
+    if (ok) {
+      this._freshSuccesses = (this._freshSuccesses || 0) + 1;
+      this._lastGoodReadAt = Date.now();
+      this._blindWarned = false;
+    }
     if (ok) {
       if (this._failStreak.delete(sku)) this._unfetchable.delete(sku);
       return;
@@ -263,6 +367,13 @@ class PokemonCenterAdapter extends BaseAdapter {
       for (const [sku, data] of Object.entries(saved)) {
         if (data && typeof data === 'object') { this.availabilityCache.set(sku, data); restored++; }
       }
+      // Carry the newest stored read forward, so a redeploy does not reset the blind clock
+      // and hide an outage that has been running for hours.
+      let newest = 0;
+      for (const d of this.availabilityCache.values()) {
+        if (d && d.checkedAt > newest) newest = d.checkedAt;
+      }
+      if (newest > 0) this._lastGoodReadAt = newest;
       if (restored) logger.info(`Pokemon Center: restored ${restored} cached availability records`);
     } catch (err) {
       logger.warn(`Pokemon Center: could not restore availability cache: ${err.message}`);
@@ -500,6 +611,24 @@ class PokemonCenterAdapter extends BaseAdapter {
       this.reportFreshness(this._freshSuccesses, this._freshAttempts);
       this._freshAttempts = 0;
       this._freshSuccesses = 0;
+    } else if (this.sitemapProducts.size > 0
+        && Date.now() - this._lastGoodReadAt >= STOCK_BLIND_MS) {
+      // Nothing was even ATTEMPTED, and it has been far too long since anything was read.
+      //
+      // Reporting only on attempts is not enough, which the live store proved: with the paid
+      // account suspended, the rotation budget was spent on failures, every product parked for
+      // 12h after two failures, and the poll line settled into "0 queued, 322 parked, checks
+      // idle". No attempts means no samples means health stays green — a store that has given
+      // up looks identical to a store with nothing due.
+      //
+      // A catalogue we cannot read is not healthy, however tidily it stopped trying.
+      this.reportFreshness(0, 1);
+      if (!this._blindWarned) {
+        this._blindWarned = true;
+        const hrs = Math.round((Date.now() - this._lastGoodReadAt) / 3600000);
+        logger.error(`Pokemon Center: no successful stock read in ${hrs}h across `
+          + `${this.sitemapProducts.size} products — detection is DOWN, not merely quiet.`);
+      }
     }
 
     // A store that cannot check anything cannot detect a restock, and must not read as a
@@ -781,12 +910,16 @@ class PokemonCenterAdapter extends BaseAdapter {
       const sku = parts[parts.length - 2] || '';
       if (!sku || !slug) continue;
 
+      // Two gates, both skipped for a track-everything store. Measured 2026-09-11: the sitemap
+      // carries 34,572 product URLs / 8,415 distinct SKUs, and these two reduce that to 805.
+      // The client asked for the whole store, so for Pokemon Center both are bypassed; every
+      // other retailer still passes through them unchanged.
       const lowerSlug = slug.toLowerCase();
-      if (!this.tcgKeywords.some(kw => lowerSlug.includes(kw))) continue;
+      if (!this.trackAllProducts && !this.tcgKeywords.some(kw => lowerSlug.includes(kw))) continue;
 
       const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
       // The shared scope rule, applied to the exact name an alert would carry.
-      if (!isInScopeName(name)) continue;
+      if (!this.trackAllProducts && !isInScopeName(name)) continue;
 
       const caUrl = url.replace(/\/en-[a-z]{2}\/product\//, '/en-ca/product/')
         .replace(/^(https?:\/\/[^/]+)\/product\//, '$1/en-ca/product/');

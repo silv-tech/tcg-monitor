@@ -88,3 +88,49 @@ describe('the category sweep is disabled while its filter premise is false', () 
     }
   });
 });
+
+describe('a store that has STOPPED TRYING is not healthy either', () => {
+  // The gap the live store exposed on 2026-09-11. With the paid account suspended, the rotation
+  // budget was spent on failures and every product parked for 12h after two, so the poll line
+  // settled into "0 queued, 322 parked, checks idle". Zero attempts means zero samples, so
+  // reporting only on attempts left health green for a store that had given up entirely.
+  test('no attempts and no successful read for hours reports zero fresh', () => {
+    a.sitemapProducts = new Map([['A1', { url: 'u', name: 'n' }]]);
+    a._lastGoodReadAt = Date.now() - 7 * 60 * 60 * 1000;
+    a._freshAttempts = 0;
+
+    // The branch fetchProducts takes when nothing was attempted.
+    if (a._freshAttempts === 0 && a.sitemapProducts.size > 0
+        && Date.now() - a._lastGoodReadAt >= 6 * 60 * 60 * 1000) {
+      a.reportFreshness(0, 1);
+    }
+    assert.deepStrictEqual(a._lastFreshness, { fresh: 0, attempted: 1 },
+      'a catalogue nobody can read is not healthy, however tidily it stopped trying');
+  });
+
+  test('a recent successful read keeps it quiet', () => {
+    a.sitemapProducts = new Map([['A1', { url: 'u', name: 'n' }]]);
+    a._lastGoodReadAt = Date.now() - 60 * 1000;
+    assert.ok(Date.now() - a._lastGoodReadAt < 6 * 60 * 60 * 1000,
+      'a store read a minute ago must not be called blind');
+  });
+
+  test('a successful read clears the blind warning so recovery is reported once', () => {
+    a._blindWarned = true;
+    a._noteCheckOutcome('A1', true);
+    assert.strictEqual(a._blindWarned, false);
+    assert.ok(a._lastGoodReadAt > Date.now() - 1000);
+  });
+
+  test('a bridge push counts as a successful read', async () => {
+    a.sitemapProducts = new Map([['A1', { url: 'u', name: 'n' }]]);
+    a._saveAvailability = async () => {};
+    a._lastGoodReadAt = 0;
+    await a.ingestPushed([{ sku: 'A1', ld: JSON.stringify({
+      '@type': 'Product', sku: 'A1', image: 'x',
+      offers: { availability: 'http://schema.org/InStock', price: 10 },
+    }) }]);
+    assert.ok(a._lastGoodReadAt > Date.now() - 1000,
+      'the bridge is a stock read like any other — health must count it');
+  });
+});

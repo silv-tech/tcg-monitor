@@ -96,8 +96,10 @@
     },
     "parseCanary": false,
     "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked",
-    "maxProducts": 1400,
-    "_maxProductsNote": "PC sitemap carries ~1195 TCG products; the default 500 cap hid ~695 of them",
+    "trackAllProducts": true,
+    "_trackAllProductsNote": "client asked 2026-09-11 to track the WHOLE store, not just TCG. Skips the tcgKeywords slug prefilter and isInScopeName in _parseSitemap, forces isTCG/category in classify (delivery.js drops isTCG===false and routes no 'other' category), and disables the out-of-scope purge. PC only — the other 17 retailers are untouched.",
+    "maxProducts": 12000,
+    "_maxProductsNote": "MEASURED 2026-09-11: sitemaps/products.xml carries 34,572 product URLs = 8,415 DISTINCT SKUs. This is 43% headroom over that. It is NOT a count of anything live — base.js sorts SKUs alphabetically and SILENTLY DELETES everything past this cap on every poll, which is exactly how the Amazon 30th Celebration drops were missed. PC SKUs cluster by prefix (699-* is 42% of the old TCG catalogue, bundle* sorts last), so a low cap wipes whole families including watchlist SKUs. Raise this BEFORE the catalogue reaches it; it is constructor-only, so it needs a deploy.",
     "watchlist": [
       "10-10035-115",
       "10-10193-102",

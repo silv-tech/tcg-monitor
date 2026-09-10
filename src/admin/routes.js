@@ -69,6 +69,52 @@ router.post('/ingest/ebgames', express.text({ limit: '8mb', type: '*/*' }), asyn
 });
 
 /**
+ * Pokemon Center browser bridge — the work queue.
+ *
+ * pokemoncenter.com is behind DataDome, which refuses every HTTP client and every proxy but not
+ * a real browser. The bridge reads product pages in the user's own Chrome and posts the results
+ * back, so the server never fetches the site.
+ *
+ * A GET on purpose: the bridge asks for work continuously, and the write limiter is 30 requests
+ * per minute per IP (server.js). Polling for work must not eat the budget the pushes need.
+ */
+router.get('/ingest/pokemoncenter/next', (req, res) => {
+  const adapter = scheduler.getAdapter('pokemoncenter');
+  if (!adapter) return res.status(503).json({ error: 'Pokemon Center adapter not running' });
+  if (typeof adapter.getWorkBatch !== 'function') {
+    return res.status(503).json({ error: 'Pokemon Center adapter has no work queue' });
+  }
+  const items = adapter.getWorkBatch(req.query.n);
+  return res.json({ ok: true, count: items.length, items });
+});
+
+/**
+ * Pokemon Center browser bridge — the results.
+ *
+ * Body is `{ records: [{ sku, ld }] }`, where `ld` is the raw text of the product page's ld+json
+ * block. The bridge sends that block rather than the page because a PC product page is ~440KB
+ * while its ld+json is ~1.3KB — a full 8,415-product pass is ~11MB instead of ~3.7GB — and
+ * because parsing stays server-side, on the same parser the paid path used.
+ */
+router.post('/ingest/pokemoncenter', express.json({ limit: '8mb' }), async (req, res) => {
+  const adapter = scheduler.getAdapter('pokemoncenter');
+  if (!adapter) return res.status(503).json({ error: 'Pokemon Center adapter not running' });
+  if (typeof adapter.ingestPushed !== 'function') {
+    return res.status(503).json({ error: 'Pokemon Center adapter does not accept pushes' });
+  }
+  try {
+    const result = await adapter.ingestPushed((req.body && req.body.records) || []);
+    logger.info(`Pokemon Center: PUSH — ${result.accepted} read, ${result.changed} changed`
+      + `${result.rejected ? `, ${result.rejected} rejected` : ''}`);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    // The extension surfaces this to the user, so say what actually went wrong.
+    logger.warn(`Pokemon Center: push rejected: ${err.message}`);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
  * Product images captured by the same browser that supplies the listings.
  *
  * Discord cannot fetch ebgames.ca images — the same Cloudflare that refuses every datacenter
