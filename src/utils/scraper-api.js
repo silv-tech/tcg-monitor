@@ -447,8 +447,77 @@ async function fetchAmazonOlidAndSeller(asin) {
   }
 }
 
+/**
+ * Fetch one Amazon ASIN's live offers via ScraperAPI's STRUCTURED endpoint (~1 credit).
+ *
+ * Replaces the ~10-18 credit AOD / product-page fetch for stock + identity + price + seller.
+ * Returns the RAW parsed JSON — { item:{name,image}, listings:[{price, seller_name,
+ * fullfilled_by_amazon, pinned_offer, ...}] } — for the caller to interpret. Stock is decided by
+ * the PINNED offer carrying a numeric price (parseOffers in amazon-verify.js), NOT listings.length.
+ * The payload carries NO offer-listing id, so OLID for one-click ATC links still comes from the
+ * cache or a rare /dp/ fetch.
+ *
+ * Never throws. Returns null on: no key, budget paused, HTTP error (403 still-blocked / 429
+ * exhausted), timeout, or non-JSON. Every caller reads null safely — the verifier as
+ * "inconclusive" (fail open, fire the alert), price-fill as "leave the tile as-is".
+ */
+async function fetchAmazonOffers(asin, { timeoutMs = 8000 } = {}) {
+  if (!SCRAPER_API_KEY) return null;
+  await restoreBudget();
+  await refreshAccountUsage(); // throttled; anchors the pause guard to the real billed figure
+  if (budgetPaused) return null;
+
+  // Structured Amazon offers endpoint: JSON, ~1 credit. `tld=ca` is LOAD-BEARING and silent:
+  // it selects the amazon.ca marketplace so prices come back in CAD, but the payload's
+  // price_symbol is a bare "$" with nothing marking CAD vs USD. Omit or mistype tld and you get
+  // amazon.com prices — ~35% low, entirely plausible, invisible in review — AND no pinned offer,
+  // so a wrong tld corrupts BOTH price and stock. Measured: tld=ca returns the CAD pinned price
+  // that matches our catalogue; tld=com returns lower USD prices with no pinned offer. Never drop
+  // tld=ca. `country` is not needed (tld alone selects the marketplace).
+  const params = new URLSearchParams({ api_key: SCRAPER_API_KEY, asin, tld: 'ca' });
+  const apiUrl = `${SCRAPER_API_BASE}/structured/amazon/offers?${params}`;
+  const cost = 1;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(apiUrl, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) {
+      logger.debug(`ScraperAPI offers: HTTP ${response.status} for ${asin}`);
+      return null;
+    }
+    const data = await response.json();
+
+    creditUsage.total += cost;
+    creditUsage.byRetailer['amazon-offers'] = (creditUsage.byRetailer['amazon-offers'] || 0) + cost;
+    checkBudget();
+    persistBudget();
+
+    return data; // raw JSON — caller applies the pinned-offer stock rule
+  } catch (err) {
+    clearTimeout(timer);
+    logger.debug(`ScraperAPI offers: ${err.name === 'AbortError' ? 'timeout' : err.message} for ${asin}`);
+    return null;
+  }
+}
+
+/**
+ * Adapter for verifyAmazonListing's injected fetcher(url) contract: pull the ASIN out of a /dp/ (or
+ * ?asin=) URL and fetch its structured offers, returning the JSON object (parseOffers path) or null.
+ */
+async function offersFetcher(url, opts = {}) {
+  const asin = (String(url).match(/\/dp\/([A-Z0-9]{10})/) || [])[1]
+    || (String(url).match(/[?&]asin=([A-Z0-9]{10})/) || [])[1];
+  if (!asin) return null;
+  return fetchAmazonOffers(asin, opts);
+}
+
 function isConfigured() {
   return !!SCRAPER_API_KEY;
 }
 
-module.exports = { scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, getBudgetStatus, restoreBudget, refreshAccountUsage, isConfigured };
+module.exports = {
+  scraperFetch, amazonSearch, fetchAmazonOlidAndSeller, fetchAmazonOffers, offersFetcher,
+  getBudgetStatus, restoreBudget, refreshAccountUsage, isConfigured,
+};
