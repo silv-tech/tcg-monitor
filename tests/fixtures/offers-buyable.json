@@ -1,0 +1,58 @@
+{
+ "item": {
+  "name": "Pokemon TCG: Mega Evolutions Phantasmal Flames 3 Pack Blister (Random Promo)",
+  "image": "https://m.media-amazon.com/images/I/51MF4hj5loL.jpg",
+  "average_rating": "4",
+  "total_reviews": "245"
+ },
+ "listings": [
+  {
+   "price_symbol": "$",
+   "price": 86.03,
+   "shipping_price": "FREE",
+   "shipping_price_extracted": 0,
+   "condition": "New",
+   "delivery_earliest_date": "September 15",
+   "delivery_latest_date": "September 16",
+   "fullfilled_by_amazon": false,
+   "seller_name": "Eternal Emporium",
+   "seller_id": "A2DRNRSQTYCOYY",
+   "seller_percent_positive_ratings": "95%",
+   "seller_average_rating": "4.5",
+   "seller_total_reviews": "57017",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=A2DRNRSQTYCOYY&isAmazonFulfilled=0&asin=B0FPLGBRCT&ref_=olp_merch_name_0",
+   "pinned_offer": true
+  },
+  {
+   "price_symbol": "$",
+   "price": 84.64,
+   "shipping_price": "$5.29",
+   "shipping_price_extracted": 5.29,
+   "condition": "New",
+   "delivery_earliest_date": "September 16",
+   "fullfilled_by_amazon": true,
+   "seller_name": "J & M COLLECTIBLES",
+   "seller_id": "A1GD4LR25P9QFR",
+   "seller_percent_positive_ratings": "97%",
+   "seller_average_rating": "5",
+   "seller_total_reviews": "248",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=A1GD4LR25P9QFR&isAmazonFulfilled=1&asin=B0FPLGBRCT&ref_=olp_merch_name_1"
+  },
+  {
+   "price_symbol": "$",
+   "price": 94.45,
+   "shipping_price": "$5.54",
+   "shipping_price_extracted": 5.54,
+   "condition": "New",
+   "delivery_earliest_date": "September 15",
+   "delivery_latest_date": "September 17",
+   "fullfilled_by_amazon": false,
+   "seller_name": "Grailed Central Inc.",
+   "seller_id": "A1CF3GP2BL6N2W",
+   "seller_percent_positive_ratings": "20%",
+   "seller_average_rating": "2",
+   "seller_total_reviews": "30",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=A1CF3GP2BL6N2W&isAmazonFulfilled=0&asin=B0FPLGBRCT&ref_=olp_merch_name_2"
+  }
+ ]
+}

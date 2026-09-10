@@ -1,0 +1,81 @@
+{
+ "item": {
+  "name": "Pokemon TCG: Paldea Evolved Build & Battle Box (Prerelease Kit) - 4 Packs, Promos  Pokemon TCG: Paldea Evolved Build & Battle Box (Prerelease Kit) - 4 Packs, Promos",
+  "image": "https://m.media-amazon.com/images/I/51jUihqAvhL.jpg",
+  "average_rating": "4.5",
+  "total_reviews": "383   383 ratings"
+ },
+ "listings": [
+  {
+   "price_symbol": "",
+   "condition": "",
+   "fullfilled_by_amazon": false,
+   "seller_name": "",
+   "seller_link": null,
+   "pinned_offer": true
+  },
+  {
+   "price_symbol": "$",
+   "price": 128.98,
+   "shipping_price": "FREE",
+   "shipping_price_extracted": 0,
+   "condition": "New",
+   "delivery_earliest_date": "September 15",
+   "fullfilled_by_amazon": true,
+   "seller_name": "Xtragoods",
+   "seller_id": "A37NXMU4ARE74W",
+   "seller_percent_positive_ratings": "98%",
+   "seller_average_rating": "5",
+   "seller_total_reviews": "88",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=A37NXMU4ARE74W&isAmazonFulfilled=1&asin=B0C75FSW7C&ref_=olp_merch_name_1"
+  },
+  {
+   "price_symbol": "$",
+   "price": 128.98,
+   "shipping_price": "FREE",
+   "shipping_price_extracted": 0,
+   "condition": "New",
+   "delivery_earliest_date": "September 14",
+   "delivery_latest_date": "September 15",
+   "fullfilled_by_amazon": false,
+   "seller_name": "Eternal Emporium",
+   "seller_id": "A2DRNRSQTYCOYY",
+   "seller_percent_positive_ratings": "95%",
+   "seller_average_rating": "4.5",
+   "seller_total_reviews": "57017",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=A2DRNRSQTYCOYY&isAmazonFulfilled=0&asin=B0C75FSW7C&ref_=olp_merch_name_2"
+  },
+  {
+   "price_symbol": "$",
+   "price": 119.89,
+   "shipping_price": "$9.99",
+   "shipping_price_extracted": 9.99,
+   "condition": "New",
+   "delivery_earliest_date": "September 17",
+   "delivery_latest_date": "September 23",
+   "fullfilled_by_amazon": false,
+   "seller_name": "QualityFastService",
+   "seller_id": "AQARQAK3UGBWG",
+   "seller_percent_positive_ratings": "96%",
+   "seller_average_rating": "5",
+   "seller_total_reviews": "655",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=AQARQAK3UGBWG&isAmazonFulfilled=0&asin=B0C75FSW7C&ref_=olp_merch_name_3"
+  },
+  {
+   "price_symbol": "$",
+   "price": 149.95,
+   "shipping_price": "$4.95",
+   "shipping_price_extracted": 4.95,
+   "condition": "New",
+   "delivery_earliest_date": "September 17",
+   "delivery_latest_date": "September 18",
+   "fullfilled_by_amazon": false,
+   "seller_name": "Collectors Avenue",
+   "seller_id": "A22P1VICCHAGJM",
+   "seller_percent_positive_ratings": "60%",
+   "seller_average_rating": "3.5",
+   "seller_total_reviews": "2569",
+   "seller_link": "https://www.amazon.ca/gp/aag/main?ie=UTF8&seller=A22P1VICCHAGJM&isAmazonFulfilled=0&asin=B0C75FSW7C&ref_=olp_merch_name_4"
+  }
+ ]
+}

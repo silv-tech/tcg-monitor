@@ -26,6 +26,16 @@ const state = require('../core/state');
 const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, cacheSellerInfo } = state;
 const { scrapeAmazonOfferListingId } = require('../utils/browser');
 const { fetchAmazonOlidAndSeller } = require('../utils/scraper-api');
+const { offersFetcher } = require('../utils/scraper-api');
+const { verifyAmazonListing } = require('../utils/amazon-verify');
+
+// Alert types that put a buy link in front of a customer. A wrong identity on any of these
+// sends someone to the wrong product; the rest are not worth a credit to verify.
+const VERIFY_TYPES = new Set(['RESTOCK', 'NEW_SKU', 'PRICE_CHANGE', 'PREORDER_LIVE']);
+// Sized against a measured ~1.2-1.7s for the offers endpoint, inside the sub-5s alert goal.
+// A slower response is not worth delaying a drop for — it fails open.
+const VERIFY_TIMEOUT_MS = Number(process.env.AMAZON_VERIFY_TIMEOUT_MS || 4000);
+
 const { sleep } = require('../utils/helpers');
 
 // Event priority for delivery ordering (#7) — lower number = higher priority
@@ -54,6 +64,9 @@ class DeliveryQueue {
     this.channelCache = new Map();
     this.pendingFreeCount = 0;
     this.inFlight = null;       // event currently being sent, for drain() to account for // track in-flight free-tier delays (best-effort, lost on restart)
+    // Injectable so the identity gate can be tested without a network call or an API key. The
+    // fail-open path is the one that must be provable, and it is unprovable against a live fetch.
+    this.verifyListing = (asin) => verifyAmazonListing(asin, { fetcher: offersFetcher, timeoutMs: VERIFY_TIMEOUT_MS });
   }
 
   setClient(client) {
@@ -306,6 +319,27 @@ class DeliveryQueue {
         }
         // If no seller info (scrape failed), fail-open — send the alert anyway
       }
+
+      // ─── Identity: is this still the product we think it is? ───────────────
+      //
+      // Amazon repurposes ASINs, and our own parser has bound a neighbouring tile's title to the
+      // wrong ASIN. Both put a Pokemon name in front of a customer and a different product behind
+      // the link: B0D2JGYX3F alerted as a Gardevoir deck and opened a Nex Playground console;
+      // B0BCC6N8YL alerted as a booster bundle and opened a PopSockets grip; B0DRDRVZZT alerted as
+      // a Gardevoir deck and opened Jamieson Magnesium. All three reached the client's channel.
+      //
+      // Upstream guards exist — the adapter drops an out-of-scope live title, and a denylist stops
+      // re-admission — but each of those runs on a path that can be dead or skipped: the old ones
+      // lived inside AOD, and the offers lane only inspects STALE rows, so a row kept fresh by a
+      // mis-bound tile is never examined. This is the last check before a send, and it runs on the
+      // path that is actually alive.
+      //
+      // Only the alert types that put a buy link in front of someone are worth a credit. A
+      // confirmed mismatch suppresses; anything we could not read fires anyway — see routeEvent.
+      if (product.retailerId === 'amazon' && product.sku && !event._scanTier
+          && VERIFY_TYPES.has(event.type)) {
+        event._identity = await this.verifyListing(product.sku);
+      }
     } catch (err) {
       logger.debug(`Event enrichment failed: ${err.message}`);
     }
@@ -323,6 +357,38 @@ class DeliveryQueue {
         logger.warn(`OOS guard (routeEvent): blocked ${event.type} — ${event.product?.name || 'unknown'} (inStock=${event.product.inStock})`);
         return;
       }
+    }
+
+    // A CONFIRMED wrong identity is the ONE thing worth blocking a send for.
+    //
+    // Note what is NOT in this condition. The verifier also reports `no-stock` — the right product
+    // with nothing buyable — and that must still send. We detect a drop and re-check ~1.5s later,
+    // and a hot item can sell out inside that window; treating the re-check as authoritative would
+    // suppress precisely the fastest-selling items, and the denylist below would then drop them
+    // from tracking permanently, costing every future restock as well. `inconclusive` — a
+    // bot-check, a timeout, a budget refusal — fires for the same reason: a suppressed restock is
+    // unrecoverable (poll-adapter writes the new state right after delivery, so events.js can never
+    // re-fire it), and silence is indistinguishable from success. We never trade a drop for a maybe.
+    //
+    // Only a wrong identity is permanent, and only a wrong identity is a property of the listing
+    // rather than of the moment we happened to look.
+    //
+    // The ASIN is denylisted on the way out so the row cannot be re-admitted by a stale or
+    // mis-bound tile, and the line is logged UNTHROTTLED: a suppression nobody can audit is how we
+    // spent an hour unable to say what a mute had eaten.
+    if (event._identity && event._identity.verdict === 'wrong-identity' && !event._scanTier) {
+      const p = event.product || {};
+      logger.warn(`IDENTITY SUPPRESSED: ${event.type} — stored "${p.name}" | live "${event._identity.title}" `
+        + `| sku=${p.sku} | ${event._identity.reason}`);
+      state.denyIdentity('amazon', p.sku, `alert-time: ${event._identity.reason}`.slice(0, 200))
+        .catch((err) => logger.warn(`Could not denylist ${p.sku}: ${err.message}`));
+      return;
+    }
+    if (event._identity && event._identity.verdict === 'no-stock') {
+      // Deliberately not a suppression — logged so the RESTOCK race is measurable rather than
+      // assumed, and so nobody later mistakes the silence for the gate having done nothing.
+      logger.info(`Identity OK, no live offer at re-check (sending anyway): ${event.type} — `
+        + `${event.product?.name} | sku=${event.product?.sku}`);
     }
 
     // Skip Amazon third-party seller products (client wants "sold by Amazon" only)
