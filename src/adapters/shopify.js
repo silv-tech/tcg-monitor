@@ -241,6 +241,10 @@ class ShopifyAdapter extends BaseAdapter {
     // in-scope products reach it, so it stays small — on the order of a hundred per shop.
     this.searchTerms = config.searchTerms || SEARCH_TERMS;
     this._handleToSku = new Map();
+    // Handles whose product has MORE THAN ONE variant. Predictive search reports availability per
+    // PRODUCT, not per variant, so its answer cannot be attributed to any single variant of these
+    // — see the guard in _searchProducts.
+    this._multiVariantHandles = new Set();
     this._pageYield = new Map();   // page -> { n: in-scope found there, at: when }
     this._knownLastPage = 0;       // last page the explorer proved exists (0 = not yet known)
     // Read one collection per poll instead of all of them, for shops that refuse more than
@@ -693,7 +697,9 @@ class ShopifyAdapter extends BaseAdapter {
       if (!Array.isArray(results)) continue;
 
       for (const item of results) {
-        const sku = this._handleToSku.get(item.handle);
+        // A multi-variant product never resolves to a single sku here, so its availability is
+        // read from its own page below rather than guessed from the product-level search flag.
+        const sku = this._multiVariantHandles.has(item.handle) ? null : this._handleToSku.get(item.handle);
         if (!sku) {
           // An in-scope product search can see but pagination has not reached. Measured at
           // both shops asked about: every one of twenty results was a real sealed product
@@ -1194,10 +1200,24 @@ class ShopifyAdapter extends BaseAdapter {
       const sku = variant.sku || `${item.id}-${variant.id}`;
       // Remember which product this handle belongs to. Predictive search returns a handle but
       // no variant.sku, so this index is the only safe way for a search result to update THIS
-      // product rather than register itself as a new one. First variant wins, which matches
-      // how search reports a product it has only one entry for.
-      if (item.handle && !this._handleToSku.has(item.handle)) {
-        this._handleToSku.set(item.handle, sku);
+      // product rather than register itself as a new one.
+      //
+      // ONLY for single-variant products. "First variant wins" was the original rule and it is
+      // what flooded a client channel: ZardoCards' "Celebrations ETB" has two variants, the handle
+      // resolved to the "Imperfect (1x)" one (ZC-105), and _searchProducts then wrote the
+      // PRODUCT-level `available` onto that variant. The sibling variant being purchasable made
+      // ZC-105 read as a restock over and over — 12+ identical alerts, one every 10 minutes,
+      // spaced exactly by the dedup TTL because dedup was the only thing holding it back.
+      //
+      // A multi-variant handle is deliberately left UNMAPPED so search falls through to the
+      // resolve-by-page branch below, which reads real per-variant availability.
+      if (item.handle) {
+        if (item.variants.length > 1) {
+          this._multiVariantHandles.add(item.handle);
+          this._handleToSku.delete(item.handle);
+        } else if (!this._handleToSku.has(item.handle) && !this._multiVariantHandles.has(item.handle)) {
+          this._handleToSku.set(item.handle, sku);
+        }
       }
       const image = item.images?.[0]?.src || item.image?.src || '';
 
@@ -1247,6 +1267,24 @@ class ShopifyAdapter extends BaseAdapter {
       product._vendor = item.vendor;
       product.stockCount = variant.inventory_quantity ?? null;
 
+      // TWO VARIANTS CAN SHARE ONE SKU, and then this key is ambiguous.
+      //
+      // ZardoCards lists "Celebrations ETB" as variant 50526702600504 "Normal (1x)" (available,
+      // $307) and variant 50984122843448 "Imperfect (1x)" (NOT available, $276) — both carrying
+      // the sku "ZC-105". Writing blind meant last-variant-wins, so this row's inStock depended on
+      // whichever variant the response happened to list last. Different code paths landed on
+      // different answers, the row oscillated, and every flip to true was a fresh RESTOCK: 12+
+      // identical alerts into the client's channel, paced only by the dedup TTL. The store's own
+      // data never moved — measured 42 consecutive samples, zero changes.
+      //
+      // Resolve deterministically instead: AVAILABLE WINS. A customer looking at that page can buy
+      // the Normal copy, so "in stock" is the honest answer, and the row stops depending on
+      // response ordering. Ties keep the first variant seen, so the result is stable either way.
+      const prior = products[product.sku];
+      if (prior && prior._productId === item.id && prior._variantId !== product._variantId) {
+        if (prior.inStock && !product.inStock) continue;      // keep the buyable one
+        if (prior.inStock === product.inStock) continue;      // deterministic tie-break: first wins
+      }
       products[product.sku] = product;
     }
   }

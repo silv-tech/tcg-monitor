@@ -68,14 +68,33 @@ describe('search never invents a product identity', () => {
     assert.strictEqual(products['POKE10-10311-114'].inStock, true, 'stock is refreshed');
   });
 
-  test('the handle index is built from pagination, first variant winning', () => {
+  test('a MULTI-variant handle is not indexed at all', () => {
+    // This test used to assert "first variant winning" — that REAL-1 owned the handle. That rule
+    // caused a production incident: predictive search reports availability per PRODUCT (true if
+    // ANY variant is purchasable), so mapping a handle to one variant let a sibling variant's
+    // stock be written onto it. ZardoCards' "Celebrations ETB" flipped in and out of stock on
+    // every search tick and sent 12+ identical alerts into the client's channel, spaced exactly
+    // by the dedup TTL, while the store's own data never changed once across 42 samples.
+    //
+    // Search cannot disambiguate which variant it is describing, so it must not answer for any of
+    // them; the handle is left unmapped and resolved from its own product page instead.
     const a = makeAdapter();
     a.parseShopifyProduct({
       id: 900, handle: 'a-box', title: 'Pokemon TCG Booster Bundle', product_type: 'TCG', tags: [],
       variants: [{ id: 1, sku: 'REAL-1', price: '10.00', available: true },
         { id: 2, sku: 'REAL-2', price: '10.00', available: true }],
     }, {});
-    assert.strictEqual(a._handleToSku.get('a-box'), 'REAL-1');
+    assert.strictEqual(a._handleToSku.has('a-box'), false);
+    assert.strictEqual(a._multiVariantHandles.has('a-box'), true);
+  });
+
+  test('a SINGLE-variant handle is still indexed, so search keeps its speed where it is safe', () => {
+    const a = makeAdapter();
+    a.parseShopifyProduct({
+      id: 902, handle: 'one-box', title: 'Pokemon TCG Booster Bundle', product_type: 'TCG', tags: [],
+      variants: [{ id: 1, sku: 'ONLY-1', price: '10.00', available: true }],
+    }, {});
+    assert.strictEqual(a._handleToSku.get('one-box'), 'ONLY-1');
   });
 
   test('an out-of-scope product never enters the handle index', () => {
