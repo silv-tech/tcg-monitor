@@ -87,6 +87,23 @@ const FOREIGN_GAMES = [
   'metazoo', 'sorcery: contested', 'alpha clash', 'gundam card',
 ];
 
+/**
+ * Admission to an EVENT, not a thing in a box.
+ *
+ * These read as sealed product and passed every gate: gameshack lists "One Piece Two Legends OP-08
+ * Pre-Release Sealed Event Ticket September 8, 12:45 PM" — the word "Sealed" is right there — and
+ * kanzengames lists "Pokemon TCG Event League Challenge - Friday Oct 2nd @ 6:30 PM". Measured
+ * 2026-09-11: 11 such rows were in scope, 8 of them in stock, priced $10-$60. Alerting one tells a
+ * customer to buy something that arrives as a seat at a table, not a product.
+ *
+ * PHRASES, not bare words. A bare "ticket" would reject a real "Golden Ticket Promo Collection Box",
+ * and a bare "entry" or "seat" is worse still. Every phrase here needs the event sense to match.
+ */
+const EVENT_KEYWORDS = [
+  'event ticket', 'league challenge', 'league cup', 'prerelease event', 'pre-release event',
+  'tournament entry', 'entry fee', 'tournament ticket', 'event pass',
+];
+
 // Unambiguous sealed product types. No accessory is named any of these, so their presence
 // settles the question when a title also happens to contain an accessory word.
 // Sealed product forms. Everything here ships booster packs inside a factory-sealed box, so
@@ -282,6 +299,7 @@ function isInScopeName(name, extraGameNames = []) {
   if (/^sponsored ad/.test(lower)) return false;
   if (PRINT_KEYWORDS.some(k => lower.includes(k))) return false;
   if (NON_TCG_MERCH.some(k => lower.includes(k))) return false;
+  if (EVENT_KEYWORDS.some(k => lower.includes(k))) return false;
 
   // Checked BEFORE the sealed shortcut below, so a single named after the box it came from
   // is still rejected ("Eevee (173) - Prismatic Evolutions Pokemon Center ETB - Promo").
@@ -305,6 +323,16 @@ function isInScopeName(name, extraGameNames = []) {
   if (SEALED_COLLECTION_FORMS.test(repaired)) return true;
 
   if (ACCESSORY_KEYWORDS.some(k => lower.includes(k))) return false;
+
+  // "Bundle Deal" is a sealed form, but it is checked HERE rather than in DEFINITE_SEALED above,
+  // and the position is the whole point. DEFINITE_SEALED returns true BEFORE the accessory veto
+  // (deliberately, so an "ETB ... 9 packs & accessories" is not vetoed), so folding this in there
+  // would admit any accessory bundle titled "bundle deal" — a sleeves-and-deck-box set would sail
+  // through. An earlier attempt did exactly that. After the veto, it cannot.
+  //
+  // Recovers two real products, the most expensive rows in the catalogue: kanzengames' "Mega
+  // Evolution Set 7 ME07 Bundle Deal" and its Wave 2 variant, $399.95 each.
+  if (/\bbundle deal\b/i.test(repaired)) return true;
   // Naming a game is not enough — it also has to BE a card product. Amazon always applied
   // this as a separate step and Walmart never did, which is how "Pokémon™ Violet (Nintendo
   // Switch)" and a shelf of UNO variants stayed in scope after the first cleanup.
