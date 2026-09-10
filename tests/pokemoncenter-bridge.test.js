@@ -226,3 +226,51 @@ describe('track-everything admits the whole store, and only for this store', () 
       + 'have deleted the store by four thousandths of a margin');
   });
 });
+
+describe('the sitemap lists every SKU in several languages', () => {
+  // 34,572 URLs for 8,415 SKUs — about four locale variants each. Only the en-* prefix was
+  // being rewritten, so a /de-de/ entry survived whole: its slug becomes the name we alert
+  // under, and the page it points at quotes EUR. A German sleep shirt reached the live work
+  // queue within minutes of the catalogue being widened.
+  const build = () => new PokemonCenterAdapter({
+    id: 'pokemoncenter', name: 'Pokemon Center', url: 'https://www.pokemoncenter.com',
+    intervalMs: 8000, trackAllProducts: true,
+  });
+
+  const sm = (...locs) => `<urlset>${locs.map((l) => `<url><loc>${l}</loc></url>`).join('')}</urlset>`;
+  const DE = 'https://www.pokemoncenter.com/de-de/product/70-10984/gengar-lila-langaermliges-schlafshirt-erwachsene';
+  const EN = 'https://www.pokemoncenter.com/product/70-10984/gengar-purple-long-sleeve-sleep-shirt-adult';
+  const ENCA = 'https://www.pokemoncenter.com/en-ca/product/70-10984/gengar-purple-long-sleeve-sleep-shirt-adult';
+
+  test('a foreign-locale URL is rewritten to en-ca', () => {
+    const a = build();
+    a._parseSitemap(sm(DE));
+    assert.match(a.sitemapProducts.get('70-10984').url, /\/en-ca\/product\//,
+      'a de-de page quotes EUR and would put German into the alert');
+  });
+
+  test('the ENGLISH slug wins however the locales are ordered', () => {
+    for (const order of [[DE, EN], [EN, DE], [DE, ENCA], [ENCA, DE]]) {
+      const a = build();
+      a._parseSitemap(sm(...order));
+      const got = a.sitemapProducts.get('70-10984');
+      assert.match(got.name, /Gengar Purple Long Sleeve/,
+        `order ${order[0].slice(38, 45)} first gave the wrong name: ${got.name}`);
+    }
+  });
+
+  test('one SKU stays one product no matter how many locales list it', () => {
+    const a = build();
+    a._parseSitemap(sm(DE, EN, ENCA,
+      'https://www.pokemoncenter.com/fr-fr/product/70-10984/chemise-de-nuit-gengar'));
+    assert.strictEqual(a.sitemapProducts.size, 1, 'locale variants are not four products');
+  });
+
+  test('an English-only SKU is unaffected', () => {
+    const a = build();
+    a._parseSitemap(sm('https://www.pokemoncenter.com/product/70-11607/poke-ball-classic-clog-by-crocs-kids'));
+    const got = a.sitemapProducts.get('70-11607');
+    assert.strictEqual(got.url, 'https://www.pokemoncenter.com/en-ca/product/70-11607/poke-ball-classic-clog-by-crocs-kids');
+    assert.strictEqual(got.name, 'Poke Ball Classic Clog By Crocs Kids');
+  });
+});

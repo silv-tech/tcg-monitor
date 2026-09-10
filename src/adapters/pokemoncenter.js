@@ -921,10 +921,29 @@ class PokemonCenterAdapter extends BaseAdapter {
       // The shared scope rule, applied to the exact name an alert would carry.
       if (!this.trackAllProducts && !isInScopeName(name)) continue;
 
-      const caUrl = url.replace(/\/en-[a-z]{2}\/product\//, '/en-ca/product/')
+      // The sitemap lists each SKU about four times, once per locale — 34,572 URLs for 8,415
+      // products. Only the locale PREFIX was being rewritten, and only for en-*, so a
+      // /de-de/ entry survived intact:
+      //
+      //   /de-de/product/70-10984/gengar-lila-langaermliges-schlafshirt-erwachsene
+      //
+      // The slug is the name we alert under, and the page it points at quotes EUR. While the
+      // catalogue was TCG-only this was mostly hidden; widening to the whole store surfaced it
+      // immediately — a German sleep shirt was in the live work queue within minutes.
+      //
+      // So rewrite ANY locale to en-ca, and when the same SKU appears more than once keep the
+      // variant with an ENGLISH slug. The prefix decides the page; the slug decides the name,
+      // and only an English-sourced slug gives an English name.
+      const caUrl = url
+        .replace(/^(https?:\/\/[^/]+)\/[a-z]{2}-[a-z]{2}\/product\//i, '$1/en-ca/product/')
         .replace(/^(https?:\/\/[^/]+)\/product\//, '$1/en-ca/product/');
 
-      newProducts.set(sku, { url: caUrl, name, rawUrl: url });
+      // Bare /product/ and /en-*/ carry English slugs; anything else does not.
+      const english = !/^https?:\/\/[^/]+\/(?!en-)[a-z]{2}-[a-z]{2}\/product\//i.test(url);
+      const existing = newProducts.get(sku);
+      if (existing && existing.english && !english) continue;   // keep the English one
+
+      newProducts.set(sku, { url: caUrl, name, rawUrl: url, english });
     }
 
     if (newProducts.size > 0) {
