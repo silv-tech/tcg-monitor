@@ -57,9 +57,21 @@ describe('events: a 100x unit shift is not a price drop', () => {
     assert.strictEqual(events.filter((e) => e.type === 'PRICE_CHANGE').length, 1);
   });
 
-  test('a near-100x but real move is not suppressed too eagerly', () => {
-    // 80x is not a unit shift; it should still be treated as a (very large) real drop
+  test('the unit-shift guard stays narrow — a large drop under the ceiling still alerts', () => {
+    // This used to assert that 800 -> 10 (80x, -98.75%) "should still be treated as a (very large)
+    // real drop". Production falsified that: a client received -99%, -99%, -99%, -95% and -77%
+    // drops on sealed packs, and every one was a row holding the WRONG VARIANT's price, not a
+    // discount. A drop of that depth is bad data. What this test protects is the original intent —
+    // that the narrow 100x unit-shift guard does not swallow ordinary large drops — so it now uses
+    // a steep but believable one.
+    const events = diffProducts({ X: { ...base, price: 800 } }, { X: { ...base, price: 100 } });
+    assert.strictEqual(events.filter((e) => e.type === 'PRICE_CHANGE').length, 1,
+      '-87.5% is inside the plausible band and must still fire');
+  });
+
+  test('a drop too steep to believe is suppressed as bad data', () => {
     const events = diffProducts({ X: { ...base, price: 800 } }, { X: { ...base, price: 10 } });
-    assert.strictEqual(events.filter((e) => e.type === 'PRICE_CHANGE').length, 1);
+    assert.strictEqual(events.filter((e) => e.type === 'PRICE_CHANGE').length, 0,
+      '-98.75% is the shape of a variant/identity defect, and it reached a customer once already');
   });
 });

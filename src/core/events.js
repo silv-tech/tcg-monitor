@@ -14,6 +14,21 @@ const EVENT_TYPES = {
 // Only price DROPS alert, and only past this swing — small wobbles and increases aren't worth a ping
 const MIN_PRICE_CHANGE_PCT = 9;
 
+// ...and NOT past this one. A drop steeper than this is not a discount, it is bad data.
+//
+// A client's channel received "$5745.00 -> $52.00 (-99%)" on a sealed pack, alongside -99%, -95%
+// and -77% on four more. Every one was a row whose cached price had come from the WRONG VARIANT of
+// a multi-variant product; the low price was the true one and the high price was the corruption.
+// Sealed product is not sold at ten cents on the dollar, so a drop of this depth says the OLD
+// number was wrong far more often than it says the new one is a bargain.
+//
+// 90 is deliberately conservative. Measured across seven catalogues, legitimate clearance clusters
+// in the 30-50% band and nothing real approached 90%. A lower floor would start eating genuine
+// blowout sales, and a missed real drop costs the client more than a suppressed artifact does.
+// This leaves a gray zone: the -77% case above still gets through. Closing that needs a
+// confirm-on-second-observation rule rather than a deeper floor, which is a separate change.
+const MAX_PRICE_DROP_PCT = Number(process.env.MAX_PRICE_DROP_PCT) || 90;
+
 function detectEvents(oldProduct, newProduct) {
   const events = [];
 
@@ -57,13 +72,24 @@ function detectEvents(oldProduct, newProduct) {
     !unitShift
   ) {
     const pctChange = ((newProduct.price - oldProduct.price) / oldProduct.price) * 100;
-    if (pctChange <= -MIN_PRICE_CHANGE_PCT) events.push({
-      type: EVENT_TYPES.PRICE_CHANGE,
-      product: newProduct,
-      detail: `Price dropped ${Math.abs(pctChange).toFixed(1)}%`,
-      oldValue: oldProduct.price,
-      newValue: newProduct.price,
-    });
+    const tooSteep = pctChange <= -MAX_PRICE_DROP_PCT;
+    if (tooSteep) {
+      // Logged, never dropped in silence. The cause is a row-identity defect, and the same bad
+      // price also feeds the price-history shown in the embed and the cross-retailer comparison —
+      // both silent. Suppressing without a record would hide the defect while it kept corrupting
+      // other rows, which is how this went unnoticed until a customer saw -99%.
+      logger.warn(`IMPLAUSIBLE PRICE DROP suppressed: ${newProduct.retailerId || '?'}:${newProduct.sku} `
+        + `${oldProduct.price} -> ${newProduct.price} (${pctChange.toFixed(1)}%, ratio `
+        + `${(oldProduct.price / newProduct.price).toFixed(1)}x) | ${newProduct.name}`);
+    } else if (pctChange <= -MIN_PRICE_CHANGE_PCT) {
+      events.push({
+        type: EVENT_TYPES.PRICE_CHANGE,
+        product: newProduct,
+        detail: `Price dropped ${Math.abs(pctChange).toFixed(1)}%`,
+        oldValue: oldProduct.price,
+        newValue: newProduct.price,
+      });
+    }
   }
 
   // Cart availability — only if RESTOCK didn't already fire (avoids duplicate alerts)
