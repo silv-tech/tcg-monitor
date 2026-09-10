@@ -948,10 +948,13 @@ class AmazonAdapter extends BaseAdapter {
       return;
     }
 
-    // Identity: a live title now out of scope means this ASIN is no longer the product we stored —
-    // drop it, the same rule the sweep uses. Denylisting is the identity gate's job, not this lane's.
+    // Identity: a live title now out of scope means this ASIN is no longer the product we stored.
+    // DENYLIST it, not just evict — the offers read is a definitive live-title verdict, and an evict
+    // alone lets the next search tile re-admit the same wrong mapping (exactly what kept a magnesium
+    // ASIN stamped as a Gardevoir deck alive poll after poll). Persisting the denial makes it stick.
     if (!isInScopeName(data.name)) {
-      logger.warn(`Amazon: offers-lane — ${target} live title out of scope ("${data.name.slice(0, 60)}") — dropping`);
+      logger.warn(`Amazon: offers-lane — ${target} live title out of scope ("${data.name.slice(0, 60)}") — denylisting`);
+      this._denyIdentity(target, data.name);
       this._knownProducts.delete(target);
       delete products[target];
       return;
@@ -1118,7 +1121,18 @@ class AmazonAdapter extends BaseAdapter {
       // An all-digit "ASIN" is an ISBN — a book about the game, not sealed product.
       // 1604382643 ("Pokemon Deluxe Character Guide") alerted this way on 2026-09-05.
       if (/^\d{10}$/.test(asin)) continue;
-      const ariaName = (card.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
+      // Not every product tile carries the s-search-result marker we split on, so one `card`
+      // slice can hold several tiles. The ASIN above belongs to the FIRST tile in the slice;
+      // confine every OTHER field to that tile by truncating at the next tile's csa-id. Without
+      // this, the name/alt/price/image regexes reach forward into the next tile and staple a
+      // neighbour's title and price onto this ASIN — which is exactly how magnesium ASIN
+      // B0DRDRVZZT got the "Gardevoir ex League Battle Deck" name + $81.87 and fired false
+      // restock/price-drop alerts. A marker-less foreign tile now has no h2 of its OWN and is
+      // dropped at the `if (!ariaName) continue` below instead of contaminating a real product.
+      const _idAt = card.indexOf('data-csa-c-item-id="amzn1.asin.' + asin);
+      const _nextId = _idAt < 0 ? -1 : card.indexOf('data-csa-c-item-id="amzn1.asin.', _idAt + 31);
+      const tile = _nextId === -1 ? card : card.slice(0, _nextId);
+      const ariaName = (tile.match(/<h2[^>]*aria-label="([^"]{8,200})"/) || [])[1];
       if (!ariaName) continue;
       // Sponsored placements render inside the result grid and their aria-label carries the
       // ad markup verbatim, which is how "Sponsored Ad - Title: Star Wars: Unlimited..."
@@ -1136,7 +1150,7 @@ class AmazonAdapter extends BaseAdapter {
       // aria "The World Game - Geography Card Game" alongside alt "9-Pocket Top Loader
       // Binder" — so anything that is not a strict prefix-extension is ignored. By
       // construction this can only prepend a few characters, never swap in another product.
-      const altRaw = (card.match(/class="s-image"[^>]*alt="([^"]{8,250})"/) || [])[1];
+      const altRaw = (tile.match(/class="s-image"[^>]*alt="([^"]{8,250})"/) || [])[1];
       let altAccepted = '';
       if (altRaw) {
         const alt = decodeEntities(altRaw.trim());
@@ -1155,10 +1169,10 @@ class AmazonAdapter extends BaseAdapter {
       // one: B0GW2DK37Q has no price on the card, and successive polls attributed $15.99,
       // $147.00, $39.95 and $24.69 to it, each from whichever neighbour happened to be next.
       // Verified against a live page: where a real price exists this agrees 27/27.
-      const priceStr = (card.match(/data-cy="price-recipe"[\s\S]{0,1200}?a-offscreen">\$([\d,]+\.\d{2})/) || [])[1];
+      const priceStr = (tile.match(/data-cy="price-recipe"[\s\S]{0,1200}?a-offscreen">\$([\d,]+\.\d{2})/) || [])[1];
       const price = priceStr ? normalizePrice(priceStr) : null;
       // A search card only shows a price when the item is buyable
-      const oos = /Currently unavailable|Temporarily out of stock/i.test(card);
+      const oos = /Currently unavailable|Temporarily out of stock/i.test(tile);
       out.push({
         asin,
         name: decodeEntities(name.trim()),
@@ -1185,7 +1199,7 @@ class AmazonAdapter extends BaseAdapter {
         // production — the two conditions cannot both hold here. Flag the ambiguity instead
         // and let the AOD fetch settle it, since that reads the real buy box.
         _priceUnknown: !priceStr && !oos,
-        image: (card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com[^"]+)"/) || [])[1] || '',
+        image: (tile.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com[^"]+)"/) || [])[1] || '',
       });
     }
     return out;

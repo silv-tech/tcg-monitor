@@ -15,6 +15,10 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert');
 
 const AmazonAdapter = require('../src/adapters/amazon');
+// The out-of-scope drop now denylists via state.denyIdentity -> getRedis(); stub it so the test
+// opens no ioredis handle (which would keep the process alive after the assertions pass).
+const state = require('../src/core/state');
+state.denyIdentity = async () => {};
 
 function adapter() {
   const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon Canada', url: 'https://www.amazon.ca', intervalMs: 6000, proxyTier: 'none', watchlist: [] });
