@@ -61,7 +61,8 @@
     "adapter": "amazon",
     "intervalMs": 6000,
     "proxyTier": "residential-us",
-    "maxProducts": 599,
+    "maxProducts": 700,
+    "_maxProductsNote": "catalogue is ~613 and grows ~130/day; the default 500 cap silently deleted the alphabetical tail (113 rows) every poll, which is why the 30th Celebration ASINs (B0H7*) never alerted — they sort at 584-589. Raise this BEFORE the catalogue reaches it: truncation is logged at warn but nothing fails.",
     "enabled": true,
     "color": "#ff9900",
     "timing": {
