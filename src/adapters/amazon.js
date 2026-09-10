@@ -94,6 +94,18 @@ const SEARCH_BACKOFF_MS = [60000, 180000, 300000, 600000, 900000];
 // per poll because each is a page fetch, and cached once resolved so it is never re-fetched.
 const MAX_PRICE_FILL_PER_POLL = Number(process.env.AMAZON_MAX_PRICE_FILL_PER_POLL) || 3;
 
+// Batch-ASIN stock sweep — the FREE replacement for the per-ASIN AOD checker (which Amazon blocks).
+// Amazon's /s search accepts pipe-joined ASINs (k=B0AAA|B0BBB — its OR operator) and returns a
+// normal results grid, so we can stock-check EVERY tracked ASIN by exact id, over the SAME endpoint
+// and ISP pool as keyword search, for nothing. This is the leg that catches a restock on a page-2-
+// ranked item like B0H78BB9TY (30th Celebration ETB) that keyword relevance never surfaces and AOD
+// can no longer check. Paced by a persistent cursor (a few chunks per poll, NOT a per-poll burst)
+// so total /s request volume stays near-flat and can never re-block search — our only live leg.
+// REVERT: set AMAZON_ASIN_SWEEP=0 in the Railway env to disable it instantly (no code change).
+const ASIN_SWEEP_ENABLED = process.env.AMAZON_ASIN_SWEEP !== '0';
+const ASIN_BATCH_SIZE = Number(process.env.AMAZON_ASIN_BATCH_SIZE) || 20;      // ASINs per /s request
+const ASIN_BATCHES_PER_POLL = Number(process.env.AMAZON_ASIN_BATCHES_PER_POLL) || 1; // +N /s req/poll
+
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 // Escalating quiet ladder for a throttled AOD endpoint, mirroring the search backoff ladder. A
@@ -148,6 +160,7 @@ class AmazonAdapter extends BaseAdapter {
     this._searchSkip = 0;
     this._queryCursor = 0;
     this._newestCursor = 0;   // independent walk for the newest-first probe
+    this._asinSweepCursor = 0; // persistent walk over catalogue chunks for the batch-ASIN sweep
     this._searchStrikes = 0;
     this._searchBlockedUntil = 0;
     this._lastAodSweepAt = 0;
@@ -746,6 +759,12 @@ class AmazonAdapter extends BaseAdapter {
       }
     }
 
+    // Batch-ASIN stock sweep: check tracked ASINs by exact id so page-2-ranked items that keyword
+    // relevance never surfaces (and that AOD can no longer check) still get a stock refresh. Runs
+    // BEFORE the carry-forward so its fresh reads land in `products`; anything it did not touch this
+    // poll is then carried forward unchanged.
+    await this._runAsinSweep(products);
+
     // Carry forward anything this sweep did not surface — absence from a search page is
     // not evidence of going out of stock
     for (const [asin, cached] of this._knownProducts) {
@@ -772,21 +791,98 @@ class AmazonAdapter extends BaseAdapter {
   }
 
   /**
+   * Batch-ASIN stock sweep — stock-check tracked ASINs by exact id over free /s search.
+   *
+   * Amazon's per-ASIN AOD checker is blocked, and keyword relevance never surfaces a page-2-ranked
+   * item, so a tracked ASIN like B0H78BB9TY (30th Celebration ETB) could sit stale for hours and
+   * miss its restock. This asks /s for pipe-joined ASIN batches (k=B0AAA|B0BBB, Amazon's OR
+   * operator), which returns a normal results grid _parseSearchHtml already reads — the SAME free
+   * endpoint + ISP pool as keyword search. A persistent cursor walks the catalogue a few chunks per
+   * poll, so the full catalogue is checked every ~ceil(N / size / perPoll) polls without adding a
+   * per-poll burst that could re-block /s (our only live detection leg).
+   *
+   * Fail-safe by construction: it only ever ADDS a fresh read. A challenge/empty page returns null
+   * (never []), so those ASINs are carried forward, never flipped out of stock; and a priceless
+   * tile still withholds rather than guessing (via _buildFromSearch), so no false OOS is possible.
+   */
+  async _runAsinSweep(products) {
+    if (!ASIN_SWEEP_ENABLED) return;
+    // Single-flight: a 120s poll timeout ORPHANS (does not cancel) a slow sweep while freeing the
+    // poll guard, so the next poll could start a second sweep that races _asinSweepCursor. Skip if
+    // one is already running — carry-forward fills the cache, so a skipped poll loses nothing.
+    if (this._asinSweepInFlight) return;
+    const all = [...this._knownProducts.keys()];
+    if (all.length === 0) return;
+    this._asinSweepInFlight = true;
+    try {
+      await this._runAsinSweepInner(products, all);
+    } finally {
+      this._asinSweepInFlight = false;
+    }
+  }
+
+  async _runAsinSweepInner(products, all) {
+
+    const chunks = [];
+    for (let i = 0; i < all.length; i += ASIN_BATCH_SIZE) chunks.push(all.slice(i, i + ASIN_BATCH_SIZE));
+
+    const toRun = [];
+    for (let i = 0; i < ASIN_BATCHES_PER_POLL && i < chunks.length; i++) {
+      toRun.push(chunks[this._asinSweepCursor % chunks.length]);
+      this._asinSweepCursor = (this._asinSweepCursor + 1) % chunks.length;
+    }
+
+    const results = await Promise.allSettled(
+      toRun.map(chunk => this._freeSearch(chunk.join('|'), false, 1, { asinMode: true }).then(items => ({ items })))
+    );
+
+    let refreshed = 0;
+    let challenged = 0;
+    for (const r of results) {
+      if (r.status === 'rejected') continue;
+      const { items } = r.value;
+      // null = challenge / no grid: carry the cache forward, NEVER read as "these ASINs are OOS".
+      if (items === null || items === undefined) { challenged++; continue; }
+      for (const item of items) {
+        // The keyword path (relevance + newest + its price-fill) already ran this poll. If it
+        // surfaced this ASIN, its result stands — don't re-process and clobber a price-filled or
+        // relist-adopted row. The sweep exists to cover what keyword search did NOT surface.
+        if (item.asin && (item.asin in products)) continue;
+        const product = this._buildFromSearch(item, '');
+        if (!product) continue;
+        products[product.sku] = product;
+        this._knownProducts.set(product.sku, product);
+        refreshed++;
+      }
+    }
+
+    const asinCount = toRun.reduce((n, c) => n + c.length, 0);
+    // Challenge hits are logged distinctly — a WAF page is HTTP 200 and invisible to error alarms.
+    if (challenged) logger.warn(`Amazon: ASIN-sweep — ${challenged}/${toRun.length} batch(es) hit a challenge/empty page (carried forward, no OOS)`);
+    logger.info(`Amazon: ASIN-sweep — ${toRun.length} batch(es) / ${asinCount} ASINs, ${refreshed} refreshed (cursor ${this._asinSweepCursor}/${chunks.length}) ($0)`);
+  }
+
+  /**
    * Free search against amazon.ca. The old path spent 5 ScraperAPI credits per query and
    * so could only run every 30 minutes, which meant a brand-new listing went unnoticed
    * for up to half an hour. Plain search returns ASIN, title, price and stock for ~40
    * products per query and is not gated, so this can run on every poll for nothing.
    */
-  async _freeSearch(query, newestFirst = false, page = 1) {
+  async _freeSearch(query, newestFirst = false, page = 1, opts = {}) {
+    const { asinMode = false } = opts;
     // Amazon's default sort is RELEVANCE, and a brand-new listing has no traction yet, so it
     // does not rank — which is how three "30th Celebration" products were listed, sold out and
     // gone before we ever saw one. Measured 2026-09-09 on the same query: the newest-first sort
     // returned 24 tiles of which 23 do not appear in relevance results at all. Almost no
     // overlap, so this is not a marginal gain — it is a different view of the catalogue, and it
     // is the one where a new listing appears immediately.
-    const sort = newestFirst ? '&s=date-desc-rank' : '';
-    const pageParam = page > 1 ? `&page=${page}` : ''; // Amazon paginates in the query string
-    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}&i=toys${sort}${pageParam}`;
+    // ASIN-batch mode: `query` is a pipe-joined ASIN list. Drop the &i=toys department filter — an
+    // exact-ASIN search needs no category scope, and the filter would silently hide any tracked
+    // ASIN Amazon has re-categorised out of Toys & Games — and skip the relevance sort/page params.
+    const dept = asinMode ? '' : '&i=toys';
+    const sort = (!asinMode && newestFirst) ? '&s=date-desc-rank' : '';
+    const pageParam = (!asinMode && page > 1) ? `&page=${page}` : ''; // Amazon paginates in the query string
+    const url = `https://www.amazon.ca/s?k=${encodeURIComponent(query)}${dept}${sort}${pageParam}`;
 
     // Spread across this retailer's ISP exits, and never fall back to residential.
     //
@@ -802,7 +898,7 @@ class AmazonAdapter extends BaseAdapter {
     // the last resort because it costs nothing and still works when no pool is configured.
     const isp = getIspProxyRoundRobin(this.id);
     if (isp) {
-      const viaIsp = await this._searchOnce(url, isp.url);
+      const viaIsp = await this._searchOnce(url, isp.url, opts);
       if (viaIsp) return viaIsp;
     }
 
@@ -822,7 +918,7 @@ class AmazonAdapter extends BaseAdapter {
       if (now - (this._lastDirectAt || 0) < this.intervalMs) return null;
       this._lastDirectAt = now;
     }
-    return this._searchOnce(url, null);
+    return this._searchOnce(url, null, opts);
   }
 
   /**
@@ -846,7 +942,8 @@ class AmazonAdapter extends BaseAdapter {
     logger.info(`${base} over ${exits} ISP exit(s) = ${(totalRps / exits).toFixed(3)} req/s per exit`);
   }
 
-  async _searchOnce(url, proxyUrl) {
+  async _searchOnce(url, proxyUrl, opts = {}) {
+    const { asinMode = false } = opts;
     try {
       const html = await stealthGet(url, {
         proxyUrl,
@@ -860,6 +957,19 @@ class AmazonAdapter extends BaseAdapter {
           'Upgrade-Insecure-Requests': '1',
         },
       });
+      if (asinMode) {
+        // ASIN-batch pages are small by design (~20 tiles), so the keyword path's 50KB floor would
+        // falsely reject a GOOD grid. Gate on the RESULTS GRID instead: a challenge/robot-check page
+        // (checked first, at any size) or any response without the grid marker returns null — never
+        // [] — so a bad page is "no data this cycle, carry the cache forward", and a batch can NEVER
+        // read as "these 20 ASINs went out of stock".
+        if (html && /api-services-support|Type the characters|continue shopping/.test(html)) {
+          if (proxyUrl) _clearCache(proxyUrl);
+          return null;
+        }
+        if (!html || !html.includes('data-component-type="s-search-result"')) return null;
+        return this._parseSearchHtml(html);
+      }
       if (!html || html.length < 50000) return null;
       if (/api-services-support|Type the characters|continue shopping/.test(html)) {
         if (proxyUrl) _clearCache(proxyUrl);
