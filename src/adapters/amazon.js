@@ -6,6 +6,7 @@ const { getProxyUrl, getIspProxyRoundRobin, ispPoolSize } = require('../core/pro
 const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const rateBudget = require('../utils/rate-budget');
+const { fetchAmazonOffers } = require('../utils/scraper-api');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
 const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
@@ -106,6 +107,18 @@ const ASIN_SWEEP_ENABLED = process.env.AMAZON_ASIN_SWEEP !== '0';
 const ASIN_BATCH_SIZE = Number(process.env.AMAZON_ASIN_BATCH_SIZE) || 20;      // ASINs per /s request
 const ASIN_BATCHES_PER_POLL = Number(process.env.AMAZON_ASIN_BATCHES_PER_POLL) || 1; // +N /s req/poll
 
+// Offers lane — the GUARANTEED per-ASIN stock check for "search-invisible" ASINs. Amazon serves no
+// search tile for an item with no live offer, so an OOS-and-suppressed ASIN (e.g. B0H78BB9TY, the
+// 30th Celebration ETB) is never returned by the free batch sweep — it just sits correctly OOS, and
+// its restock has no tile to appear in. ScraperAPI's structured/amazon/offers (~1 credit) returns a
+// definitive stock verdict tile-or-no-tile, so this lane fires the false->true RESTOCK the sweep
+// cannot. Paced to one paid call per interval and hard-capped per day so it never eats the budget.
+// REVERT: AMAZON_OFFERS_LANE=0. An ASIN is "invisible" once the sweep hasn't refreshed it in STALE_MS.
+const OFFERS_LANE_ENABLED = process.env.AMAZON_OFFERS_LANE !== '0';
+const OFFERS_INTERVAL_MS = Number(process.env.AMAZON_OFFERS_INTERVAL_MS) || 20000; // ≥1 paid call/20s
+const OFFERS_STALE_MS = Number(process.env.AMAZON_OFFERS_STALE_MS) || 10 * 60 * 1000; // sweep-missed
+const OFFERS_DAILY_CAP = Number(process.env.AMAZON_OFFERS_DAILY_CAP) || 4000; // ScraperAPI credits/day
+
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 // Escalating quiet ladder for a throttled AOD endpoint, mirroring the search backoff ladder. A
@@ -161,6 +174,9 @@ class AmazonAdapter extends BaseAdapter {
     this._queryCursor = 0;
     this._newestCursor = 0;   // independent walk for the newest-first probe
     this._asinSweepCursor = 0; // persistent walk over catalogue chunks for the batch-ASIN sweep
+    this._lastOffersAt = 0;    // paces the offers lane's paid calls
+    this._offersDay = null;    // YYYY-MM-DD of the current offers daily-cap window
+    this._offersToday = 0;     // paid offers calls spent today (hard cap)
     this._searchStrikes = 0;
     this._searchBlockedUntil = 0;
     this._lastAodSweepAt = 0;
@@ -765,6 +781,11 @@ class AmazonAdapter extends BaseAdapter {
     // poll is then carried forward unchanged.
     await this._runAsinSweep(products);
 
+    // Offers lane: after the free sweep has refreshed everything it can, spend ONE paid
+    // structured/offers call on the stalest search-invisible ASIN — the ones with no search tile,
+    // which the sweep can never see. This is what guarantees a restock like B0H78BB9TY is caught.
+    await this._runOffersLane(products);
+
     // Carry forward anything this sweep did not surface — absence from a search page is
     // not evidence of going out of stock
     for (const [asin, cached] of this._knownProducts) {
@@ -860,6 +881,112 @@ class AmazonAdapter extends BaseAdapter {
     // Challenge hits are logged distinctly — a WAF page is HTTP 200 and invisible to error alarms.
     if (challenged) logger.warn(`Amazon: ASIN-sweep — ${challenged}/${toRun.length} batch(es) hit a challenge/empty page (carried forward, no OOS)`);
     logger.info(`Amazon: ASIN-sweep — ${toRun.length} batch(es) / ${asinCount} ASINs, ${refreshed} refreshed (cursor ${this._asinSweepCursor}/${chunks.length}) ($0)`);
+  }
+
+  /**
+   * Apply the PINNED-offer stock rule to a structured/amazon/offers payload.
+   *
+   * Stock is whether the FEATURED (buy-box) offer carries a numeric price — NOT listings.length,
+   * and NOT "any priced listing". Marketplace listings carry prices whether or not anything is
+   * featured, so B0C75FSW7C (unpriced pinned offer + four priced marketplace listings, no buy box)
+   * is OOS; both naive rules would call it in stock. Fallback if nothing is flagged pinned: read
+   * listings[0] (degrade to "top offer", never to "in stock"). Returns null when the payload is
+   * unreadable (no live title = WAF/challenge/empty) so the caller carries the cache forward.
+   * Kept in lock-step with parseOffers in src/utils/amazon-verify.js.
+   */
+  // Thin seam over the module fetcher so tests can stub the network. Returns raw offers JSON or null.
+  _fetchOffers(asin) {
+    return fetchAmazonOffers(asin);
+  }
+
+  _offersToData(json) {
+    if (!json || typeof json !== 'object') return null;
+    const name = json.item && json.item.name;
+    if (!name) return null; // no live title => we did not really read the page => inconclusive
+    const listings = Array.isArray(json.listings) ? json.listings : [];
+    const pinned = listings.find(l => l && l.pinned_offer) || listings[0] || null;
+    const price = pinned && Number(pinned.price) > 0 ? Number(pinned.price) : null;
+    return { name, price, inStock: price != null };
+  }
+
+  /**
+   * Offers lane — one paid structured/offers check per interval on the stalest search-invisible
+   * ASIN, so an item with no search tile still gets a definitive stock verdict and its restock
+   * fires. Stalest-first is self-balancing (no starvation); paced by OFFERS_INTERVAL_MS and a hard
+   * daily credit cap. Fail-safe: an unreadable payload or budget refusal returns null / no-ops and
+   * carries the cache forward — it can never flip a batch of ASINs out of stock.
+   */
+  async _runOffersLane(products) {
+    if (!OFFERS_LANE_ENABLED) return;
+    const now = Date.now();
+    if (now - this._lastOffersAt < OFFERS_INTERVAL_MS) return; // one paid call per interval
+
+    // Hard daily cap, reset on date change — never spend the whole ScraperAPI margin on this lane.
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (this._offersDay !== day) { this._offersDay = day; this._offersToday = 0; }
+    if (this._offersToday >= OFFERS_DAILY_CAP) return;
+
+    // Target the stalest tracked ASIN the free sweep hasn't refreshed within OFFERS_STALE_MS — i.e.
+    // the ones with no search tile. Stalest-first guarantees fair coverage of the whole invisible set.
+    let target = null;
+    let oldest = Infinity;
+    for (const [asin, p] of this._knownProducts) {
+      const ls = (p && p.lastSeen) || 0;
+      if (now - ls > OFFERS_STALE_MS && ls < oldest) { oldest = ls; target = asin; }
+    }
+    if (!target) return;
+
+    this._lastOffersAt = now;
+    let json;
+    try { json = await this._fetchOffers(target); } catch { json = null; }
+    if (json === null) return; // budget refusal / HTTP error / timeout — no data, carry forward
+    this._offersToday += 1;
+
+    const data = this._offersToData(json);
+    if (!data) { // unreadable (no live title) — carry forward, NEVER read as OOS
+      logger.debug(`Amazon: offers-lane — ${target} unreadable payload, carried forward`);
+      return;
+    }
+
+    // Identity: a live title now out of scope means this ASIN is no longer the product we stored —
+    // drop it, the same rule the sweep uses. Denylisting is the identity gate's job, not this lane's.
+    if (!isInScopeName(data.name)) {
+      logger.warn(`Amazon: offers-lane — ${target} live title out of scope ("${data.name.slice(0, 60)}") — dropping`);
+      this._knownProducts.delete(target);
+      delete products[target];
+      return;
+    }
+
+    const cached = this._knownProducts.get(target) || {};
+    // Adopt a relisted title only when it genuinely changed (mirror the sweep); keep the discovered
+    // category unless the live title re-classifies to a concrete game.
+    let name = cached.name;
+    let category = cached.category;
+    if (data.name && cached.name && !sameProductName(cached.name, data.name)) {
+      name = data.name;
+      const reclassified = this.classify({ name: data.name }).category;
+      if (reclassified !== 'other') category = reclassified;
+    } else if (data.name && !cached.name) {
+      name = data.name;
+    }
+
+    const product = {
+      ...cached,
+      sku: target,
+      name: name || cached.name || data.name,
+      category: category || cached.category || 'pokemon',
+      price: data.price || cached.price || 0,
+      inStock: data.inStock,
+      canAddToCart: data.inStock,
+      url: cached.url || `https://www.amazon.ca/dp/${target}`,
+      lastSeen: now,
+    };
+    products[target] = product;
+    this._knownProducts.set(target, product);
+    if (data.inStock) this._lastInStockAt.set(target, now);
+
+    logger.info(`Amazon: offers-lane — ${target} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`
+      + ` (${this._offersToday}/${OFFERS_DAILY_CAP} credits today, oldest ${Math.round((now - oldest) / 60000)}min)`);
   }
 
   /**
