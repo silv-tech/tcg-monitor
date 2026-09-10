@@ -8,6 +8,17 @@ const scraperApi = require('../utils/scraper-api');
 const state = require('../core/state');
 const { isInScopeName, repairMojibake } = require('../utils/scope');
 
+// Off by default, so adopting the shared scope rule in a new adapter cannot silently start
+// deleting products. Someone has to deliberately turn enforcement on, after reading the dry-run.
+const SCOPE_INGESTION_ENFORCE = process.env.SCOPE_INGESTION_ENFORCE === '1';
+
+// Whether the one-shot backlog purge runs AT ALL. Unset means no — which is what makes a test run
+// safe: tests call fetchProducts() (adapter-smoke.test.js does), and the purge reads, and under
+// enforcement would DELETE, against whatever Redis the environment happens to point at. During
+// development that is the production instance. Set it to '0' for a dry run or '1' to enforce;
+// leaving it unset skips the purge entirely and touches no state.
+const SCOPE_PURGE_ENABLED = process.env.SCOPE_INGESTION_ENFORCE !== undefined;
+
 let browserModule;
 try { browserModule = require('../utils/browser'); } catch { browserModule = null; }
 
@@ -311,8 +322,54 @@ class BaseAdapter {
    * The abort guards a total regression rather than a large cleanup. A first filter applied
    * to a catalogue that never had one legitimately removes a lot: Walmart's real share is 53%.
    */
+  /**
+   * Should this product be admitted at ingestion?
+   *
+   * One gate shared by every adapter that adopts the rule, so the enforcement flag and the log
+   * format are defined once rather than copied three times and drifting.
+   *
+   * Returns true to KEEP. In log-only mode (the default) it always returns true and merely records
+   * what enforcement would have discarded — because the shared rule has confirmed false-positive
+   * classes, and an ingestion-time drop happens before the row ever reaches state, leaving no trail
+   * to audit afterwards. Set SCOPE_INGESTION_ENFORCE=1 only once a soak shows the log holds nothing
+   * but genuine junk.
+   *
+   * Watchlist SKUs are never tested: a hand-picked item's title may not pass on its own (Walmart's
+   * own watchlist ETB carries no franchise word). Both forms are checked, because some adapters
+   * stamp `_watchlist` on the object and others only populate `this.watchlist`.
+   */
+  _scopeGate(name, sku, product = null) {
+    if (!name) return true;
+    const watched = this.watchlist instanceof Set ? this.watchlist : new Set();
+    if (watched.has(String(sku)) || (product && product._watchlist)) return true;
+    if (isInScopeName(name, this.extraGameNames)) return true;
+
+    if (!SCOPE_INGESTION_ENFORCE) {
+      logger.warn(`${this.name}: SCOPE-DRYRUN would drop sku=${sku} | ${name}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Run the one-shot backlog purge, if this environment has opted into it.
+   *
+   * Adapters call this rather than touching the flags directly — they are module-scope consts in
+   * THIS file, and referencing them from an adapter is a ReferenceError that `node --check` cannot
+   * see. Fire-and-forget: a maintenance sweep must never delay or fail a poll.
+   */
+  _maybePurgeOutOfScope() {
+    if (!SCOPE_PURGE_ENABLED || this._scopePurgeDone) return;
+    this._scopePurgeDone = true;
+    this._purgeOutOfScopeState({ dryRun: !SCOPE_INGESTION_ENFORCE }).catch((err) =>
+      logger.warn(`${this.name}: out-of-scope state purge failed: ${err.message}`));
+  }
+
   async _purgeOutOfScopeState(opts = {}) {
-    const { maxShare = 0.9, minKept = 25 } = opts;
+    // `dryRun` reports what WOULD be purged without deleting anything. It exists because the shared
+    // scope rule has known false-positive classes, so wiring this into a new adapter is a change
+    // that can silently delete real products. Amazon and Walmart pass no opts and are unaffected.
+    const { maxShare = 0.9, minKept = 25, dryRun = false } = opts;
     const all = await state.getAllProducts(this.id);
     const entries = Object.entries(all || {});
     if (entries.length === 0) return { purged: 0, kept: 0, repaired: 0, aborted: false };
@@ -335,6 +392,16 @@ class BaseAdapter {
       logger.error(`${this.name}: refusing to purge ${doomed.length}/${entries.length} products ` +
         `(${Math.round(share * 100)}%, ${kept} would remain) — the scope test looks wrong, not the data`);
       return { purged: 0, kept: entries.length, repaired, aborted: true };
+    }
+
+    if (dryRun) {
+      // Full name, not truncated: the name IS the evidence, and the token that tripped the rule is
+      // often at the end. A reviewer has to be able to tell a real product from a genuine reject.
+      for (const [sku, p] of doomed) {
+        logger.warn(`${this.name}: SCOPE-DRYRUN would purge sku=${sku} inStock=${!!p.inStock} | ${p.name}`);
+      }
+      logger.warn(`${this.name}: SCOPE-DRYRUN ${doomed.length} rows would be purged (${kept} would remain) — nothing deleted`);
+      return { purged: 0, kept: entries.length, repaired, aborted: false, dryRun: true };
     }
 
     for (const [sku, p] of doomed) {

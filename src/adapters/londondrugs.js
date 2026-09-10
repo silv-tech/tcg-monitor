@@ -1,5 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
+const { isInScopeName } = require('../utils/scope');
 const scraperApi = require('../utils/scraper-api');
 const storeAvail = require('../utils/ld-store-availability');
 const state = require('../core/state');
@@ -240,7 +241,17 @@ class LondonDrugsAdapter extends BaseAdapter {
     const out = [];
     for (const p of parseFlightProducts(html)) {
       const name = decodeEntities(p.productName);
-      if (!isTrackedCardProduct(name)) continue;
+      // London Drugs keeps its OWN scope rule, deliberately. Measured 2026-09-10: 31/31 stored
+      // rows agree with the shared isInScopeName, so swapping it in buys nothing today and risks
+      // a divergence that would only surface on a future SKU. Instead, shadow the shared rule and
+      // warn on disagreement — that turns "happens to agree" into "monitored for agreement", and
+      // whoever sees the first warning gets to decide with evidence rather than guess.
+      const ownScope = isTrackedCardProduct(name);
+      const sharedScope = isInScopeName(name, this.extraGameNames);
+      if (ownScope !== sharedScope) {
+        logger.warn(`${this.name}: SCOPE-SHADOW disagreement own=${ownScope} shared=${sharedScope} | ${name}`);
+      }
+      if (!ownScope) continue;
 
       const price = p.price || {};
       const value = price.salePrice ?? price.price ?? price.listPrice ?? 0;
@@ -398,6 +409,12 @@ class LondonDrugsAdapter extends BaseAdapter {
   }
 
   async fetchProducts() {
+    // Legacy rows stored before this adapter applied the shared scope rule never expire on their
+    // own: a re-polled row keeps refreshing lastSeen, so age-based expiry can never reach it.
+    // Cleared once per process rather than every poll, since it scans the retailer keyspace.
+    // dryRun mirrors the ingestion gate — it reports what it would delete until enforcement is on.
+    this._maybePurgeOutOfScope();
+
     const start = Date.now();
 
     if (!this._sweepRunning && Date.now() - this._lastSweepAt >= this.sweepIntervalMs) {

@@ -2,7 +2,7 @@ const BaseAdapter = require('./base');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
 const logger = require('../monitoring/logger');
-const { normalizePrice, isTCGProduct } = require('../utils/helpers');
+const { normalizePrice } = require('../utils/helpers');
 const { httpGet } = require('../utils/http');
 const { getNextIspProxy, recordRequest, markProxySuccess, markProxyBlocked } = require('../core/proxy');
 const { HttpsProxyAgent } = require('https-proxy-agent');
@@ -77,22 +77,13 @@ class CostcoAdapter extends BaseAdapter {
       'trading-card', 'trading+card', 'trading%20card',
       'one-piece', 'one+piece', 'one%20piece',
     ];
-    // Product name validation — after parsing, product name must contain one of these
-    // Deliberately does NOT include a bare franchise name. Costco's catalogue is broad, so
-    // "Pokémon" on its own also matches Switch games, LEGO sets, pinball machines and Toniebox
-    // figures. Every entry here names a card product form.
-    // A product must name a game we track AND be a card product. One list mixing the two
-    // could not express that: "booster tin" let Magic: The Gathering through and "trading
-    // card" let an Upper Deck Golf blaster box through, because a card-shaped product from
-    // ANY game matched. Splitting them means neither a Magic booster box nor a Pokemon
-    // Nintendo Switch game can qualify — the first has no tracked game, the second no card
-    // form.
-    this.tcgGameNames = ['pokemon', 'pokémon', 'pokmon', 'one piece'];
-    this.tcgProductForms = [
-      'tcg', 'trading card', 'booster box', 'booster pack', 'booster tin', 'booster bundle',
-      'elite trainer', 'etb', 'collection box', 'premium collection', 'ex box', 'ex boxes',
-      'card game', 'tin', 'blister',
-    ];
+    // Title scope now comes from the SHARED rule (isInScopeName via _scopeGate), not from lists
+    // kept here. The local pair encoded the right idea — a tracked game AND a card form, because
+    // "booster tin" alone admitted Magic: The Gathering and "trading card" alone admitted an Upper
+    // Deck Golf blaster — but it had no accessory exclusion, no single-card exclusion and no
+    // mojibake repair, and it drifted from the rule every other store uses. A rule that lives in
+    // one adapter is a rule the next adapter does not have.
+    //
     // Kept for the sitemap/slug paths, which match against URL slugs rather than titles.
     this.tcgNameKeywords = [
       'pokemon tcg', 'pokémon tcg', 'tcg:', 'trading card', 'booster box', 'booster pack',
@@ -120,22 +111,6 @@ class CostcoAdapter extends BaseAdapter {
       this.knownProductIds.add(id);
     }
     this._deriveTiming();
-  }
-
-  /**
-   * A tracked game AND a card product form — both, not either.
-   *
-   * Costco's catalogue is broad enough that each half alone is wrong. Matching only the FORM
-   * tracked "Magic: The Gathering — TMNT Booster Tin Collection" and "Upper Deck Golf Trading
-   * Card Blaster Box", neither of which is a game we monitor. Matching only the FRANCHISE
-   * would track a Nintendo Switch Pokemon game, a LEGO Pikachu set, a Toniebox figure and a
-   * $7,299 Pokemon pinball machine — all of which were sitting in the cache from before the
-   * name filter existed.
-   */
-  _isTrackedCardProduct(title) {
-    const t = String(title || '').toLowerCase();
-    if (!this.tcgGameNames.some((g) => t.includes(g))) return false;
-    return this.tcgProductForms.some((f) => t.includes(f));
   }
 
   _deriveTiming() {
@@ -227,8 +202,12 @@ class CostcoAdapter extends BaseAdapter {
       const id = String(p.name || '').split('/products/').pop();
       const title = p.title;
       if (!id || !title) continue;
-      if (!this._isTrackedCardProduct(title)) continue;
-      if (!isTCGProduct(title)) continue;
+      // Was Costco's own hand-maintained word list plus the loose isTCGProduct. That pair has no
+      // accessory exclusion, no single-card exclusion and no mojibake repair, and it stored Magic
+      // Commander kits, an Upper Deck Golf blaster, Switch games and a LEGO set. Two "Magic: The
+      // Gathering - TMNT Booster Tin" rows carry category "mtg", which IS an active category — so
+      // unlike Best Buy's junk they would have reached the client's Discord on restock.
+      if (!this._scopeGate(title, id)) continue;
 
       const inv = inventory.get(id) || {};
       const price = parseFloat(inv.deliveryPrice?.minPrice ?? inv.warehousePrice?.minPrice ?? 0) || 0;
@@ -253,6 +232,12 @@ class CostcoAdapter extends BaseAdapter {
   }
 
   async fetchProducts() {
+    // Legacy rows stored before this adapter applied the shared scope rule never expire on their
+    // own: a re-polled row keeps refreshing lastSeen, so age-based expiry can never reach it.
+    // Cleared once per process rather than every poll, since it scans the retailer keyspace.
+    // dryRun mirrors the ingestion gate — it reports what it would delete until enforcement is on.
+    this._maybePurgeOutOfScope();
+
     const products = {};
 
     // Primary path: Costco's own search API, every poll. This is what makes a brand-new
@@ -461,13 +446,11 @@ class CostcoAdapter extends BaseAdapter {
     }
     // Validate product name matches TCG — skip false positives from sitemap
     if (product && !this.watchlist.has(productId)) {
-      const lowerName = product.name.toLowerCase();
       // The name must look like a TCG product AND survive the shared filter. "Pokémon" alone
       // is not enough — the sitemap also carries Switch games, LEGO sets and Tonies figures,
-      // all of which contain the franchise name and none of which are cards.
-      const isTcg = this.tcgNameKeywords.some(kw => lowerName.includes(kw))
-        && isTCGProduct(product.name);
-      if (!isTcg) {
+      // all of which contain the franchise name and none of which are cards. The shared rule
+      // already encodes exactly that distinction, so it replaces the local pair.
+      if (!this._scopeGate(product.name, productId, product)) {
         logger.debug(`Costco: skipping non-TCG product "${product.name}" (${productId})`);
         return null;
       }

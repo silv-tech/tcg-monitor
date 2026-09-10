@@ -386,6 +386,12 @@ class PokemonCenterAdapter extends BaseAdapter {
   }
 
   async fetchProducts() {
+    // Legacy rows stored before this adapter applied the shared scope rule never expire on their
+    // own: a re-polled row keeps refreshing lastSeen, so age-based expiry can never reach it.
+    // Cleared once per process rather than every poll, since it scans the retailer keyspace.
+    // dryRun mirrors the ingestion gate — it reports what it would delete until enforcement is on.
+    this._maybePurgeOutOfScope();
+
     const products = {};
 
     // Phase 1: Discover products from sitemap (every 4 hours)

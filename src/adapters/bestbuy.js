@@ -2,7 +2,6 @@ const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
 const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
-const { isTCGProduct } = require('../utils/helpers');
 
 // Best Buy's search API is the slow part — 7 queries take ~10s wall even fired in
 // parallel — while the availability API answers for 10 SKUs in one fast call. So the
@@ -45,6 +44,12 @@ class BestBuyAdapter extends BaseAdapter {
   }
 
   async fetchProducts() {
+    // Legacy rows stored before this adapter applied the shared scope rule never expire on their
+    // own: a re-polled row keeps refreshing lastSeen, so age-based expiry can never reach it.
+    // Cleared once per process rather than every poll, since it scans the retailer keyspace.
+    // dryRun mirrors the ingestion gate — it reports what it would delete until enforcement is on.
+    this._maybePurgeOutOfScope();
+
     const products = {};
     const now = Date.now();
     const needsDiscovery = now - this._lastDiscoveryAt >= this.discoveryIntervalMs
@@ -105,8 +110,15 @@ class BestBuyAdapter extends BaseAdapter {
         // Sold by Best Buy only — the client does not want marketplace sellers
         if (item.isMarketplace) continue;
         // Their search happily returns board games and puzzles for "pokemon tcg"; keeping
-        // those would waste an availability check on every poll forever
-        if (!isTCGProduct(item.name)) continue;
+        // those would waste an availability check on every poll forever.
+        //
+        // This used the looser isTCGProduct, which admits any other card game — measured, it let
+        // through Yu-Gi-Oh blisters and Noble Collection Minecraft replicas, 12 of 17 stored rows.
+        // They survived to delivery and were stopped only by the category filter, which is an
+        // accident of category:"other" rather than a scope decision. isInScopeName is the shared
+        // rule and a strict superset (it calls isTCGProduct itself after the game-name, accessory
+        // and single-card gates), so this is a tightening, not a new mechanism.
+        if (!this._scopeGate(item.name, item.sku)) continue;
 
         const price = item.salePrice || item.regularPrice;
         this._knownProducts.set(item.sku, this.classify({
