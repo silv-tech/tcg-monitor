@@ -17,8 +17,8 @@ const {
   parseStoreResponse,
   storesWithStock,
   formatStoreField,
-  buildActionRequest,
-  fetchStoreAvailability,
+
+
 } = require('../src/utils/ld-store-availability');
 
 // Shaped exactly like the captured response, including the Flight prefix line.
@@ -106,80 +106,6 @@ describe('choosing which store to show', () => {
       'a lookup that found no stock must omit the field — we may simply have missed it, and ' +
       'stating absence as fact would be a wrong field');
     assert.strictEqual(formatStoreField([]), null);
-  });
-});
-
-describe('the request we send', () => {
-  test('carries the product code and postal code the site sends', () => {
-    const req = buildActionRequest('https://www.londondrugs.com/products/x/p/L3293797', 'L3293797', 'V6B 1A1');
-    assert.strictEqual(req.method, 'POST');
-    assert.strictEqual(req.body, '["L3293797",{"zipCode":"V6B 1A1"}]');
-    assert.match(req.headers['Next-Action'], /^[0-9a-f]{40}$/);
-    assert.strictEqual(req.headers['Content-Type'], 'text/plain;charset=UTF-8');
-  });
-});
-
-describe('the enrichment loop', () => {
-  function fakeSession(handler) {
-    const calls = [];
-    let closed = false;
-    return {
-      calls,
-      wasClosed: () => closed,
-      open: async () => ({
-        post: async (req) => { calls.push(req); return handler(req); },
-        close: async () => { closed = true; },
-      }),
-    };
-  }
-
-  test('one session serves every product and postal code', async () => {
-    const s = fakeSession(() => flight([GRANVILLE]));
-    const out = await fetchStoreAvailability(
-      [{ sku: 'A', url: 'u/A' }, { sku: 'B', url: 'u/B' }],
-      { openSession: s.open, postalCodes: ['V6B 1A1', 'T2P 1J9'] },
-    );
-    assert.strictEqual(s.calls.length, 4, '2 products x 2 postal codes');
-    assert.strictEqual(out.size, 2);
-    assert.ok(s.wasClosed(), 'the session must be closed — these are billed per GB');
-  });
-
-  test('the same store returned for two postal codes is not duplicated', async () => {
-    const s = fakeSession(() => flight([GRANVILLE]));
-    const out = await fetchStoreAvailability([{ sku: 'A', url: 'u/A' }],
-      { openSession: s.open, postalCodes: ['V6B 1A1', 'T2P 1J9', 'S4P 3Y2'] });
-    assert.strictEqual(out.get('A').length, 1, 'regions overlap; a store must appear once');
-  });
-
-  test('one product failing does not lose the others', async () => {
-    const s = fakeSession((req) => {
-      if (req.body.includes('BAD')) throw new Error('boom');
-      return flight([GRANVILLE]);
-    });
-    const out = await fetchStoreAvailability(
-      [{ sku: 'BAD', url: 'u/BAD' }, { sku: 'GOOD', url: 'u/GOOD' }],
-      { openSession: s.open, postalCodes: ['V6B 1A1'] },
-    );
-    assert.strictEqual(out.has('BAD'), false);
-    assert.strictEqual(out.get('GOOD').length, 1);
-    assert.ok(s.wasClosed());
-  });
-
-  test('the session is closed even when the loop throws', async () => {
-    const s = fakeSession(() => { throw new Error('hard fail'); });
-    await fetchStoreAvailability([{ sku: 'A', url: 'u/A' }], { openSession: s.open, postalCodes: ['V6B'] });
-    assert.ok(s.wasClosed(), 'a leaked browser session bills until it times out');
-  });
-
-  test('no browser configured returns empty rather than throwing', async () => {
-    const out = await fetchStoreAvailability([{ sku: 'A', url: 'u/A' }], {});
-    assert.strictEqual(out.size, 0);
-  });
-
-  test('a session that will not open does not take the poll down with it', async () => {
-    const out = await fetchStoreAvailability([{ sku: 'A', url: 'u/A' }],
-      { openSession: async () => { throw new Error('bright data down'); } });
-    assert.strictEqual(out.size, 0);
   });
 });
 

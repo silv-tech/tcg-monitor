@@ -26,18 +26,6 @@
 
 const logger = require('../monitoring/logger');
 
-// Rotates when London Drugs deploys, exactly like Walmart's DynamicItemById hash. When store
-// data goes silent, re-capture it by driving the store picker over CDP and logging POSTs — the
-// method is recorded in the project notes.
-const ACTION_ID = process.env.LD_STORE_ACTION_ID
-  || '5bfa94ae3116cc94d06a9f4419c282e9cc3c1161';
-
-// London Drugs is Western Canada only — BC, Alberta, Saskatchewan, Manitoba. The action returns
-// stores NEAR a postal code, so one code per province is what covers the chain. Adding codes
-// costs ~3s per product per code, so this is deliberately short.
-const POSTAL_CODES = (process.env.LD_STORE_POSTAL_CODES
-  || 'V6B 1A1,T2P 1J9,S4P 3Y2,R3C 4T3').split(',').map((s) => s.trim()).filter(Boolean);
-
 /**
  * Pull the store rows out of a server-action response.
  *
@@ -123,122 +111,6 @@ function formatStoreField(stores) {
   return `**${s.name}** — ${s.stockAvailable} in stock\n${where} ${s.postal}`.trim() + more;
 }
 
-/** The exact request the site makes. Kept in one place so a captured change lands once. */
-function buildActionRequest(productUrl, productCode, zipCode) {
-  return {
-    url: productUrl,
-    method: 'POST',
-    headers: {
-      'Next-Action': ACTION_ID,
-      'Content-Type': 'text/plain;charset=UTF-8',
-      Accept: 'text/x-component',
-    },
-    body: JSON.stringify([productCode, { zipCode }]),
-  };
-}
-
-/**
- * Enrich products with store availability using ONE browser session for all of them.
- *
- * `openSession` is injected so the browser is not a hard dependency of this module — the tests
- * drive the whole loop without a network call, and a caller with no Bright Data endpoint gets
- * an empty map rather than an exception.
- *
- * @param {Array<{sku:string,url:string}>} products
- * @param {{openSession:Function, postalCodes?:string[], perProductDelayMs?:number}} opts
- * @returns {Promise<Map<string, Array>>} sku -> store rows (merged across postal codes)
- */
-async function fetchStoreAvailability(products, opts = {}) {
-  const result = new Map();
-  const list = (products || []).filter((p) => p && p.sku && p.url);
-  if (list.length === 0) return result;
-
-  const openSession = opts.openSession;
-  if (typeof openSession !== 'function') {
-    logger.debug('London Drugs: store availability skipped — no browser session available');
-    return result;
-  }
-
-  const codes = opts.postalCodes && opts.postalCodes.length ? opts.postalCodes : POSTAL_CODES;
-  let session;
-  try {
-    session = await openSession();
-  } catch (err) {
-    logger.warn(`London Drugs: could not open a browser session for store availability: ${err.message}`);
-    return result;
-  }
-
-  const started = Date.now();
-  let ok = 0;
-  let withStock = 0;
-  let totalRows = 0;
-  try {
-    for (const p of list) {
-      const byCode = new Map(); // dedupe: the same store answers several postal codes
-      for (const zip of codes) {
-        try {
-          const text = await session.post(buildActionRequest(p.url, p.sku, zip));
-          for (const s of parseStoreResponse(text)) {
-            if (s.code && !byCode.has(s.code)) byCode.set(s.code, s);
-          }
-        } catch (err) {
-          logger.debug(`London Drugs: store lookup failed for ${p.sku} @ ${zip}: ${err.message}`);
-        }
-      }
-      if (byCode.size > 0) {
-        const rows = [...byCode.values()];
-        result.set(p.sku, rows);
-        ok++;
-        withStock += storesWithStock(rows).length > 0 ? 1 : 0;
-        totalRows += rows.length;
-      }
-    }
-  } finally {
-    try { await session.close(); } catch { /* the session is disposable */ }
-  }
-
-  // "9/9 products" alone was a misleading success line: it counted products that returned ANY
-  // rows, so a payload full of rows with no stock read as a clean pass while every alert
-  // silently lost its store field. The counts that matter are rows parsed and products that
-  // actually have units somewhere.
-  logger.info(`London Drugs: store availability — ${ok}/${list.length} products, ` +
-    `${totalRows} store rows, ${withStock} with stock, across ${codes.length} region(s) ` +
-    `in ${Math.round((Date.now() - started) / 1000)}s`);
-  return result;
-}
-
-/**
- * A Bright Data browser session, wrapped down to the two calls the loop needs.
- *
- * Bright Data is the only route that works here, and `connectOverCDP` needs a generous timeout:
- * the 30s default expires before a session is even allocated (measured: 22.1s just to open).
- * The page must be loaded once so the action is posted from a real same-origin context — the
- * cookies that makes are what the request is authorised by, and they cannot be replayed from
- * anywhere else.
- */
-function createBrightDataSession(seedUrl) {
-  const ws = process.env.BRIGHTDATA_BROWSER_WS;
-  if (!ws) return null;
-  return async () => {
-    const { chromium } = require('patchright');
-    const browser = await chromium.connectOverCDP(ws, { timeout: 180000 });
-    const ctx = await browser.newContext({ locale: 'en-CA' });
-    const page = await ctx.newPage();
-    await page.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
-    await page.waitForTimeout(5000);
-    return {
-      post: (req) => page.evaluate(
-        async ({ url, headers, body }) => {
-          const res = await fetch(url, { method: 'POST', headers, body });
-          return res.text();
-        },
-        { url: req.url, headers: req.headers, body: req.body },
-      ),
-      close: () => browser.close(),
-    };
-  };
-}
-
 
 // ─── Plain-GET inventory (replaces the server action) ────────────────────────
 //
@@ -320,18 +192,13 @@ function totalUnits(rows) {
 }
 
 module.exports = {
-  createBrightDataSession,
   parseStoreResponse,
   storesWithStock,
   formatStoreField,
-  buildActionRequest,
-  fetchStoreAvailability,
   buildInventoryUrl,
   parseInventoryRows,
   fetchInventory,
   totalUnits,
   ALL_LOCATION_CODES,
   STORE_MAP,
-  ACTION_ID,
-  POSTAL_CODES,
 };
