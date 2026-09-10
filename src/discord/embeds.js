@@ -155,7 +155,21 @@ function buildAlertEmbed(event, tier) {
   if (safeUrl) embed.setURL(safeUrl);
 
   // ── Thumbnail ──
-  if (product.image) embed.setThumbnail(product.image);
+  //
+  // Never hand setThumbnail anything but a non-empty string. Pokemon Center's JSON-LD ships
+  // `image` as an ARRAY of five-plus URLs, and discord.js 14 answers an array with
+  // "Received one or more errors" — a THROW, raised inside buildAlertEmbed.
+  //
+  // That is the expensive part. The throw happens after poll-adapter has already written the
+  // new stock state, so events.js can never re-fire the transition and markSent never runs:
+  // the alert is not retried, it is gone, logged only as "Failed to send alert". 649 of the 805
+  // stored Pokemon Center rows carry an array right now, so this guard has to live HERE and not
+  // only at the parser — those rows replay out of Redis until each one is re-checked.
+  //
+  // Pokemon Center is at 0 in stock while its transport is down, which is the only reason this
+  // has never fired. The first restock after that is restored would have hit ~81% of the store.
+  const thumb = Array.isArray(product.image) ? product.image[0] : product.image;
+  if (typeof thumb === 'string' && thumb) embed.setThumbnail(thumb);
 
   // ── Inline fields ──
 
