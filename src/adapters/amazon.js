@@ -224,6 +224,27 @@ class AmazonAdapter extends BaseAdapter {
     // which the sweep reads per-call and cannot be corrupted by a sibling lane.
     const mark = (v) => { this._lastFetchThrottled = v; if (ctx) ctx.throttled = v; };
 
+    // The FREE AOD path is switched OFF by default, and this is why.
+    //
+    // AOD was abandoned as a stock source (client decision, 2026-09-10) in favour of batched ASIN
+    // search plus structured offers, both of which carry a live product title that AOD does not.
+    // Its free leg through our residential pool is hard-blocked: hundreds of 503s, zero successful
+    // reads over hours, and an escalating 10/20/40-minute quiet ladder that never cleared it.
+    // Measured again 2026-09-11 across 22,059 log lines — every free AOD request was a 503, and the
+    // only AOD successes in the whole window came from the PAID ScraperAPI leg, which is a different
+    // code path and is untouched by this switch.
+    //
+    // So the requests bought nothing and cost something: they were 503s against the very host our
+    // search lane depends on, and each pair tripped a cooldown covering EVERY AOD lane. Returning
+    // null is the established contract here for "no data, keep the cache", and mark(false) keeps it
+    // out of the strike count — this is a deliberate skip, not a throttle.
+    //
+    // Set AMAZON_AOD_STEALTH=1 to re-enable if the block ever decays and the endpoint is worth
+    // retrying. Nothing else needs to change; the callers already handle null.
+    // Read at CALL time, not module load: it keeps the switch testable (the shared-budget tests
+    // need to exercise the enabled path) and lets it be flipped without a code change.
+    if (process.env.AMAZON_AOD_STEALTH !== '1') { mark(false); return null; }
+
     // Go quiet on the shared cooldown — EVERY AOD lane, not just the sweep. An endpoint-wide block
     // only decays when we STOP hitting it; the hot lane and price-fill used to keep knocking through
     // the cooldown (fetchProductPage never checked it) and held the block open — the search-quiet

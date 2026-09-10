@@ -36,7 +36,18 @@ function adapter() {
 
 // Most tests replace rateBudget.acquire; restore the real one afterwards so nothing leaks.
 const realAcquire = rateBudget.acquire;
+
+// The free AOD path is OFF by default (it is hard-blocked; every request was a 503 and the only
+// successes came from the paid ScraperAPI leg). These tests are about the shared BUDGET that
+// governs it, so they enable the path explicitly — otherwise they would assert nothing.
+const realAodFlag = process.env.AMAZON_AOD_STEALTH;
+process.env.AMAZON_AOD_STEALTH = '1';
+
 afterEach(() => { rateBudget.acquire = realAcquire; rateBudget._reset(); });
+process.on('exit', () => {
+  if (realAodFlag === undefined) delete process.env.AMAZON_AOD_STEALTH;
+  else process.env.AMAZON_AOD_STEALTH = realAodFlag;
+});
 
 describe('shared AOD budget: every AOD call is governed, burst 1, correct key', () => {
   test('_stealthCheckAsin acquires from amazon:aod with burst 1 at ~0.45 req/s before any fetch', async () => {
