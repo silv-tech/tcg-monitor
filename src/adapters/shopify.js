@@ -730,6 +730,17 @@ class ShopifyAdapter extends BaseAdapter {
           inStock: item.available === true,
           canAddToCart: item.available === true,
           shipsToHome: true,
+          // Stamp identity at the SOURCE so a product keyword-search discovers before the slower
+          // full sweep covers it is not a bare row — delivery's retailerIdFromName crashed on the
+          // undefined and lost the alert (135 bare Titan Toyz rows). ONLY retailerId + retailer,
+          // NOT a full classify(): classify() also sets category='other' when classifyCategory finds
+          // no franchise word, and routeEvent permanently BLOCKS 'other'. isInScopeName accepts SET
+          // names ("Chaos Rising ETB") that classifyCategory cannot, so a full classify() here would
+          // silence 6 real in-stock Pokemon products (measured across all 12 Shopify catalogues).
+          // Category is left as-is (its today's bypass preserved). Not a routeEvent repair either —
+          // stamping here keeps the dedup key stable (deliver() normalises before filterDuplicates).
+          retailerId: this.id,
+          retailer: this.name,
         };
         refreshed++;
       }

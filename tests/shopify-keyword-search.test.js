@@ -88,6 +88,42 @@ describe('search never invents a product identity', () => {
   });
 });
 
+describe('a search-refreshed row carries retailerId (root cause of the Titan Toyz delivery crash)', () => {
+  // The keyword-search path used to build a row WITHOUT classify(), so a product search discovered
+  // before the slower full sweep covered it had no retailerId/retailer/category/lastSeen. 135 of 515
+  // Titan Toyz rows were bare this way, and delivery's retailerIdFromName crashed on the undefined,
+  // losing the alert and re-crashing every poll. The fix runs the search row through classify() at
+  // the source (not in routeEvent, which would recreate the dedup-key mismatch).
+  test('a bare row lacking retailerId is healed on the next search refresh', async () => {
+    const a = makeAdapter();
+    a._handleToSku.set('known-box', 'REAL-SKU-1');
+    a.searchTerms = ['pokemon tcg'];
+    stubSearch(a, { 'pokemon tcg': [hit('known-box', 'Pokemon TCG Booster Box', '99.99', true)] });
+    // A row previously built by the search path with NO retailerId — the exact 135-row shape.
+    const products = { 'REAL-SKU-1': { sku: 'REAL-SKU-1', name: 'Pokemon TCG Booster Box', price: 99.99, inStock: false } };
+    await a._searchProducts(products);
+    const p = products['REAL-SKU-1'];
+    assert.strictEqual(p.retailerId, 'testshop', 'retailerId stamped — retailerIdFromName can no longer crash on it');
+    assert.strictEqual(p.retailer, 'Test Shop', 'retailer name stamped');
+    assert.strictEqual(p.inStock, true, 'and stock is still refreshed');
+  });
+
+  test('a set-name-only product is NOT forced to category "other" (would permanently block 6 real Pokemon)', async () => {
+    // "Chaos Rising ETB" passes isInScopeName via SET_NAMES but classifyCategory yields 'other'
+    // (no franchise word). A full classify() here would stamp 'other', which routeEvent blocks.
+    // We must stamp retailerId WITHOUT forcing that category — leaving its bypass intact.
+    const a = makeAdapter();
+    a._handleToSku.set('chaos-etb', 'CHAOS-1');
+    a.searchTerms = ['pokemon tcg'];
+    stubSearch(a, { 'pokemon tcg': [hit('chaos-etb', 'Chaos Rising Elite Trainer Box', '59.99', true)] });
+    const products = { 'CHAOS-1': { sku: 'CHAOS-1', name: 'Chaos Rising Elite Trainer Box', price: 59.99, inStock: false } };
+    await a._searchProducts(products);
+    const p = products['CHAOS-1'];
+    assert.strictEqual(p.retailerId, 'testshop', 'still stamped so delivery never crashes');
+    assert.notStrictEqual(p.category, 'other', 'must NOT be forced to the permanently-blocked "other" category');
+  });
+});
+
 describe('search prices are not believed until they agree with pagination', () => {
   test('the known price is kept while the unit is unproven', async () => {
     const a = makeAdapter();
