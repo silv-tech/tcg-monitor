@@ -41,6 +41,50 @@ const SET_NAMES = [
   // anniversary line, so they establish Pokémon scope without over-matching. "celebrations"
   // (the 2021 set) is deliberately kept separate — it does not contain "30th".
   '30th celebration', '30th anniversary',
+
+  // The middle of Sword & Shield was simply skipped. The list ran from Vivid Voltage to Crown
+  // Zenith and from Scarlet & Violet forward, leaving six real sets with no entry — so a booster
+  // box titled by its set alone, with no franchise word, failed the game-name gate and was
+  // dropped. Measured 2026-09-11: adding these recovers 33 stored rows at one retailer, 29 of them
+  // in stock, including a $859 Rebel Clash booster box and a $4,389 Darkness Ablaze sealed case.
+  'rebel clash', 'darkness ablaze', "champion's path", 'champions path',
+  'shining fates', 'battle styles', 'chilling reign',
+
+  // The 151 special set, anchored to sealed forms ON PURPOSE. A bare '151' would match a
+  // "151-piece jigsaw puzzle" and a "151-count storage box", which is exactly the kind of
+  // over-match that makes a scope rule untrustworthy. These phrases cannot.
+  '151 blooming waters', '151 booster', '151 elite trainer', '151 ultra premium',
+  '151 collection', '151 pin collection', '151 poster collection',
+
+  // One Piece OP-17, shipping now. Every One Piece row until this depended on the literal string
+  // "one piece" appearing, so a product titled only by its set name was invisible.
+  "the world's strongest warriors", 'the worlds strongest warriors',
+
+  // 2025 tin line that names neither a set nor the franchise.
+  'slashing legends',
+];
+
+/**
+ * Franchises we do not follow, named distinctively enough that no Pokemon or One Piece title
+ * contains one by accident.
+ *
+ * This exists because a SET name is accepted as proof of the game, so any title carrying BOTH a
+ * foreign franchise and one of our set names slipped through. Measured across 86,709 stored rows:
+ * three did, all admitted purely by "30th anniversary" — an entry added for Pokemon's own 30th line
+ * — on a Weiss Schwarz and a Cardfight!! Vanguard "Persona 30th Anniversary Booster Box". The same
+ * measurement found ZERO legitimate products this veto would reject.
+ *
+ * Multi-word phrases only, deliberately. A bare "magic" or "vanguard" collides with ordinary
+ * English on a real Pokemon title; these cannot. Dragon Ball is absent on purpose — Titan Toyz is
+ * granted it via extraGameNames, and a retailer's granted franchise is never vetoed.
+ */
+const FOREIGN_GAMES = [
+  'yu-gi-oh', 'yugioh', 'yu gi oh',
+  'magic: the gathering', 'magic the gathering',
+  'star wars unlimited', 'lorcana', 'digimon card', 'union arena',
+  'weiss schwarz', 'flesh and blood', 'grand archive', 'riftbound',
+  'my little pony', 'palworld', 'cardfight', 'battle spirits', 'shadowverse',
+  'metazoo', 'sorcery: contested', 'alpha clash', 'gundam card',
 ];
 
 // Unambiguous sealed product types. No accessory is named any of these, so their presence
@@ -119,6 +163,17 @@ const CP1252_TO_BYTE = new Map(Object.entries({
   '˜': 0x98, '™': 0x99, 'š': 0x9A, '›': 0x9B, 'œ': 0x9C,
   'ž': 0x9E, 'Ÿ': 0x9F,
 }));
+
+/**
+ * Collapse runs of whitespace so a typo cannot defeat a literal match.
+ *
+ * Found at doescards on a real $449.99 bundle titled "One  Piece" with two spaces: every scope
+ * check here is an `.includes()` against a single-spaced phrase, so the product named its own
+ * franchise and was still rejected. Normalising costs nothing and closes the whole class.
+ */
+function collapseSpaces(str) {
+  return String(str || '').replace(/\s+/g, ' ').trim();
+}
 
 function repairMojibake(str) {
   const s = String(str || '');
@@ -209,7 +264,7 @@ const SINGLE_CARD_MARKERS = [
 ];
 
 function isSingleCard(name) {
-  const s = repairMojibake(name);
+  const s = collapseSpaces(repairMojibake(name));
   if (CODE_THEN_BRACKET.test(s)) return true;
   const m = s.match(CODE_THEN_DASH);
   if (m && !SEALED_FORM_START.test(m[1].trim())) return true;
@@ -221,7 +276,7 @@ function isSingleCard(name) {
  * sponsored ad slot, or a single card. Names are mojibake-repaired first.
  */
 function isInScopeName(name, extraGameNames = []) {
-  const repaired = repairMojibake(name);
+  const repaired = collapseSpaces(repairMojibake(name));
   const lower = repaired.toLowerCase();
   if (!lower) return false;
   if (/^sponsored ad/.test(lower)) return false;
@@ -231,6 +286,12 @@ function isInScopeName(name, extraGameNames = []) {
   // Checked BEFORE the sealed shortcut below, so a single named after the box it came from
   // is still rejected ("Eevee (173) - Prismatic Evolutions Pokemon Center ETB - Promo").
   if (isSingleCard(repaired)) return false;
+
+  // A franchise we do not follow, UNLESS this retailer is explicitly granted it. Checked before
+  // the game-name gate because a set name alone is enough to pass that gate, which is how three
+  // foreign booster boxes rode in on "30th anniversary".
+  const granted = extraGameNames.some(g => lower.includes(String(g).toLowerCase()));
+  if (!granted && FOREIGN_GAMES.some(g => lower.includes(g))) return false;
 
   const namesGame = GAME_NAMES.some(g => lower.includes(g)) || SET_NAMES.some(k => lower.includes(k))
     || extraGameNames.some(g => lower.includes(g)); // per-retailer additive scope (default none)
@@ -275,6 +336,7 @@ module.exports = {
   ACCESSORY_KEYWORDS,
   PRINT_KEYWORDS,
   repairMojibake,
+  collapseSpaces,
   isSingleCard,
   isInScopeName,
 };
