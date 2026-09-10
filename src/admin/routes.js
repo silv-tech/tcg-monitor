@@ -739,7 +739,7 @@ router.post('/test-alert', async (req, res) => {
 // === Sample alert — a real cached product framed as "now monitoring", routed like a paid alert ===
 // Used to show a client that a retailer is live. Optional sku picks the product.
 router.post('/sample-alert', async (req, res) => {
-  const { retailerId, sku, channelId } = req.body;
+  const { retailerId, sku, channelId, note } = req.body;
   if (!retailerId) return res.status(400).json({ error: 'retailerId required' });
 
   try {
@@ -772,7 +772,14 @@ router.post('/sample-alert', async (req, res) => {
       const { buildAlertEmbed } = require('../discord/embeds');
       const channel = await getClient().channels.fetch(channelId);
       const { embed, components } = buildAlertEmbed(event, 'paid');
-      await channel.send({ embeds: [embed], ...(components && components.length ? { components } : {}) });
+      // An optional line above the embed. A demonstration alert that lands in a customer-facing
+      // channel with nothing to mark it as a test is indistinguishable from a real drop, and
+      // someone will act on it. Omitted entirely when not supplied, so nothing else changes.
+      await channel.send({
+        ...(note ? { content: String(note).slice(0, 400) } : {}),
+        embeds: [embed],
+        ...(components && components.length ? { components } : {}),
+      });
     } else {
       await delivery.deliver([event], { skipDedup: true });
     }
