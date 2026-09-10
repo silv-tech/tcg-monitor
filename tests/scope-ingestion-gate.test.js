@@ -153,3 +153,67 @@ describe('dry-run reports without deleting', () => {
     }
   });
 });
+
+describe('the purge floor must not block a legitimately small catalogue', () => {
+  test('the default floor aborts when few rows would remain', async () => {
+    const a = mk();
+    const deleted = [];
+    const realGetAll = state.getAllProducts;
+    const realDelete = state.deleteProduct;
+    // 6 rows, 5 of them junk -> 1 would remain, far under the default floor of 25.
+    state.getAllProducts = async () => ({
+      j1: { sku: 'j1', name: 'Elden Ring (XBOX Series X)' },
+      j2: { sku: 'j2', name: 'Super Mario Chess Collector Edition' },
+      j3: { sku: 'j3', name: 'Yu-Gi-Oh Trading Card Game: Raging Tempest Blister Pack' },
+      j4: { sku: 'j4', name: 'Monopoly: Dr. Seuss Edition Board Game' },
+      j5: { sku: 'j5', name: 'The Noble Collection Minecraft Torch' },
+      ok: { sku: 'ok', name: 'Pokemon TCG: Mega Evolution Pitch Black Booster Bundle' },
+    });
+    state.deleteProduct = async (id, sku) => { deleted.push(sku); };
+    try {
+      const res = await a._purgeOutOfScopeState({});
+      assert.strictEqual(res.aborted, true, 'the default floor is what stranded 25 junk rows at Best Buy');
+      assert.deepStrictEqual(deleted, []);
+    } finally {
+      state.getAllProducts = realGetAll;
+      state.deleteProduct = realDelete;
+    }
+  });
+
+  test('a lowered floor lets the same purge proceed', async () => {
+    const a = mk();
+    const deleted = [];
+    const realGetAll = state.getAllProducts;
+    const realDelete = state.deleteProduct;
+    state.getAllProducts = async () => ({
+      j1: { sku: 'j1', name: 'Elden Ring (XBOX Series X)' },
+      j2: { sku: 'j2', name: 'Super Mario Chess Collector Edition' },
+      ok: { sku: 'ok', name: 'Pokemon TCG: Mega Evolution Pitch Black Booster Bundle' },
+    });
+    state.deleteProduct = async (id, sku) => { deleted.push(sku); };
+    try {
+      const res = await a._purgeOutOfScopeState({ minKept: 1 });
+      assert.strictEqual(res.aborted, false);
+      assert.deepStrictEqual(deleted.sort(), ['j1', 'j2'], 'only the junk goes');
+    } finally {
+      state.getAllProducts = realGetAll;
+      state.deleteProduct = realDelete;
+    }
+  });
+
+  test('the share guard still refuses to wipe almost everything', async () => {
+    const a = mk();
+    const realGetAll = state.getAllProducts;
+    const rows = {};
+    for (let i = 0; i < 20; i++) rows[`j${i}`] = { sku: `j${i}`, name: 'Elden Ring (XBOX Series X)' };
+    rows.ok = { sku: 'ok', name: 'Pokemon TCG Booster Bundle' };
+    state.getAllProducts = async () => rows;
+    try {
+      // 20 of 21 doomed = 95% > maxShare 0.9, so even a floor of 1 must not let this through.
+      const res = await a._purgeOutOfScopeState({ minKept: 1 });
+      assert.strictEqual(res.aborted, true, 'lowering the floor must not disable the share guard');
+    } finally {
+      state.getAllProducts = realGetAll;
+    }
+  });
+});

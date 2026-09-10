@@ -358,10 +358,10 @@ class BaseAdapter {
    * THIS file, and referencing them from an adapter is a ReferenceError that `node --check` cannot
    * see. Fire-and-forget: a maintenance sweep must never delay or fail a poll.
    */
-  _maybePurgeOutOfScope() {
+  _maybePurgeOutOfScope(opts = {}) {
     if (!SCOPE_PURGE_ENABLED || this._scopePurgeDone) return;
     this._scopePurgeDone = true;
-    this._purgeOutOfScopeState({ dryRun: !SCOPE_INGESTION_ENFORCE }).catch((err) =>
+    this._purgeOutOfScopeState({ dryRun: !SCOPE_INGESTION_ENFORCE, ...opts }).catch((err) =>
       logger.warn(`${this.name}: out-of-scope state purge failed: ${err.message}`));
   }
 
@@ -369,6 +369,9 @@ class BaseAdapter {
     // `dryRun` reports what WOULD be purged without deleting anything. It exists because the shared
     // scope rule has known false-positive classes, so wiring this into a new adapter is a change
     // that can silently delete real products. Amazon and Walmart pass no opts and are unaffected.
+    // minKept is a floor against a BROKEN scope rule wiping a catalogue, not a claim that every
+    // retailer stocks 25 in-scope products. A store that genuinely carries fewer must lower it or
+    // the guard blocks the very cleanup it was added for — see bestbuy.js.
     const { maxShare = 0.9, minKept = 25, dryRun = false } = opts;
     const all = await state.getAllProducts(this.id);
     const entries = Object.entries(all || {});

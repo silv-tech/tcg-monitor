@@ -48,7 +48,12 @@ class BestBuyAdapter extends BaseAdapter {
     // own: a re-polled row keeps refreshing lastSeen, so age-based expiry can never reach it.
     // Cleared once per process rather than every poll, since it scans the retailer keyspace.
     // dryRun mirrors the ingestion gate — it reports what it would delete until enforcement is on.
-    this._maybePurgeOutOfScope();
+    // minKept 3, not the default 25. Best Buy moved nearly all TCG stock to marketplace sellers,
+    // which the client excludes, so only a handful of first-party products legitimately exist —
+    // measured 2026-09-11: 5 in scope out of 30 stored. The default floor read that as "the scope
+    // test looks wrong" and aborted, leaving 25 junk rows (Elden Ring, Super Mario Chess, Yu-Gi-Oh
+    // blisters, Noble Collection ornaments) in state permanently. The maxShare guard still applies.
+    this._maybePurgeOutOfScope({ minKept: 3 });
 
     const products = {};
     const now = Date.now();
