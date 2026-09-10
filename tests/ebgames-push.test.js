@@ -29,6 +29,11 @@ function adapter() {
   a.pushOnly = true;
   // no Redis in unit tests — but honour `complete`, or the seed-window logic is untestable
   a._seedRedis = async (complete) => { if (complete) a._seeded = true; };
+  // Likewise for hydration. state.js calls its OWN internal getRedis(), so stubbing the export
+  // does not stop a real client being constructed — and its retry socket is a live handle that
+  // keeps `node --test` running long after the assertions pass. Hydration has its own suite
+  // (ebgames-hydrate.test.js), which stubs state.getAllProducts to exercise the real method.
+  a._hydrateFromRedis = async () => {};
   // Any outbound call is a bug in push mode: the whole point is that we never touch the site.
   a._fetchListing = async () => { throw new Error('push mode must not fetch'); };
   a._deepCrawl = async () => { throw new Error('push mode must not crawl'); };

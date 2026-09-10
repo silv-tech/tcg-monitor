@@ -35,6 +35,17 @@ const PUSH_STALE_MS = Number(process.env.EBGAMES_PUSH_STALE_MS) || 3 * 60 * 1000
 // catalogue), and only after it do real stock/price deltas alert. Env-tunable.
 const SEED_WINDOW_MS = Number(process.env.EBGAMES_SEED_WINDOW_MS) || 15 * 60 * 1000;
 
+// How many PUSHES must land before a still-unconfirmed hydrated row is treated as delisted.
+// Both tabs push once per ~25s cycle and a full sweep is ~21 cycles, so one sweep is ~42
+// pushes; this is roughly three sweeps of margin. Counted in pushes rather than elapsed time on
+// purpose — see _evictUnconfirmed, where the clock-based version was a flood waiting to happen.
+const HYDRATE_GRACE_PUSHES = Number(process.env.EBGAMES_HYDRATE_GRACE_PUSHES) || 150;
+
+// How long to wait before retrying a hydrate that failed. Long enough that the retry cannot put
+// a 5s Redis timeout on every 5s poll, short enough that a brief Redis outage at boot does not
+// leave the adapter cold for the life of the process.
+const HYDRATE_RETRY_MS = Number(process.env.EBGAMES_HYDRATE_RETRY_MS) || 30 * 1000;
+
 const SORT_NEWEST = 'create_date desc';
 const SORT_MODIFIED = 'write_date desc';
 
@@ -175,6 +186,12 @@ class EBGamesAdapter extends BaseAdapter {
     this._curlReported = false;
     this._curlBlockedUntil = 0;
     this._seeded = false;
+    this._hydrated = false;          // catalogue reloaded from Redis once per process
+    this._hydrateRetryAt = 0;
+    this._unconfirmed = new Set();   // hydrated SKUs the browser has not re-sent yet
+    this._pushesSinceHydrate = 0;
+    this._evictShareWarned = false;
+    this._startedAt = Date.now();
 
     // Push mode: this adapter never reaches out to ebgames.ca. Listings arrive from the
     // companion Chrome extension (ebgames-extension/), which loads the category pages in a
@@ -226,6 +243,11 @@ class EBGamesAdapter extends BaseAdapter {
 
     this._merge(fresh, false);
 
+    // The browser has now confirmed these SKUs first-hand, so they are no longer standing on
+    // hydrated state and are exempt from the grace eviction in fetchProducts().
+    if (this._unconfirmed.size > 0) for (const sku of fresh.keys()) this._unconfirmed.delete(sku);
+    this._pushesSinceHydrate += 1;
+
     // Silent seed spans the FIRST FULL SWEEP, not just the first push. The extension sweeps
     // every page of the category, so pages 2..N land as separate pushes; seeding only the first
     // would let all the later pages alert at once. Keep seeding (Redis-missing SKUs, no alert)
@@ -261,12 +283,28 @@ class EBGamesAdapter extends BaseAdapter {
     // "did a push land recently", so a PC that went to sleep shows up as a stale retailer in
     // /api/health rather than as a store that quietly stopped finding anything.
     if (this.pushOnly) {
+      await this._hydrateFromRedis();
+      this._evictUnconfirmed();
       const age = Date.now() - this._lastPushAt;
       const live = this._lastPushAt > 0 && age <= PUSH_STALE_MS;
       this.reportFreshness(live ? 1 : 0, 1);
-      if (!live && this._knownProducts.size > 0 && !this._pushStaleWarned) {
+      // A catalogue alone is no longer evidence a push ever landed — hydration fills it at
+      // boot — so the warning keys off _lastPushAt. It also has to say WHICH case it is:
+      // with _lastPushAt still 0, `age` is the epoch, and this used to print
+      // "no push in 1789070602s".
+      //
+      // The never-pushed branch waits out PUSH_STALE_MS from process start before complaining.
+      // Without that, hydration makes the catalogue non-empty immediately and EVERY boot logs
+      // "the extension is not running" before the extension has had its first 25s cycle —
+      // ~20 false alarms a day in the one log line used to spot a genuinely dead bridge.
+      const neverPushed = this._lastPushAt === 0;
+      const worthSaying = neverPushed
+        ? this._knownProducts.size > 0 && Date.now() - this._startedAt >= PUSH_STALE_MS
+        : true;
+      if (!live && worthSaying && !this._pushStaleWarned) {
         this._pushStaleWarned = true;
-        logger.warn(`EB Games: no push in ${Math.round(age / 1000)}s — is the Chrome extension running?`);
+        const since = neverPushed ? 'since this process started' : `in ${Math.round(age / 1000)}s`;
+        logger.warn(`EB Games: no push ${since} — is the Chrome extension running?`);
       }
       if (live) this._pushStaleWarned = false;
       return Object.fromEntries(this._knownProducts);
@@ -558,6 +596,118 @@ class EBGamesAdapter extends BaseAdapter {
     } finally {
       this._deepCrawlRunning = false;
     }
+  }
+
+  /**
+   * Reload the catalogue from Redis once per process.
+   *
+   * `_knownProducts` is in-memory only, and in push mode this adapter CANNOT rebuild it on its
+   * own — it refills one category page per ~25s as the extension walks the pager, so a full
+   * sweep takes 6-16 minutes. Redis meanwhile still holds the whole catalogue. Without this,
+   * poll-adapter compares a nearly-empty map against a full one; its stale cleanup concludes
+   * the rest were delisted and writes inStock:false across the catalogue; then every page the
+   * sweep reaches fires a RESTOCK for products that never moved.
+   *
+   * Measured 2026-09-10 over 9h13m and 20 restarts: 436 EB Games RESTOCK alerts across just 49
+   * SKUs, every SKU firing 5-19 times, 78.7% within ten minutes of a process start, repeats as
+   * close as 14 seconds apart, and whole 12-card page blocks flipping together. All 628
+   * stale-cleanup sweeps in that window ran within ten minutes of a restart; none ran later.
+   *
+   * ccba1cf fixed exactly this for Amazon and recorded that "Shopify and EB Games already did
+   * this". Shopify does (_loadHandleIndex); EB Games never did, so it was skipped.
+   *
+   * This does NOT make a dead extension look alive. Freshness is still `_lastPushAt`, so a
+   * browser that stopped pushing reports 0/1 fresh and shows as stale in /api/health.
+   */
+  async _hydrateFromRedis() {
+    if (this._hydrated) return;
+    // A failed hydrate must be RETRIED, not written off for the life of the process. Setting
+    // the flag before the await would mean a Redis that was slow for five seconds at boot —
+    // exactly what a redeploy restarting app and Redis together produces — left the adapter
+    // permanently cold, and the flood returns the moment the sweep refills past the 30% guard.
+    // Throttled so the retry cannot cost a 5s timeout on every 5s poll.
+    if (Date.now() < this._hydrateRetryAt) return;
+    try {
+      // Bounded: a slow Redis must delay the first poll, never hang it. The timer is cleared
+      // explicitly — an uncleared 5s handle keeps a test runner's process alive after the
+      // assertions pass.
+      let timer;
+      const cached = await Promise.race([
+        state.getAllProducts(this.id),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('redis timeout')), 5000); }),
+      ]).finally(() => clearTimeout(timer));
+
+      let loaded = 0;
+      let outOfScope = 0;
+      for (const [sku, product] of Object.entries(cached || {})) {
+        if (!product || !product.name) continue;
+        // Redis holds rows written under older scope rules — EB Games carried accessories until
+        // scope was centralised on 2026-09-08 — so a hydrate must not re-admit them.
+        if (!isInScopeName(product.name)) { outOfScope++; continue; }
+        // A push that landed before the first poll is first-hand and already confirmed.
+        if (this._knownProducts.has(sku)) continue;
+        this._knownProducts.set(sku, product);
+        this._unconfirmed.add(sku);
+        loaded++;
+      }
+      this._hydrated = true;
+      this._pushesSinceHydrate = 0;
+      logger.info(`EB Games: hydrated ${loaded} products from Redis`
+        + `${outOfScope ? ` (${outOfScope} out of scope, skipped)` : ''}`
+        + ' — awaiting the browser sweep to confirm them');
+    } catch (err) {
+      // Degraded, not broken: the catalogue rebuilds as the extension sweeps. Say it loudly,
+      // because this is precisely the condition that produces the restart flood.
+      this._hydrateRetryAt = Date.now() + HYDRATE_RETRY_MS;
+      logger.warn(`EB Games: catalogue hydration failed (${err.message}) — cold start, `
+        + `stale cleanup may fire spuriously until the retry in ${Math.round(HYDRATE_RETRY_MS / 1000)}s`);
+    }
+  }
+
+  /**
+   * Drop hydrated rows the browser has swept past without ever re-sending.
+   *
+   * Hydration is a bridge across the minutes a sweep takes, not a permanent copy. A row the
+   * sweep has walked over several times without seeing is genuinely delisted, and keeping it
+   * would make it immortal: every poll rewrites it with a fresh 7-day TTL. Dropping it hands it
+   * to poll-adapter's normal stale path, which marks it out of stock rather than deleting it,
+   * and raises no event (events.js has no out-of-stock type).
+   *
+   * Counted in PUSHES, never in elapsed time. An earlier version compared `_lastPushAt` against
+   * the hydration timestamp, which reads as "30 minutes of sweeping" but is really "30 minutes
+   * on the clock": a laptop asleep for an hour would satisfy it the instant the browser woke
+   * and landed a single page, evicting the entire unconfirmed catalogue at once. That drops
+   * straight into poll-adapter's stale cleanup and re-creates the exact flood this change
+   * exists to stop — and the `newCount < oldCount * 0.3` guard only catches it when more than
+   * ~70% goes at once, so the whole band below that would alert. Pushes only accrue while the
+   * browser is actually working, so sleep contributes nothing.
+   *
+   * The share cap is the second guard, and it is the codebase's existing MAX_DROP_SHARE rule:
+   * a real delisting trickles, so a LARGE unconfirmed set never means "these all vanished" —
+   * it means the sweep is not reaching those pages (the extension resets both tabs to page 1
+   * on reload, options change and its 90s watchdog, so deep pages can be starved). Evicting on
+   * that evidence would be the flood again, so it evicts nothing and says so.
+   */
+  _evictUnconfirmed() {
+    if (this._unconfirmed.size === 0) return;
+    if (this._pushesSinceHydrate < HYDRATE_GRACE_PUSHES) return;
+
+    const share = this._unconfirmed.size / Math.max(1, this._knownProducts.size);
+    if (share > MAX_DROP_SHARE) {
+      if (!this._evictShareWarned) {
+        this._evictShareWarned = true;
+        logger.warn(`EB Games: ${this._unconfirmed.size}/${this._knownProducts.size} products still `
+          + `unconfirmed after ${this._pushesSinceHydrate} pushes (${Math.round(share * 100)}%) — `
+          + 'that is a sweep not reaching its deep pages, not a delisting. Evicting nothing.');
+      }
+      return;
+    }
+
+    const dropped = this._unconfirmed.size;
+    for (const sku of this._unconfirmed) this._knownProducts.delete(sku);
+    this._unconfirmed.clear();
+    logger.info(`EB Games: dropped ${dropped} hydrated product(s) the sweep never confirmed `
+      + `across ${this._pushesSinceHydrate} pushes — treating them as delisted`);
   }
 
   // Until one complete crawl has been stored, write the catalog straight into Redis so products
