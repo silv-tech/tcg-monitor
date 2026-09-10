@@ -803,6 +803,49 @@ router.post('/post-guide', async (req, res) => {
   }
 });
 
+/**
+ * Post a clean operational notice to a channel — no product embed attached.
+ *
+ * Members are watching these channels and waiting on drops, so planned work needs to be announced
+ * before it starts and closed out when it finishes. Every other endpoint that can reach a channel
+ * attaches a product embed (sample-alert, test-alert) or posts a fixed guide (post-guide), which
+ * reads as an alert rather than an announcement.
+ *
+ * allowedMentions is deliberately empty: an operational notice must never be able to ping @everyone,
+ * @here or a subscriber role, however the body happens to be written.
+ */
+router.post('/announce', async (req, res) => {
+  const { channelId, title, body, kind = 'notice' } = req.body || {};
+  if (!channelId || !title || !body) {
+    return res.status(400).json({ error: 'channelId, title and body are required' });
+  }
+  const COLOURS = { notice: 0x5865F2, maintenance: 0xE67E22, resolved: 0x2ECC71 };
+  if (!(kind in COLOURS)) {
+    return res.status(400).json({ error: `kind must be one of ${Object.keys(COLOURS).join(', ')}` });
+  }
+  try {
+    const { getClient } = require('../discord/bot');
+    const { EmbedBuilder } = require('discord.js');
+    const client = getClient();
+    if (!client) return res.status(500).json({ error: 'Bot not connected' });
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) return res.status(400).json({ error: 'Channel not found' });
+
+    const embed = new EmbedBuilder()
+      .setTitle(String(title).slice(0, 256))
+      .setDescription(String(body).slice(0, 4000))
+      .setColor(COLOURS[kind])
+      .setFooter({ text: 'Nocturne Monitors · Operations' })
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+    logger.info(`Announcement (${kind}) posted to ${channelId}: ${String(title).slice(0, 80)}`);
+    res.json({ ok: true, channelId, kind });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // === Test all slash command logic (no Discord interaction needed) ===
 router.get('/test-commands', async (req, res) => {
   const results = {};
