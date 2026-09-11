@@ -209,6 +209,32 @@ const COMPOSITION_KEY = 'tcg:composition';
 const BASELINE_POLLS = 20;        // observations before a category counts as expected
 const MISSING_THRESHOLD = 10;     // consecutive polls at zero before we say it is gone
 const composition = new Map();    // retailerId → { [game]: { seen, typical, missingStreak } }
+
+// Known, ACCEPTED (retailer → game) disappearances the canary must NOT flag. When a store has
+// deliberately stopped carrying a game, its absence is not a parser bug — and because the alert's
+// de-dupe is in-memory (alerts.js), without this the alert re-fires on every restart/redeploy.
+// Costco stopped carrying One Piece (confirmed 2026-09-11), so it is ignored here. Matched
+// case-insensitively against the GAME_PATTERNS keys. Extend at runtime with the COMPOSITION_IGNORE
+// env var, no redeploy: "retailer:game,retailer:game" (e.g. "costco:one piece,walmart:pokemon").
+const COMPOSITION_IGNORE = new Map();
+(function seedCompositionIgnore() {
+  const add = (id, game) => {
+    if (!id || !game) return;
+    const key = String(id).trim().toLowerCase();
+    const set = COMPOSITION_IGNORE.get(key) || new Set();
+    set.add(String(game).trim().toLowerCase());
+    COMPOSITION_IGNORE.set(key, set);
+  };
+  add('costco', 'one piece'); // Costco no longer carries One Piece — do not flag its absence
+  for (const pair of String(process.env.COMPOSITION_IGNORE || '').split(',')) {
+    const idx = pair.indexOf(':');
+    if (idx > 0) add(pair.slice(0, idx), pair.slice(idx + 1));
+  }
+})();
+function isCompositionIgnored(retailerId, game) {
+  const set = COMPOSITION_IGNORE.get(String(retailerId).toLowerCase());
+  return !!set && set.has(String(game).toLowerCase());
+}
 let _compositionLoaded = false;
 
 /** Baselines survive restarts — otherwise a redeploy resets them and this never fires. */
@@ -308,7 +334,8 @@ function getComposition() {
   const out = {};
   for (const [id, games] of composition) {
     const lost = Object.entries(games)
-      .filter(([game, g]) => game !== '_typicalTotal' && g && g.missingStreak >= MISSING_THRESHOLD)
+      .filter(([game, g]) => game !== '_typicalTotal' && g && g.missingStreak >= MISSING_THRESHOLD
+        && !isCompositionIgnored(id, game))
       .map(([game, g]) => ({ game, missingPolls: g.missingStreak, typical: g.typical }));
     if (lost.length) out[id] = lost;
   }

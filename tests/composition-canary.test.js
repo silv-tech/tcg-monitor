@@ -198,3 +198,27 @@ describe('composition canary: small catalogues are covered too', () => {
     assert.deepStrictEqual(games.sort(), ['one piece', 'pokemon']);
   });
 });
+
+/**
+ * Accepted disappearances (the ignore list). When a store has deliberately stopped carrying a
+ * game — Costco dropped One Piece, confirmed 2026-09-11 — its absence is not a parser bug, and
+ * because the alert's de-dupe is in-memory it would otherwise re-fire on every redeploy. The
+ * ignore list suppresses exactly those (store, game) pairs, and nothing else.
+ */
+describe('composition canary: accepted disappearances are not flagged', () => {
+  test('Costco losing One Piece is NOT flagged, but a non-ignored game at Costco still is', () => {
+    const id = 'costco'; // seeded in COMPOSITION_IGNORE as ['one piece']
+    for (let i = 0; i < BASELINE_POLLS; i++) recordComposition(id, catalogue({ pokemon: 15, onePiece: 12 }));
+    for (let i = 0; i < MISSING_THRESHOLD; i++) recordComposition(id, catalogue({ filler: 30 })); // both vanish
+    const lost = (getComposition()[id] || []).map((g) => g.game).sort();
+    assert.deepStrictEqual(lost, ['pokemon'], 'One Piece is suppressed for Costco; Pokémon (not ignored) is still reported');
+  });
+
+  test('the ignore is scoped to the retailer: another store losing One Piece is still flagged', () => {
+    const id = freshId();
+    for (let i = 0; i < BASELINE_POLLS; i++) recordComposition(id, catalogue({ pokemon: 15, onePiece: 12 }));
+    for (let i = 0; i < MISSING_THRESHOLD; i++) recordComposition(id, catalogue({ pokemon: 15, filler: 12 }));
+    const lost = getComposition()[id];
+    assert.ok(lost && lost.some((g) => g.game === 'one piece'), 'One Piece loss is still flagged for non-ignored stores');
+  });
+});
