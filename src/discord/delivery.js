@@ -23,7 +23,14 @@ const alertLimiter = require('./alert-limiter');
 const { HIGH_VALUE_TYPES } = require('./alert-limiter');
 const { recordAlertLatency } = require('../core/proxy');
 const state = require('../core/state');
-const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, cacheSellerInfo } = state;
+const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, getSellerCacheAgeMs, cacheSellerInfo } = state;
+
+// A cached seller verdict younger than this is trusted rather than re-read. Set ABOVE
+// scraper-api's 5-minute per-ASIN cooldown on fetchAmazonOlidAndSeller: inside that window a
+// re-read is REFUSED and returns the same {null, null} as a genuine failure, so discarding the
+// cached verdict there would fail open and deliver a third-party listing. A verdict this young was
+// also taken during the same stock episode, so it is evidence, not staleness.
+const SELLER_RECHECK_AFTER_MS = 6 * 60 * 1000;
 const { scrapeAmazonOfferListingId } = require('../utils/browser');
 const { fetchAmazonOlidAndSeller } = require('../utils/scraper-api');
 const { offersFetcher } = require('../utils/scraper-api');
@@ -362,8 +369,34 @@ class DeliveryQueue {
         // latency on the one event that is actually a race.
         const cachedSeller = await getSellerCache(asin);
         const cachedWouldSuppress = !!cachedSeller && !cachedSeller.toLowerCase().includes('amazon');
-        const sellerMustBeFresh = cachedWouldSuppress
-          && (event.type === 'RESTOCK' || event.type === 'PREORDER_LIVE' || !!product._watchlist);
+
+        // STALENESS IS THE WHOLE QUESTION, so it has to be asked with an actual age.
+        //
+        // The first version of this gate treated "a cached verdict exists" as binary and discarded
+        // a 45-second-old verdict exactly like a 30-day-old one. That is a regression, not a fix,
+        // because `fetchAmazonOlidAndSeller` REFUSES a second read of the same ASIN inside its 5
+        // minute per-ASIN cooldown and returns {olid:null, seller:null} — byte-identical to a
+        // genuine failure — and that cooldown is armed by the very call that cached the verdict:
+        //
+        //   t=0    RESTOCK, cache empty -> paid read -> "Japan Big Mall" -> cached -> suppressed.
+        //   t=45s  RESTOCK again (45s IS the designed watchlist re-alert cadence, dedup.js)
+        //          -> a 45s-old, demonstrably accurate verdict is discarded
+        //          -> the re-read is refused by the cooldown, returning nulls
+        //          -> "fail open" -> a scalper listing is DELIVERED to the client.
+        //
+        // The same null pair comes back when the API key is missing or the budget is paused, so
+        // without an age test a budget exhaustion would flip suppression OFF for every restock at
+        // once. A verdict younger than the cooldown cannot be re-read anyway, and was taken during
+        // this same stock episode, so it is the best evidence available — trust it.
+        const cachedAgeMs = cachedWouldSuppress ? await getSellerCacheAgeMs(asin) : null;
+        const cachedIsRecent = cachedAgeMs != null && cachedAgeMs < SELLER_RECHECK_AFTER_MS;
+
+        // Match the identity gate's type set rather than a narrower hand-picked one. Measured
+        // 2026-09-12: the only two Amazon events in a 40-minute window were PRICE_CHANGE on
+        // non-watchlist rows, and BOTH were suppressed on cached verdicts this gate had excluded.
+        // A NEW_SKU puts a buy link in front of the client exactly as a RESTOCK does.
+        const sellerMustBeFresh = cachedWouldSuppress && !cachedIsRecent
+          && (VERIFY_TYPES.has(event.type) || !!product._watchlist);
 
         let seller = sellerMustBeFresh ? null : cachedSeller;
         const staleSeller = sellerMustBeFresh ? cachedSeller : null;
@@ -423,11 +456,16 @@ class DeliveryQueue {
               + `— alert NOT suppressed`);
           }
         } else if (sellerMustBeFresh && staleSeller) {
-          // A live read was required and could not be obtained. Fail OPEN, as the line below says,
-          // and do NOT fall back to the cached verdict: a stale "third-party" is what silenced a
-          // real restock for up to 30 days. Say so, because silence here used to be invisible.
-          logger.warn(`Seller re-read failed for ${asin} — ignoring the cached verdict `
-            + `"${staleSeller}" and sending anyway (a stale verdict must not suppress a restock)`);
+          // A live read was required and could not be obtained. FAIL OPEN and do not resurrect the
+          // cached verdict — a stale "third-party" is what silenced a real restock for up to 30
+          // days. Safe to do here only because this branch is now unreachable for a RECENT verdict:
+          // anything younger than SELLER_RECHECK_AFTER_MS was trusted above and never nulled, so
+          // what we are discarding is genuinely old. Say so, because silence here used to be
+          // invisible.
+          const ageMin = cachedAgeMs == null ? '?' : (cachedAgeMs / 60000).toFixed(0);
+          logger.warn(`Seller re-read failed for ${asin} — ignoring the ${ageMin}min-old cached `
+            + `verdict "${staleSeller}" and sending anyway (a stale verdict must not suppress a `
+            + `restock)`);
         }
         // If no seller info (scrape failed), fail-open — send the alert anyway
       }

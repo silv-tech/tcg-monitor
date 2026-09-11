@@ -32,7 +32,11 @@ const state = require('../src/core/state');
 const scraperApi = require('../src/utils/scraper-api');
 const browser = require('../src/utils/browser');
 
-const calls = { cacheReads: 0, liveFetches: 0, cachedSeller: null, liveSeller: null, cacheWrites: [] };
+const HOUR = 3600_000;
+const calls = {
+  cacheReads: 0, liveFetches: 0, cachedSeller: null, liveSeller: null, cacheWrites: [],
+  cachedAgeMs: 5 * HOUR,   // old by default; individual tests set it
+};
 
 state.getRestockHistory = async () => [];
 state.getPriceHistory = async () => [];
@@ -41,6 +45,7 @@ state.getLastCheck = async () => Date.now();
 state.getOfferListingId = async () => 'OLID-CACHED';
 state.cacheOfferListingId = async () => {};
 state.getSellerCache = async () => { calls.cacheReads++; return calls.cachedSeller; };
+state.getSellerCacheAgeMs = async () => calls.cachedAgeMs;
 state.cacheSellerInfo = async (asin, s) => { calls.cacheWrites.push(s); };
 scraperApi.fetchAmazonOlidAndSeller = async () => {
   calls.liveFetches++;
@@ -70,6 +75,75 @@ describe('a stale third-party verdict cannot suppress a restock', () => {
   beforeEach(() => {
     calls.cacheReads = 0; calls.liveFetches = 0;
     calls.cachedSeller = null; calls.liveSeller = null; calls.cacheWrites = [];
+    calls.cachedAgeMs = 5 * HOUR;
+  });
+
+  /**
+   * THE REGRESSION THE FIRST VERSION OF THIS FIX INTRODUCED.
+   *
+   * `fetchAmazonOlidAndSeller` REFUSES a second read of the same ASIN inside its 5-minute per-ASIN
+   * cooldown and returns {olid:null, seller:null} — byte-identical to a genuine failure — and that
+   * cooldown is armed by the very call that cached the verdict. Treating "a cached verdict exists"
+   * as binary therefore turned fail-open into "deliver a scalper listing":
+   *
+   *   t=0    RESTOCK, cache empty -> paid read -> "Japan Big Mall" -> cached -> suppressed
+   *   t=45s  RESTOCK again (45s IS the designed watchlist re-alert cadence)
+   *          -> a 45s-old accurate verdict discarded -> re-read refused -> nulls -> ALERT SENT
+   *
+   * The same null pair comes back when the API key is missing or the budget is paused, so a budget
+   * exhaustion would have flipped suppression OFF for every restock at once.
+   */
+  test('a RECENT third-party verdict is trusted, not discarded — the cooldown case', async () => {
+    calls.cachedSeller = 'Japan Big Mall';
+    calls.cachedAgeMs = 45_000;          // 45s old: inside the re-read cooldown
+    calls.liveSeller = null;             // a re-read would be refused and return nulls
+
+    const e = event();                   // RESTOCK
+    await delivery.enrichEvent(e);
+
+    assert.strictEqual(calls.liveFetches, 0,
+      'a verdict younger than the cooldown cannot be re-read, so it must not be discarded');
+    assert.strictEqual(e._thirdPartySeller, true,
+      'it was taken during this same stock episode — it is evidence, not staleness');
+  });
+
+  test('a budget pause cannot flip suppression OFF for every restock at once', async () => {
+    // scraper-api returns the same {null,null} when the key is missing or the budget is paused.
+    calls.cachedSeller = 'Japan Big Mall';
+    calls.cachedAgeMs = 2 * 60_000;
+    calls.liveSeller = null;
+
+    const e = event();
+    await delivery.enrichEvent(e);
+    assert.strictEqual(e._thirdPartySeller, true,
+      'an unavailable re-read must never be read as "Amazon holds the buy box"');
+  });
+
+  test('an OLD verdict is still discarded — the original bug stays fixed', async () => {
+    calls.cachedSeller = 'Japan Big Mall';
+    calls.cachedAgeMs = 5 * HOUR;
+    calls.liveSeller = 'Amazon.ca';
+
+    const e = event();
+    await delivery.enrichEvent(e);
+    assert.strictEqual(calls.liveFetches, 1);
+    assert.ok(!e._thirdPartySeller, 'a 5-hour-old verdict must not suppress a restock');
+  });
+
+  test('PRICE_CHANGE and NEW_SKU get the same treatment as RESTOCK', async () => {
+    // Measured 2026-09-12: the only two Amazon events in a 40-minute window were PRICE_CHANGE on
+    // non-watchlist rows, and BOTH were suppressed on cached verdicts the narrower gate excluded.
+    for (const type of ['PRICE_CHANGE', 'NEW_SKU']) {
+      calls.liveFetches = 0;
+      calls.cachedSeller = 'Japan Big Mall';
+      calls.cachedAgeMs = 5 * HOUR;
+      calls.liveSeller = 'Amazon.ca';
+
+      const e = event({ type });
+      await delivery.enrichEvent(e);
+      assert.strictEqual(calls.liveFetches, 1, `${type} must re-read a stale verdict too`);
+      assert.ok(!e._thirdPartySeller, `${type} must not be suppressed on a stale verdict`);
+    }
   });
 
   test('THE INCIDENT: cached marketplace seller, Amazon now holds the buy box', async () => {
@@ -137,14 +211,17 @@ describe('a stale third-party verdict cannot suppress a restock', () => {
     assert.ok(!e._thirdPartySeller);
   });
 
-  test('an ordinary non-restock alert still uses the cache — this costs one read per restock', async () => {
+  test('a type outside the verify set still uses the cache — no extra credit', async () => {
+    // SHIPPING_CHANGE is not in VERIFY_TYPES: it puts no buy link in front of the client, so it is
+    // not worth a paid read. This is what bounds the cost of the whole gate.
     calls.cachedSeller = 'Japan Big Mall';
+    calls.cachedAgeMs = 5 * HOUR;
     calls.liveSeller = 'Amazon.ca';
 
-    const e = event({ type: 'PRICE_CHANGE' });
+    const e = event({ type: 'SHIPPING_CHANGE' });
     await delivery.enrichEvent(e);
 
-    assert.strictEqual(calls.liveFetches, 0, 'no extra credit is spent on ordinary alerts');
+    assert.strictEqual(calls.liveFetches, 0, 'no extra credit is spent on low-stakes alerts');
     assert.strictEqual(e._thirdPartySeller, true, 'and the cached verdict still applies there');
   });
 });

@@ -492,6 +492,23 @@ async function getSellerCache(asin) {
   return await getRedis().get(key);
 }
 
+/**
+ * How old is the cached seller verdict, in milliseconds? null when there is none.
+ *
+ * Staleness is the whole question for this cache — "is this verdict from before the stock change
+ * or after it?" — and the previous code could not ask it, so a 45-second-old verdict was discarded
+ * exactly like a 30-day-old one. Derived from the key's remaining TTL rather than by storing a
+ * timestamp, so the stored format is unchanged and entries written by older builds still work.
+ */
+async function getSellerCacheAgeMs(asin) {
+  const key = `${PREFIX}seller:${asin}`;
+  const remainingMs = await getRedis().pttl(key);
+  // -2 = no such key, -1 = key exists with no expiry (shouldn't happen; treat as unknown-old).
+  if (remainingMs === -2) return null;
+  if (remainingMs < 0) return SELLER_TTL * 1000;
+  return Math.max(0, SELLER_TTL * 1000 - remainingMs);
+}
+
 async function cacheSellerInfo(asin, seller) {
   if (!seller) return;
   const key = `${PREFIX}seller:${asin}`;
@@ -687,6 +704,7 @@ module.exports = {
   getOfferListingId,
   cacheOfferListingId,
   getSellerCache,
+  getSellerCacheAgeMs,
   cacheSellerInfo,
   getActiveCategories,
   setActiveCategories,
