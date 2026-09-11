@@ -182,6 +182,13 @@ function buildAlertEmbed(event, tier) {
     } else {
       embed.addFields({ name: 'Price', value: `$${newValue.toFixed(2)} CAD`, inline: true });
     }
+  } else if (product._priceHeld) {
+    // We are holding a steep drop for confirmation, which means we do NOT believe this figure.
+    // Printing it anyway is how a restock alert came to show "$229.00" for a product whose real
+    // price was $89.99 — poll-adapter had just rewritten the price back to the stale value it was
+    // declining to trust, and this object is what the embed renders. Say so instead of asserting
+    // a number we are actively doubting.
+    embed.addFields({ name: 'Price', value: 'TBD (verifying)', inline: true });
   } else if (product.price != null && product.price > 0) {
     embed.addFields({ name: 'Price', value: `$${product.price.toFixed(2)} CAD`, inline: true });
   } else {

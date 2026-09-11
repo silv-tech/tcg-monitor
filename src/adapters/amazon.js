@@ -1019,9 +1019,21 @@ class AmazonAdapter extends BaseAdapter {
     const name = json.item && json.item.name;
     if (!name) return null; // no live title => we did not really read the page => inconclusive
     const listings = Array.isArray(json.listings) ? json.listings : [];
-    const pinned = listings.find(l => l && l.pinned_offer) || listings[0] || null;
+    const flagged = listings.find(l => l && l.pinned_offer) || null;
+    const pinned = flagged || listings[0] || null;
     const price = pinned && Number(pinned.price) > 0 ? Number(pinned.price) : null;
-    return { name, price, inStock: price != null };
+    // Say WHERE the price came from, so a later comparison can tell an authoritative number from
+    // a guess. Only a price read off the offer Amazon actually flagged as pinned is authoritative:
+    // the listings[0] fallback above is "top offer", which may be any marketplace seller.
+    //
+    // This matters because most Amazon price paths are NOT scoped to the buy box at all — the
+    // search tile shows whatever offer Amazon features, and _parseAod's regex takes the first
+    // price anywhere in the fragment. On 2026-09-11 one of those wrote $229.00 into
+    // B0H78BB9TY (real price $89.99) and it survived indefinitely, because an out-of-stock read
+    // carries the cached price forward. When the priority lane finally read the pinned offer,
+    // poll-adapter compared the good number against the bad one and published a -61% "price
+    // drop" that never happened, on a product that had never been on sale.
+    return { name, price, inStock: price != null, pricePinned: price != null && !!flagged };
   }
 
   /**
@@ -1101,6 +1113,9 @@ class AmazonAdapter extends BaseAdapter {
       name: name || cached.name || data.name,
       category: category || cached.category || 'pokemon',
       price: data.price || cached.price || 0,
+      // Authoritative only when THIS read supplied the price AND it came off the flagged
+      // pinned offer. A carried-forward cached price keeps whatever provenance it had.
+      _pricePinned: data.price ? !!data.pricePinned : !!cached._pricePinned,
       inStock: data.inStock,
       canAddToCart: data.inStock,
       url: cached.url || `https://www.amazon.ca/dp/${target}`,
@@ -1189,6 +1204,9 @@ class AmazonAdapter extends BaseAdapter {
       name: name || cached.name || data.name,
       category: category || cached.category || 'pokemon',
       price: data.price || cached.price || 0,
+      // Authoritative only when THIS read supplied the price AND it came off the flagged
+      // pinned offer. A carried-forward cached price keeps whatever provenance it had.
+      _pricePinned: data.price ? !!data.pricePinned : !!cached._pricePinned,
       inStock: data.inStock,
       canAddToCart: data.inStock,
       url: cached.url || `https://www.amazon.ca/dp/${target}`,

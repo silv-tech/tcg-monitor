@@ -31,7 +31,7 @@ const OLD = Date.now() - 60 * 60 * 1000; // 1h ago — beyond OFFERS_STALE_MS (1
 describe('pinned-offer stock rule', () => {
   test('buyable: pinned offer with a numeric price => in stock', () => {
     const d = adapter()._offersToData({ item: { name: 'ETB' }, listings: [{ price: 89.99, pinned_offer: true }] });
-    assert.deepStrictEqual(d, { name: 'ETB', price: 89.99, inStock: true });
+    assert.deepStrictEqual(d, { name: 'ETB', price: 89.99, inStock: true, pricePinned: true });
   });
   test('the marketplace trap: unpriced pinned + priced marketplace listings => OOS', () => {
     const d = adapter()._offersToData({ item: { name: 'ETB' }, listings: [{ price: undefined, pinned_offer: true }, { price: 128.98 }, { price: 119.89 }] });
@@ -47,6 +47,11 @@ describe('pinned-offer stock rule', () => {
     const d = adapter()._offersToData({ item: { name: 'ETB' }, listings: [{ price: 42 }] });
     assert.strictEqual(d.inStock, true);
     assert.strictEqual(d.price, 42);
+    // Still "top offer", so the price is usable but NOT authoritative. Everything downstream that
+    // compares prices has to be able to tell this apart from a real buy-box read — an unscoped
+    // price stored as if it were the buy box is what produced the -61% phantom drop on
+    // B0H78BB9TY (stored $229 from a non-pinned source vs a real $89.99).
+    assert.strictEqual(d.pricePinned, false);
   });
 });
 
