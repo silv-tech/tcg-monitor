@@ -146,7 +146,13 @@ describe('the _watchlist stamp pass at the end of _collectProducts', () => {
 describe('priority offers lane', () => {
   const OOS = { item: { name: 'Pokémon TCG: 30th Celebration' }, listings: [{ price: undefined, pinned_offer: true }] };
 
-  test('round-robins one ASIN per call, cycling the whole list', async () => {
+  test('round-robins one ASIN per call, and does not re-read one it just read', async () => {
+    // The cursor still advances over the whole list. What changed: the lane now skips an ASIN
+    // whose stock was OBSERVED within the last 60s, so it will not spend a paid call re-reading
+    // something it read seconds ago. With a two-ASIN list that means the third call has nothing
+    // worth buying — which is the point. In production the effect is that ~7 of 24 slots stop
+    // going to ASINs the free tile lane already refreshed, and the 13 with no tile lap ~29%
+    // faster on the same budget.
     const a = adapter({ priorityAsins: [P1, P2] });
     a._knownProducts.set(P1, { sku: P1, name: 'ETB', inStock: false, category: 'pokemon' });
     a._knownProducts.set(P2, { sku: P2, name: 'UPC', inStock: false, category: 'pokemon' });
@@ -155,7 +161,16 @@ describe('priority offers lane', () => {
     await a._runPriorityOffersLane({});
     await a._runPriorityOffersLane({});
     await a._runPriorityOffersLane({});
-    assert.deepStrictEqual(checked, [P1, P2, P1], 'cursor advances and wraps');
+    assert.deepStrictEqual(checked, [P1, P2], 'cursor advances across the list');
+
+    // Once the observation ages out, the same ASIN is picked up again — no starvation.
+    for (const sku of [P1, P2]) {
+      const row = a._knownProducts.get(sku);
+      row.lastSeen = Date.now() - 120_000;
+    }
+    a._lastPriorityOffersAt = 0;
+    await a._runPriorityOffersLane({});
+    assert.strictEqual(checked.length, 3, 'and it comes back round once coverage expires');
   });
 
   test('cadence-gated: only one call per interval', async () => {
