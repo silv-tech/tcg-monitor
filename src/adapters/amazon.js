@@ -1613,6 +1613,22 @@ class AmazonAdapter extends BaseAdapter {
       sku: item.asin,
       name: item.name,
       price: item.price ?? cached.price ?? 0,
+      // PROVENANCE FOLLOWS THE VALUE. A search tile shows whatever offer Amazon features, never
+      // necessarily the pinned one, so a price taken from it is NOT authoritative — and this row
+      // spreads `...cached`, which would otherwise carry a `_pricePinned: true` earned by an
+      // earlier offers read onto a price that did not come from the pinned offer.
+      //
+      // That lie defeats both price guards at once. The correction rule (unverified -> pinned is
+      // not a sale) cannot fire if the unverified side claims to be pinned, and the steep-drop
+      // hold then reads pinned -> pinned as a REAL drop and publishes it after one confirmation.
+      // The free $0 priority fast-path runs this builder over every priority ASIN every poll, and
+      // those are genuine reads, so two of them ~6s apart satisfy the read-counting guard
+      // legitimately: a good pinned price followed by a bad tile price published a -61% drop on a
+      // product that was never on sale. Same failure as B0H78BB9TY on 2026-09-11, new door.
+      //
+      // Only when the tile actually SUPPLIED the price. A tile with no price leaves the cached
+      // price in place, so it leaves that price's provenance in place too.
+      _pricePinned: item.price != null ? false : !!cached._pricePinned,
       currency: 'CAD',
       url: `https://www.amazon.ca/dp/${item.asin}`,
       image: item.image || cached.image || '',
