@@ -109,11 +109,6 @@ const ASIN_BATCH_SIZE = Number(process.env.AMAZON_ASIN_BATCH_SIZE) || 20;      /
 // ASIN_BATCH_SIZE, which paces the paid sweep: the priority list must fit in ONE request so no
 // ASIN loses freshness, and asking for more ASINs than the grid returns cannot work anyway.
 const PRIORITY_FREE_BATCH = Number(process.env.AMAZON_PRIORITY_FREE_BATCH) || 40;
-// How recently the FREE lane must have OBSERVED an ASIN's stock for the paid priority lane to skip
-// it. The free lane runs every poll (~7.3s measured) and covered ASINs show ages of 7-31s, so 60s
-// covers that cadence with margin while still reacting inside a minute if Amazon drops the tile and
-// the ASIN goes back to needing paid reads.
-const PRIORITY_FREE_COVER_MS = Number(process.env.AMAZON_PRIORITY_FREE_COVER_MS) || 60000;
 const ASIN_BATCHES_PER_POLL = Number(process.env.AMAZON_ASIN_BATCHES_PER_POLL) || 1; // +N /s req/poll
 
 // Offers lane — the GUARANTEED per-ASIN stock check for "search-invisible" ASINs. Amazon serves no
@@ -1276,35 +1271,8 @@ class AmazonAdapter extends BaseAdapter {
       return;
     }
 
-    // SPEND THE PAID CALL WHERE IT IS THE ONLY SIGNAL.
-    //
-    // This was a blind round-robin over all priorityAsins, so ~11 of 24 slots went to ASINs the
-    // FREE tile lane had already refreshed seconds earlier (measured 2026-09-12: ages 7-31s). That
-    // call buys almost nothing — the stock reading is already in hand, and the pinned price it
-    // returns is overwritten by the next free tile within ~6s, which is why 0 of the tile-covered
-    // priority ASINs ever hold _pricePinned. Meanwhile the 13 ASINs with NO tile — the whole 30th
-    // Celebration set, the ones the client hand-picked — waited a full 24-slot lap (~571s
-    // measured, 578s worst) for their only stock check.
-    //
-    // Skipping the covered ones concentrates the same budget on the ones that need it.
-    //
-    // CRITICAL: "covered" must mean STOCK WAS OBSERVED, not merely that lastSeen moved. A
-    // price-less tile refreshes lastSeen while asserting nothing about stock (_stockUnobserved),
-    // and 4 of those 11 were exactly that. Skipping on lastSeen alone would starve the rows most
-    // in need of a real read — the same mistake that makes _runOffersLane unable to reach 88
-    // stock-blind rows. If every ASIN is covered we spend nothing this tick, which is correct.
-    let target = null;
-    for (let i = 0; i < this._priorityAsins.length; i++) {
-      const candidate = this._priorityAsins[this._priorityCursor % this._priorityAsins.length];
-      this._priorityCursor = (this._priorityCursor + 1) % this._priorityAsins.length;
-      if (!candidate) continue;
-      const row = this._knownProducts.get(candidate);
-      const stockObservedRecently = row
-        && !row._stockUnobserved
-        && typeof row.lastSeen === 'number'
-        && (now - row.lastSeen) < PRIORITY_FREE_COVER_MS;
-      if (!stockObservedRecently) { target = candidate; break; }
-    }
+    const target = this._priorityAsins[this._priorityCursor % this._priorityAsins.length];
+    this._priorityCursor = (this._priorityCursor + 1) % this._priorityAsins.length;
     if (!target) return;
 
     this._lastPriorityOffersAt = now;
