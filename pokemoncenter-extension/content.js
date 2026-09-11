@@ -1,29 +1,32 @@
 /**
- * TCG Monitor — Pokemon Center bridge, page side.
+ * TCG Monitor — Pokemon Center bridge, ISOLATED world.
  *
- * Runs inside a pokemoncenter.com tab and reads product pages with same-origin fetches. That is
- * the whole trick: the tab has already cleared DataDome, so a fetch from it returns the real
- * server HTML, while the same request from any HTTP client or proxy is refused.
+ * This half owns the loop and the extension plumbing. It deliberately does NOT fetch: reading
+ * pages happens in page.js, in the page's own JavaScript world.
  *
- * Measured 2026-09-11 in a real Chrome:
- *   fetch(product, { credentials: 'include' })  -> 451KB, real ld+json, no challenge
- *   fetch(product, { credentials: 'omit'    })  -> 859 bytes, DataDome challenge
- *   four in parallel                            -> 3.6s wall, ~1.1 products/sec
+ * Why the split. Fetching from here — the isolated content-script world — returned "20 pages
+ * parsed nothing" against the live site on 2026-09-11: twenty reads, zero usable pages, while
+ * the identical URLs fetched by hand returned 451-459KB with a valid Product ld+json. Those hand
+ * tests had been run in the MAIN world without my realising it, so they never exercised this
+ * path at all. In MV3 an isolated-world fetch is not the page making a request, and a service
+ * that scores request provenance can tell the difference.
  *
- * Only the ld+json block is sent onward: a product page is ~440KB and its ld+json ~1.3KB, so a
- * full 8,415-product pass is ~11MB instead of ~3.7GB, and the monitor keeps parsing with the
- * same parser its paid path used.
+ * `chrome.runtime` does not exist in the MAIN world, so page.js cannot reach the background
+ * worker itself. This script is the relay: it holds the loop, asks the worker for work, hands it
+ * to page.js over window.postMessage, and sends the results back.
  */
 
 // Only ever run in the dedicated bridge tab. The user shops on this site; a read loop firing
 // inside their own browsing session would be wrong, and a good way to get that session scored.
 const IS_BRIDGE_TAB = new URLSearchParams(location.search).get('tcgbridge') === '1';
 
-// A challenge means STOP, not slow down. Getting this residential address blocked would cost the
-// user a store they buy from, and the same vendor has already blocked their home network and
-// their phone on another site. Half an hour of silence is cheap by comparison.
+const TAG = 'tcg-pc-bridge';
+// A block means stop, not slow down. DataDome has already cost this user their home network and
+// their phone on another site, and Pokemon Center is a store they buy from personally.
 const CHALLENGE_BACKOFF_MS = 30 * 60 * 1000;
 const ERROR_BACKOFF_MS = 2 * 60 * 1000;
+// A batch bounds its own duration; this is the ceiling on waiting for page.js to answer at all.
+const PAGE_TIMEOUT_MS = 5 * 60 * 1000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const send = (msg) => new Promise((resolve) => {
@@ -31,97 +34,32 @@ const send = (msg) => new Promise((resolve) => {
   catch { resolve(null); }
 });
 
-/**
- * Pull the Product ld+json out of a fetched page.
- *
- * Returns the RAW block text so the monitor does the parsing — one parser, server-side, rather
- * than a second copy here that would drift out of step with the site.
- */
-function extractProductLd(html) {
-  for (const m of html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/g)) {
-    const raw = m[1].trim();
-    let json;
-    try { json = JSON.parse(raw); } catch { continue; }
-    if (json['@type'] !== 'Product') continue;
-    const offers = Array.isArray(json.offers) ? json.offers[0] : json.offers;
-    // The category listing carries Product blocks with an empty sku and a constant OutOfStock;
-    // a real product page carries availability. Require it, so a wrong page cannot look right.
-    if (!offers || !offers.availability) continue;
-    return raw;
-  }
-  return null;
-}
+let seq = 0;
 
-/**
- * Is this a bot wall, or just a page we did not get?
- *
- * The first version answered "anything under 5000 bytes is a block" and escalated a single
- * short response into a 30-minute halt. That was wrong twice over, measured 2026-09-11: one
- * 1053-byte response stopped the bridge for half an hour, the user saw no challenge at all, and
- * the very next cycles fetched normally — a real challenge does not heal itself. Re-fetching the
- * same URLs afterwards returned 200 and ~459KB every time.
- *
- * So a block has to be identified by WHAT came back, not how much. Two honest signals:
- *   - HTTP 429, which needs no interpretation
- *   - a body too small to be a product page AND carrying challenge markup AND carrying no
- *     product data
- *
- * The markers alone are not enough: DataDome's scripts load on perfectly good Pokemon Center
- * pages, and the monitor's own adapter carries a note about that exact mistake discarding every
- * real page. All three conditions together is what makes it a wall.
- */
-function looksBlocked(html, res) {
-  if (res && res.status === 429) return true;
-  if (!html) return true;
-  if (html.length >= 5000) return false;
-  const challenged = /captcha-delivery|geo\.captcha|Pardon Our Interruption|Just a moment/i.test(html);
-  return challenged;
-}
-
-async function readOne(item) {
-  const res = await fetch(item.url, { credentials: 'include', redirect: 'follow' });
-  const html = await res.text();
-  if (looksBlocked(html, res)) return { blocked: true, why: res.status === 429 ? 'HTTP 429' : `challenge (${html.length}b)` };
-  // A short body that is NOT a challenge is one bad response, not a wall. Skip the product
-  // and carry on; stopping the whole bridge for a blip cost half an hour of reads.
-  //
-  // Every miss reports WHY. "20 pages parsed nothing" was a true statement that identified
-  // nothing: a short body, an unparseable page and a thrown fetch all looked identical, so
-  // diagnosing it meant guessing. The reason costs one string and ends the guessing.
-  if (html.length < 5000) return { miss: `http${res.status} short ${html.length}b` };
-  const ld = extractProductLd(html);
-  if (!ld) return { miss: `http${res.status} no-ld ${Math.round(html.length / 1024)}kb` };
-  return { record: { sku: item.sku, ld } };
-}
-
-/** Run the batch with a small pool, so a cycle is not a burst. */
-async function readBatch(items, concurrency) {
-  const out = [];
-  const why = {};                       // miss reason -> count
-  let blocked = null;
-  let misses = 0;
-  let next = 0;
-  const note = (r) => { misses++; why[r] = (why[r] || 0) + 1; };
-  async function worker() {
-    while (next < items.length && !blocked) {
-      const item = items[next++];
-      try {
-        const r = await readOne(item);
-        if (r.blocked) { blocked = r.why; break; }
-        if (r.miss) note(r.miss);
-        else out.push(r.record);
-      } catch (err) {
-        // A thrown fetch is its own diagnosis and used to be indistinguishable from a page
-        // that simply parsed nothing.
-        note(`threw: ${String(err && err.message).slice(0, 40)}`);
-      }
-      await sleep(200 + Math.floor(Math.random() * 400));
+/** Hand a batch to the page world and wait for its answer. */
+function readInPage(items, concurrency) {
+  return new Promise((resolve) => {
+    const id = ++seq;
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('message', onMsg);
+      resolve(v);
+    };
+    function onMsg(ev) {
+      if (ev.source !== window) return;
+      const d = ev.data;
+      if (!d || d.tag !== TAG || d.dir !== 'res' || d.id !== id) return;
+      finish(d);
     }
-  }
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(6, concurrency)) }, worker));
-  const summary = Object.entries(why).sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => `${v}x ${k}`).join(' | ');
-  return { records: out, blocked, misses, summary };
+    window.addEventListener('message', onMsg);
+    window.postMessage({ tag: TAG, dir: 'req', id, items, concurrency }, location.origin);
+    // If page.js never loaded, say so plainly rather than hanging the loop for ever.
+    setTimeout(() => finish({
+      records: [], misses: items.length, summary: 'page world did not answer — is page.js loaded?',
+    }), PAGE_TIMEOUT_MS);
+  });
 }
 
 async function cycle() {
@@ -132,19 +70,17 @@ async function cycle() {
   if (!work.enabled) { await sleep(60000); return cycle(); }
   if (!work.items || work.items.length === 0) { await sleep(60000); return cycle(); }
 
-  const { records, blocked, misses, summary } = await readBatch(work.items, work.concurrency || 2);
+  const { records, blocked, misses, summary } = await readInPage(work.items, work.concurrency || 2);
 
-  if (records.length > 0) await send({ type: 'pc-results', records });
+  if (records && records.length > 0) await send({ type: 'pc-results', records });
 
   if (blocked) {
     await send({ type: 'pc-note', text: `blocked (${blocked}) — pausing ${CHALLENGE_BACKOFF_MS / 60000}min` });
     await sleep(CHALLENGE_BACKOFF_MS);
     return cycle();
   }
-  if (misses > 0 && records.length === 0) {
-    // Nothing parsed at all. Either the markup moved or something is wrong with this session;
-    // either way, backing off beats hammering.
-    await send({ type: 'pc-note', text: `${misses} read nothing — ${summary}` });
+  if (misses > 0 && (!records || records.length === 0)) {
+    await send({ type: 'pc-note', text: `${misses} read nothing — ${summary || 'no detail'}` });
     await sleep(ERROR_BACKOFF_MS);
     return cycle();
   }
@@ -154,6 +90,3 @@ async function cycle() {
 }
 
 if (IS_BRIDGE_TAB) cycle();
-
-// Exported for tests only — the sandbox has no window, so nothing runs above.
-if (typeof module !== 'undefined') module.exports = { extractProductLd, looksBlocked };

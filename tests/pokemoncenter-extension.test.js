@@ -25,13 +25,10 @@ const path = require('path');
 const vm = require('vm');
 
 function loadContent() {
-  const src = fs.readFileSync(path.join(__dirname, '../pokemoncenter-extension/content.js'), 'utf8');
-  const sandbox = {
-    // No tcgbridge marker, so the loop must not start in the sandbox.
-    location: { search: '' },
-    chrome: { runtime: { sendMessage: () => {}, lastError: null } },
-    setTimeout, URLSearchParams, module: { exports: {} }, console,
-  };
+  const src = fs.readFileSync(path.join(__dirname, '../pokemoncenter-extension/page.js'), 'utf8');
+  // page.js exports and returns as soon as it sees a `module`, so it never touches `location`
+  // or `window` here — which is also the proof it cannot start a read loop under test.
+  const sandbox = { setTimeout, URLSearchParams, module: { exports: {} }, console };
   vm.createContext(sandbox);
   vm.runInContext(src, sandbox);
   return sandbox.module.exports;
@@ -140,11 +137,21 @@ describe('deciding whether we were blocked', () => {
   });
 });
 
-describe('the loop refuses to run outside its own tab', () => {
-  test('loading the script without the tcgbridge marker starts nothing', () => {
-    // The sandbox above has location.search = '' and a sendMessage that would throw if called.
-    // Reaching this line at all means the module loaded without starting a read loop, which is
-    // what keeps the bridge out of the user's own shopping tabs.
+describe('the reader lives in the PAGE world, and stays inert under test', () => {
+  test('page.js loads with no window and no location, so it cannot have started a loop', () => {
+    // The sandbox provides neither. Reaching this line means the file exported and returned
+    // before touching either — which is also what keeps it inert outside the bridge tab.
     assert.ok(typeof extractProductLd === 'function');
+    assert.ok(typeof looksBlocked === 'function');
+  });
+
+  test('the manifest runs page.js in the MAIN world and content.js in the isolated one', () => {
+    const m = JSON.parse(fs.readFileSync(path.join(__dirname, '../pokemoncenter-extension/manifest.json'), 'utf8'));
+    const byFile = Object.fromEntries(m.content_scripts.map((c) => [c.js[0], c]));
+    assert.strictEqual(byFile['page.js'].world, 'MAIN',
+      'an isolated-world fetch read 0 of 20 pages against the live site — the request must come '
+      + 'from the page itself');
+    assert.strictEqual(byFile['content.js'].world, undefined,
+      'the relay needs chrome.runtime, which does not exist in the MAIN world');
   });
 });
