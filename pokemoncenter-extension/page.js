@@ -4,16 +4,21 @@
  * This file runs in the page's OWN JavaScript world (`"world": "MAIN"` in the manifest), not in
  * the extension's isolated world, and that distinction is the whole reason it exists.
  *
- * The first version fetched from the isolated content-script world. Measured 2026-09-11 against
- * the live site, that produced "20 pages parsed nothing" — twenty reads, zero usable pages —
- * while the identical URLs, fetched by hand, returned 451-459KB with a valid Product ld+json
- * every time. Those hand tests were run in the MAIN world (`window.next` and `dataLayer`
- * visible, `chrome.runtime.id` absent), so they had never actually exercised what the extension
- * does. In MV3 an isolated-world fetch is not the page making a request; it carries different
- * credentials and Sec-Fetch context, and a service scoring request provenance can tell.
+ * BUT NOT FOR THE REASON ORIGINALLY GIVEN, and the record is corrected here because the wrong
+ * reason shipped. When the bridge read 0 of 20 pages I concluded the isolated content-script
+ * world was refusing to carry the session, and moved the fetching here. That was wrong. Per
+ * Chromium's url_request.mojom, an XHR from a content script injected into a page carries the
+ * PAGE as its request_initiator; the extension identity is dropped by default;
+ * services/network/sec_header_helpers.cc derives Sec-Fetch-* from that initiator with no
+ * isolated-world branch; and Chrome 85 deliberately aligned content-script fetches with page
+ * fetches. On the wire the two are the same request.
  *
- * Here, the fetch is indistinguishable from one the storefront's own React code makes, because
- * it IS one — same world, same session, same headers.
+ * The logs said so too, and I misread them: "http200 no-ld 447kb" was twenty healthy pages
+ * arriving from the ISOLATED world with nothing extracted. The real fault was the parser below,
+ * which demanded `offers.availability` — a field products with SIZES do not carry.
+ *
+ * This file is kept because it is deployed and working, not because the MAIN world is required
+ * for reading. It is not. Do not move code here to fix a reading problem; read the miss reasons.
  *
  * The cost is that `chrome.runtime` does not exist in this world, so everything reaches the
  * extension through window.postMessage. Only the ld+json block is passed back: a product page is

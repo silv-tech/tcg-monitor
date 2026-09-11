@@ -148,9 +148,11 @@ describe('the reader lives in the PAGE world, and stays inert under test', () =>
   test('the manifest runs page.js in the MAIN world and content.js in the isolated one', () => {
     const m = JSON.parse(fs.readFileSync(path.join(__dirname, '../pokemoncenter-extension/manifest.json'), 'utf8'));
     const byFile = Object.fromEntries(m.content_scripts.map((c) => [c.js[0], c]));
+    // Pinning the deployed shape, NOT a claim that MAIN is required for reading. It is not:
+    // per Chromium's url_request.mojom an isolated-world same-origin fetch carries the page as
+    // its initiator, and the 0-of-20 failure was the parser, not the world.
     assert.strictEqual(byFile['page.js'].world, 'MAIN',
-      'an isolated-world fetch read 0 of 20 pages against the live site — the request must come '
-      + 'from the page itself');
+      'page.js is registered in the MAIN world; content.js relays because chrome.runtime is absent there');
     assert.strictEqual(byFile['content.js'].world, undefined,
       'the relay needs chrome.runtime, which does not exist in the MAIN world');
   });

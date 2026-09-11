@@ -71,11 +71,17 @@ pinned tab on pokemoncenter.com (session already cleared)
 monitor parses with its existing parseJsonLd
 ```
 
-**Why two scripts.** The reading MUST happen in the page's own JavaScript world. Fetching from
-the extension's isolated world was measured on 2026-09-11 to read **0 of 20 pages**, while the
-identical URLs fetched by hand returned 451-459KB with a valid `Product` ld+json every time —
-those hand tests had been run in the MAIN world without my realising it. In MV3 an isolated-world
-fetch is not the page making a request, and a service that scores request provenance can tell.
+**Why two scripts — and an honest correction.** The split was introduced to fix a 0-of-20 read
+failure that I blamed on the isolated world. That diagnosis was wrong. Per Chromium's
+`url_request.mojom`, an XHR from a content script injected into a page carries the **page** as its
+`request_initiator`, the extension identity is dropped by default, `Sec-Fetch-*` comes from that
+initiator with no isolated-world branch, and Chrome 85 aligned content-script fetches with page
+fetches. On the wire they are the same request. The logs agreed and I misread them:
+`http200 no-ld 447kb` was twenty healthy pages arriving from the isolated world with nothing
+extracted — the fault was the parser demanding `offers.availability`, which sized products lack.
+
+The split is kept because it is deployed and working, not because MAIN is required. If it ever
+needs simplifying, `content.js` can absorb `page.js` and the Chrome 111 floor goes away.
 
 `chrome.runtime` does not exist in the MAIN world, so `page.js` cannot reach the extension
 itself; `content.js` is the relay between them. This needs Chrome 111+ for `"world": "MAIN"`.

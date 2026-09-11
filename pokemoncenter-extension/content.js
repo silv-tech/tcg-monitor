@@ -1,19 +1,24 @@
 /**
  * TCG Monitor — Pokemon Center bridge, ISOLATED world.
  *
- * This half owns the loop and the extension plumbing. It deliberately does NOT fetch: reading
- * pages happens in page.js, in the page's own JavaScript world.
+ * This half owns the loop and the extension plumbing; the reading itself happens in page.js.
  *
- * Why the split. Fetching from here — the isolated content-script world — returned "20 pages
- * parsed nothing" against the live site on 2026-09-11: twenty reads, zero usable pages, while
- * the identical URLs fetched by hand returned 451-459KB with a valid Product ld+json. Those hand
- * tests had been run in the MAIN world without my realising it, so they never exercised this
- * path at all. In MV3 an isolated-world fetch is not the page making a request, and a service
- * that scores request provenance can tell the difference.
+ * WHY THE SPLIT EXISTS, HONESTLY. When the bridge read 0 of 20 pages I concluded the isolated
+ * world was the cause and moved the fetching into the page's MAIN world. That diagnosis was
+ * WRONG. Per Chromium's own url_request.mojom, an XHR from a content script injected into a page
+ * carries the PAGE as its request_initiator; the extension identity is dropped by default;
+ * Sec-Fetch-* is derived from that initiator with no isolated-world branch; and Chrome 85
+ * deliberately aligned content-script fetches with page fetches. On the wire, an isolated-world
+ * same-origin fetch IS the page asking.
  *
- * `chrome.runtime` does not exist in the MAIN world, so page.js cannot reach the background
- * worker itself. This script is the relay: it holds the loop, asks the worker for work, hands it
- * to page.js over window.postMessage, and sends the results back.
+ * Our own logs said the same and I misread them: "http200 no-ld 447kb" — twenty healthy pages
+ * arriving from the ISOLATED world, with nothing extracted. The real fault was the parser, which
+ * demanded `offers.availability`, a field that products with SIZES do not carry.
+ *
+ * The split is kept because it is deployed and working, not because it is required. If it ever
+ * needs simplifying, this file can absorb page.js and drop the Chrome 111 floor. What must NOT
+ * happen is someone reading this and concluding the MAIN world is load-bearing for reading — it
+ * is not, and believing so cost a release. When pages do not read, read the miss reasons.
  */
 
 // Only ever run in the dedicated bridge tab. The user shops on this site; a read loop firing
