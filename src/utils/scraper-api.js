@@ -467,7 +467,7 @@ async function fetchAmazonOffers(asin, { timeoutMs = 8000 } = {}) {
   await refreshAccountUsage(); // throttled; anchors the pause guard to the real billed figure
   if (budgetPaused) return null;
 
-  // Structured Amazon offers endpoint: JSON, ~1 credit. `tld=ca` is LOAD-BEARING and silent:
+  // Structured Amazon offers endpoint: JSON. `tld=ca` is LOAD-BEARING and silent:
   // it selects the amazon.ca marketplace so prices come back in CAD, but the payload's
   // price_symbol is a bare "$" with nothing marking CAD vs USD. Omit or mistype tld and you get
   // amazon.com prices — ~35% low, entirely plausible, invisible in review — AND no pinned offer,
@@ -476,7 +476,12 @@ async function fetchAmazonOffers(asin, { timeoutMs = 8000 } = {}) {
   // tld=ca. `country` is not needed (tld alone selects the marketplace).
   const params = new URLSearchParams({ api_key: SCRAPER_API_KEY, asin, tld: 'ca' });
   const apiUrl = `${SCRAPER_API_BASE}/structured/amazon/offers?${params}`;
-  const cost = 1;
+  // 5 credits, MEASURED from the ScraperAPI domain report (amazon.ca = 5.0/req; all Amazon
+  // structured endpoints bill 5, the e-commerce rate). This was hard-coded 1 and under-counted the
+  // Amazon lanes 5× — the local counter read ~53k while the dashboard billed ~337k. The pause guard
+  // anchors to the real /account figure so nothing overran blindly, but every local cap keyed off
+  // this number (offers/priority daily caps, burst caps) was 5× too loose. Do not revert to 1.
+  const cost = 5;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

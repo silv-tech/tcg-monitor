@@ -133,6 +133,26 @@ const PRIORITY_OFFERS_ENABLED = process.env.AMAZON_PRIORITY_OFFERS !== '0';
 // the same time PRIORITY_OFFERS_INTERVAL_MS is flipped to 6000 (~14,400/day) post plan-upgrade.
 const PRIORITY_OFFERS_DAILY_CAP = Number(process.env.AMAZON_PRIORITY_OFFERS_DAILY_CAP) || 7500;
 
+// BURST-ON-FLIP — the primary speed lever. When any priority ASIN flips OOS→in-stock, a drop wave
+// has started and the rest usually follow within seconds-to-minutes; so we fire ALL priority ASINs
+// in parallel at a tight cadence for a bounded window, catching wave items #2..#N in seconds
+// instead of on the ~180s round-robin. Bounded hard so a flapping buy box can't run it away: a max
+// duration, an early relax when no NEW flip arrives, a per-rolling-hour start cap, and a daily
+// paid-call cap of its own. (Cannot help wave item #1 — the burst is TRIGGERED by catching it.)
+// REVERT: AMAZON_BURST=0. All caps count CALLS; real credits = calls × 5.
+const BURST_ENABLED = process.env.AMAZON_BURST !== '0';
+const BURST_INTERVAL_MS = Number(process.env.AMAZON_BURST_INTERVAL_MS) || 6000;    // parallel-fire cadence (poll-quantized to 6s)
+const BURST_MAX_DURATION_MS = Number(process.env.AMAZON_BURST_MAX_MS) || 180000;   // 3-min hard ceiling per burst
+const BURST_RELAX_AFTER_MS = Number(process.env.AMAZON_BURST_RELAX_MS) || 60000;   // end early if no NEW flip for 60s
+const BURST_MAX_PER_HOUR = Number(process.env.AMAZON_BURST_MAX_PER_HOUR) || 3;     // ≤N burst starts per rolling hour
+const BURST_DAILY_CALL_CAP = Number(process.env.AMAZON_BURST_DAILY_CALLS) || 3000; // paid offers calls/day via burst
+
+// FREE priority fast-path — one asinMode /s request over the priority ASINs EVERY poll (~6s), $0.
+// Catches any priority ASIN that carries a search tile in ~6s at zero credits, refreshes its
+// lastSeen so the paid lane skips it, and is itself a zero-cost burst trigger. Cannot see a
+// fully-suppressed OOS ASIN (no tile) — those still rely on the paid lane. REVERT: AMAZON_PRIORITY_FREE=0.
+const PRIORITY_FREE_ENABLED = process.env.AMAZON_PRIORITY_FREE !== '0';
+
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 // Escalating quiet ladder for a throttled AOD endpoint, mirroring the search backoff ladder. A
@@ -184,6 +204,13 @@ class AmazonAdapter extends BaseAdapter {
     this._priorityOffersDay = null; // YYYY-MM-DD window for the priority lane's own daily cap
     this._priorityOffersToday = 0;
     this._priorityCapLoggedDay = null; // so the "cap hit" warning fires once per day, not every poll
+    // Burst-on-flip state
+    this._burstUntil = 0;        // burst active while Date.now() < this
+    this._lastBurstFlipAt = 0;   // last NEW OOS→in-stock flip during the current burst (drives relax)
+    this._lastBurstFireAt = 0;   // paces the parallel fire within a burst
+    this._burstStarts = [];      // recent burst-start timestamps, for the per-rolling-hour cap
+    this._burstDay = null;       // YYYY-MM-DD window for the burst daily call cap
+    this._burstCallsToday = 0;   // paid offers calls spent by bursts today
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
     this._aodThrottleStreak = 0;     // consecutive AOD 503s across ALL lanes; trips the shared cooldown
     this._aodCooldownLevel = 0;      // rung on the escalating cooldown ladder; reset by a real read
@@ -891,6 +918,12 @@ class AmazonAdapter extends BaseAdapter {
     // poll is then carried forward unchanged.
     await this._runAsinSweep(products);
 
+    // FREE priority fast-path: one $0 asinMode /s request over the priority ASINs EVERY poll, so a
+    // priority item that carries a tile is caught in ~6s instead of waiting for the slow round-robin
+    // — and it arms the burst at zero credits. Runs before the paid lanes so a free hit refreshes
+    // lastSeen and the general lane skips that ASIN.
+    await this._runPriorityFreeCheck(products);
+
     // Offers lane: after the free sweep has refreshed everything it can, spend ONE paid
     // structured/offers call on the stalest search-invisible ASIN — the ones with no search tile,
     // which the sweep can never see. This is what guarantees a restock like B0H78BB9TY is caught.
@@ -1142,10 +1175,16 @@ class AmazonAdapter extends BaseAdapter {
     if (!OFFERS_LANE_ENABLED || !PRIORITY_OFFERS_ENABLED) return;
     if (!this._priorityAsins || this._priorityAsins.length === 0) return;
     const now = Date.now();
-    if (now - this._lastPriorityOffersAt < this._priorityOffersIntervalMs) return;
-
     const day = new Date(now).toISOString().slice(0, 10);
     if (this._priorityOffersDay !== day) { this._priorityOffersDay = day; this._priorityOffersToday = 0; }
+    if (this._burstDay !== day) { this._burstDay = day; this._burstCallsToday = 0; }
+
+    // BURST takes over the moment a drop wave is live — fire ALL priority ASINs in parallel, tight,
+    // instead of the slow round-robin — until it relaxes or hits a bound.
+    if (this._burstActive(now)) { await this._runPriorityBurst(products, now); return; }
+
+    // Baseline: one paid call per interval, round-robin, so no ASIN is starved.
+    if (now - this._lastPriorityOffersAt < this._priorityOffersIntervalMs) return;
     if (this._priorityOffersToday >= PRIORITY_OFFERS_DAILY_CAP) {
       // A priority lane that silently stops is the same class of failure as a silent drop. Say it
       // once per day, unthrottled, so a hit cap (and thus paused priority detection) is visible.
@@ -1158,36 +1197,47 @@ class AmazonAdapter extends BaseAdapter {
       return;
     }
 
-    // Round-robin one ASIN per interval, cycling the whole list so none is starved.
     const target = this._priorityAsins[this._priorityCursor % this._priorityAsins.length];
     this._priorityCursor = (this._priorityCursor + 1) % this._priorityAsins.length;
     if (!target) return;
 
     this._lastPriorityOffersAt = now;
+    const spent = await this._checkOnePriority(target, products, now, 'priority-offers');
+    if (spent) this._priorityOffersToday += 1;
+  }
+
+  /**
+   * Fetch offers for ONE priority ASIN and apply the result. Returns true iff a paid call was
+   * actually spent (so the caller can tick its cap). A null/unreadable payload is carried forward,
+   * NEVER read as OOS. Shared by the baseline lane and the burst.
+   */
+  async _checkOnePriority(target, products, now, laneTag) {
     let json;
     try { json = await this._fetchOffers(target); } catch { json = null; }
-    if (json === null) return; // budget refusal / HTTP error / timeout — carry forward, never OOS
-    this._priorityOffersToday += 1;
-
+    if (json === null) return false; // budget refusal / HTTP error / timeout — carry forward, never OOS
     const data = this._offersToData(json);
-    if (!data) { // unreadable (no live title) — carry forward, NEVER read as OOS
-      logger.debug(`Amazon: priority-offers — ${target} unreadable payload, carried forward`);
-      return;
-    }
+    if (!data) { logger.debug(`Amazon: ${laneTag} — ${target} unreadable payload, carried forward`); return true; }
+    this._applyOffersData(target, data, products, now, laneTag);
+    return true;
+  }
 
+  /**
+   * Build the product row from an offers read (shared by baseline + burst), detect an
+   * OOS→in-stock flip, and arm the burst on one. Keeps the stored name on an out-of-scope live
+   * title so the delivery gate can still escalate; preserves the pinned-offer price provenance.
+   */
+  _applyOffersData(target, data, products, now, laneTag) {
     // NEVER denylist/drop a hand-picked ASIN on a scope miss (unlike the general lane). Keep it
     // tracked and let the delivery gate escalate a genuine divergence. Logged so it is visible.
     if (!isInScopeName(data.name)) {
-      logger.warn(`Amazon: priority-offers — ${target} live title reads out of scope `
+      logger.warn(`Amazon: ${laneTag} — ${target} live title reads out of scope `
         + `("${data.name.slice(0, 60)}") — KEEPING (priority), delivery gate will escalate`);
     }
-
     const cached = this._knownProducts.get(target) || {};
-    // Adopt a relisted title only when it genuinely changed AND is still in scope. Adopting this
-    // also replaces the seeded "Amazon ASIN …" placeholder with the real title on the first read.
-    // Crucially, an OUT-OF-SCOPE live title is NOT adopted: keeping the stored name is what lets the
-    // delivery gate still see stored-vs-live divergence and escalate — adopting the wrong title would
-    // make them match and let a wrong-product alert through, defeating the whole never-drop escalation.
+    const wasInStock = !!cached.inStock;
+    // Adopt a relisted title only when it genuinely changed AND is still in scope (also replaces the
+    // seeded placeholder on first read). An OUT-OF-SCOPE live title is NOT adopted, so the delivery
+    // gate can still see stored-vs-live divergence and escalate.
     let name = cached.name;
     let category = cached.category;
     if (data.name && isInScopeName(data.name) && cached.name && !sameProductName(cached.name, data.name)) {
@@ -1197,15 +1247,14 @@ class AmazonAdapter extends BaseAdapter {
     } else if (data.name && isInScopeName(data.name) && !cached.name) {
       name = data.name;
     }
-
     const product = {
       ...cached,
       sku: target,
       name: name || cached.name || data.name,
       category: category || cached.category || 'pokemon',
       price: data.price || cached.price || 0,
-      // Authoritative only when THIS read supplied the price AND it came off the flagged
-      // pinned offer. A carried-forward cached price keeps whatever provenance it had.
+      // Authoritative only when THIS read supplied the price AND it came off the flagged pinned
+      // offer. A carried-forward cached price keeps whatever provenance it had.
       _pricePinned: data.price ? !!data.pricePinned : !!cached._pricePinned,
       inStock: data.inStock,
       canAddToCart: data.inStock,
@@ -1216,9 +1265,95 @@ class AmazonAdapter extends BaseAdapter {
     products[target] = product;
     this._knownProducts.set(target, product);
     if (data.inStock) this._lastInStockAt.set(target, now);
+    logger.info(`Amazon: ${laneTag} — ${target} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`);
+    if (data.inStock && !wasInStock) this._enterBurst(now, target); // flip → catch the rest of the wave fast
+  }
 
-    logger.info(`Amazon: priority-offers — ${target} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`
-      + ` (${this._priorityOffersToday}/${PRIORITY_OFFERS_DAILY_CAP} priority credits today)`);
+  _burstActive(now) {
+    if (!BURST_ENABLED) return false;
+    if (now >= this._burstUntil) return false;
+    if (now - this._lastBurstFlipAt >= BURST_RELAX_AFTER_MS) { this._burstUntil = 0; return false; } // no new flip → relax early
+    return true;
+  }
+
+  /**
+   * Arm (or refresh) a burst on an OOS→in-stock flip. Every flip refreshes the relax timer;
+   * starting a NEW burst is bounded by a per-rolling-hour cap and the daily call cap, so a flapping
+   * buy box can't run it away.
+   */
+  _enterBurst(now, asin) {
+    if (!BURST_ENABLED) return;
+    this._lastBurstFlipAt = now; // refresh relax window on every flip, whether or not one is running
+    if (this._burstActive(now)) return; // already bursting — the refresh above is enough
+    this._burstStarts = this._burstStarts.filter(t => now - t < 3600000);
+    if (this._burstStarts.length >= BURST_MAX_PER_HOUR) {
+      logger.warn(`Amazon: priority BURST suppressed for ${asin} — ${BURST_MAX_PER_HOUR}/hr start cap reached (flapping?)`);
+      return;
+    }
+    if (this._burstCallsToday >= BURST_DAILY_CALL_CAP) {
+      logger.warn(`Amazon: priority BURST suppressed for ${asin} — daily burst call cap (${BURST_DAILY_CALL_CAP}) reached`);
+      return;
+    }
+    this._burstStarts.push(now);
+    this._burstUntil = now + BURST_MAX_DURATION_MS;
+    this._lastBurstFireAt = 0; // fire on the very next poll
+    logger.warn(`Amazon: priority BURST armed by ${asin} flipping IN STOCK — firing all `
+      + `${this._priorityAsins.length} priority ASINs every ${Math.round(BURST_INTERVAL_MS / 1000)}s `
+      + `for up to ${Math.round(BURST_MAX_DURATION_MS / 60000)}min`);
+  }
+
+  /**
+   * Burst pass: fire ALL priority ASINs' paid offers in parallel, paced by BURST_INTERVAL_MS, until
+   * the burst relaxes or hits its daily call cap. Turns the ~180s round-robin into ~seconds for
+   * wave items #2..#N. Cost = calls × 5 regardless of parallelism; parallel only wins wall-clock.
+   */
+  async _runPriorityBurst(products, now) {
+    if (now - this._lastBurstFireAt < BURST_INTERVAL_MS) return; // paced (poll-quantized to ~6s)
+    if (this._burstCallsToday >= BURST_DAILY_CALL_CAP) { this._burstUntil = 0; return; }
+    this._lastBurstFireAt = now;
+    const targets = this._priorityAsins;
+    const results = await Promise.allSettled(targets.map(t => this._checkOnePriority(t, products, now, 'priority-burst')));
+    const spent = results.filter(r => r.status === 'fulfilled' && r.value).length;
+    this._burstCallsToday += spent;
+    logger.info(`Amazon: priority-burst — ${targets.length} ASIN(s) fired, ${spent} paid `
+      + `(${this._burstCallsToday}/${BURST_DAILY_CALL_CAP} burst calls today)`);
+  }
+
+  /**
+   * FREE priority fast-path — one asinMode /s request over the priority ASINs every poll ($0). Any
+   * priority ASIN carrying a search tile is detected in ~6s at zero credits, its lastSeen refreshed
+   * (so the general paid lane skips it), and a flip arms the burst. Cannot see a fully-suppressed
+   * OOS ASIN (no tile) — those still rely on the paid lane. Fail-safe: a null/challenge result is
+   * carried forward, NEVER read as OOS.
+   */
+  async _runPriorityFreeCheck(products) {
+    if (!PRIORITY_FREE_ENABLED) return;
+    if (!this._priorityAsins || this._priorityAsins.length === 0) return;
+    const now = Date.now();
+    const chunk = this._priorityAsins.slice(0, ASIN_BATCH_SIZE); // all priority ASINs fit one pipe-joined query
+    let items;
+    try { items = await this._freeSearch(chunk.join('|'), false, 1, { asinMode: true }); }
+    catch { items = null; }
+    if (items == null) return; // challenge / no grid — carry forward, never OOS
+    const wanted = new Set(chunk);
+    for (const item of items) {
+      if (!item) continue;
+      const built = this._buildFromSearch(item, '');
+      if (!built || !wanted.has(built.sku)) continue;
+      const cached = this._knownProducts.get(built.sku) || {};
+      const wasInStock = !!cached.inStock;
+      built._watchlist = true;
+      built.isTCG = true; // hand-picked — never let the name heuristic drop it (mirrors the stamp pass)
+      products[built.sku] = built;
+      this._knownProducts.set(built.sku, built);
+      if (built.inStock) {
+        this._lastInStockAt.set(built.sku, now);
+        if (!wasInStock) {
+          logger.info(`Amazon: priority-free — ${built.sku} tile shows IN STOCK ($0)`);
+          this._enterBurst(now, built.sku);
+        }
+      }
+    }
   }
 
   /**

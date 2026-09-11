@@ -212,3 +212,101 @@ describe('priority offers lane', () => {
     assert.strictEqual(products[P1]._watchlist, true);
   });
 });
+
+const OOS = { item: { name: 'Pokémon TCG: 30th Celebration' }, listings: [{ price: undefined, pinned_offer: true }] };
+const INSTOCK = { item: { name: 'Pokémon TCG: 30th Celebration' }, listings: [{ price: 199.99, pinned_offer: true }] };
+const P3 = 'B0H783FY5Z';
+
+describe('burst-on-flip: the Amazon speed lever', () => {
+  test('a flip in the baseline lane arms a burst', async () => {
+    const a = adapter({ priorityAsins: [P1] });
+    a._knownProducts.set(P1, { sku: P1, name: 'Pokémon TCG: 30th Celebration', inStock: false, category: 'pokemon' });
+    a._fetchOffers = async () => INSTOCK;
+    await a._runPriorityOffersLane({});
+    assert.ok(a._burstUntil > Date.now(), 'OOS→in-stock flip armed a burst');
+    assert.ok(a._lastBurstFlipAt > 0);
+  });
+
+  test('while bursting, ALL priority ASINs are fired in one pass (not round-robin)', async () => {
+    const a = adapter({ priorityAsins: [P1, P2, P3] });
+    for (const s of a._priorityAsins) a._knownProducts.set(s, { sku: s, name: 'Pokémon TCG: 30th Celebration', inStock: false, category: 'pokemon' });
+    a._burstUntil = Date.now() + 60000; a._lastBurstFlipAt = Date.now(); a._lastBurstFireAt = 0;
+    const checked = [];
+    a._fetchOffers = async (asin) => { checked.push(asin); return OOS; };
+    await a._runPriorityOffersLane({});
+    assert.deepStrictEqual(checked.sort(), [...a._priorityAsins].sort(), 'every priority ASIN fired in the burst pass');
+    assert.strictEqual(a._burstCallsToday, 3, 'burst call cap counter advanced by the 3 fired');
+  });
+
+  test('burst relaxes early when no new flip arrives within the relax window', () => {
+    const a = adapter();
+    a._burstUntil = Date.now() + 60000;
+    a._lastBurstFlipAt = Date.now() - 61000; // last flip >60s ago
+    assert.strictEqual(a._burstActive(Date.now()), false, 'relaxed — no new flip in the window');
+    assert.strictEqual(a._burstUntil, 0, 'and cleared the burst');
+  });
+
+  test('per-rolling-hour start cap suppresses a 4th burst', () => {
+    const a = adapter();
+    const now = Date.now();
+    for (let i = 1; i <= 4; i++) { a._burstUntil = 0; a._lastBurstFlipAt = 0; a._enterBurst(now, 'X' + i); }
+    assert.strictEqual(a._burstStarts.length, 3, 'no more than BURST_MAX_PER_HOUR (3) starts per hour');
+  });
+
+  test('daily burst call cap ends the burst instead of firing', async () => {
+    const a = adapter({ priorityAsins: [P1] });
+    a._knownProducts.set(P1, { sku: P1, inStock: false, category: 'pokemon' });
+    a._burstUntil = Date.now() + 60000; a._lastBurstFlipAt = Date.now(); a._lastBurstFireAt = 0;
+    a._burstDay = new Date().toISOString().slice(0, 10); a._burstCallsToday = 999999;
+    let calls = 0; a._fetchOffers = async () => { calls++; return OOS; };
+    await a._runPriorityOffersLane({});
+    assert.strictEqual(calls, 0, 'over the daily burst cap → no paid calls');
+    assert.strictEqual(a._burstUntil, 0, 'burst ended');
+  });
+
+  test('a lone first flip cannot be helped by burst (burst is triggered BY it) — baseline catches it', async () => {
+    const a = adapter({ priorityAsins: [P1] });
+    a._knownProducts.set(P1, { sku: P1, name: 'Pokémon TCG: 30th Celebration', inStock: false, category: 'pokemon' });
+    a._fetchOffers = async () => INSTOCK;
+    const products = {};
+    await a._runPriorityOffersLane(products); // baseline catches item #1
+    assert.strictEqual(products[P1].inStock, true, 'item #1 caught by the baseline read');
+    assert.ok(a._burstUntil > Date.now(), 'and the burst is now armed for items #2..#N');
+  });
+});
+
+describe('free priority fast-path ($0)', () => {
+  test('a visible in-stock tile updates the row and arms a burst at zero credits', async () => {
+    const a = adapter({ priorityAsins: [P1] });
+    a._knownProducts.set(P1, { sku: P1, name: 'Pokémon TCG: 30th Celebration UPC', inStock: false, category: 'pokemon' });
+    a._freeSearch = async () => [{ asin: P1, sku: P1 }];
+    a._buildFromSearch = (item) => ({ sku: item.sku, name: 'Pokémon TCG: 30th Celebration UPC', inStock: true, price: 199.99, category: 'pokemon' });
+    let paid = 0; a._fetchOffers = async () => { paid++; return INSTOCK; };
+    const products = {};
+    await a._runPriorityFreeCheck(products);
+    assert.strictEqual(products[P1].inStock, true, 'free tile detected in stock');
+    assert.strictEqual(products[P1]._watchlist, true);
+    assert.strictEqual(products[P1].isTCG, true, 'hand-picked → forced TCG so delivery cannot drop it');
+    assert.ok(a._burstUntil > Date.now(), 'free-path flip armed the burst');
+    assert.strictEqual(paid, 0, 'the free path spent NO paid offers calls');
+  });
+
+  test('a null/challenge free result carries forward — never reads as OOS', async () => {
+    const a = adapter({ priorityAsins: [P1] });
+    a._knownProducts.set(P1, { sku: P1, inStock: true, price: 50, category: 'pokemon' });
+    a._freeSearch = async () => null;
+    const products = {};
+    await a._runPriorityFreeCheck(products);
+    assert.strictEqual(P1 in products, false, 'no write on a challenge — cache carried forward, never flipped OOS');
+  });
+
+  test('a still-OOS tile does not arm a burst', async () => {
+    const a = adapter({ priorityAsins: [P1] });
+    a._knownProducts.set(P1, { sku: P1, name: 'x', inStock: false, category: 'pokemon' });
+    a._freeSearch = async () => [{ asin: P1, sku: P1 }];
+    a._buildFromSearch = () => ({ sku: P1, name: 'x', inStock: false, category: 'pokemon' });
+    const products = {};
+    await a._runPriorityFreeCheck(products);
+    assert.strictEqual(a._burstUntil, 0, 'no flip → no burst');
+  });
+});

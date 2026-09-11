@@ -24,12 +24,14 @@ const realFetch = global.fetch;
 afterEach(() => { global.fetch = realFetch; });
 
 describe('fetchAmazonOffers', () => {
-  test('returns parsed JSON on a 200 and records exactly one credit', async () => {
+  test('returns parsed JSON on a 200 and records the real 5-credit cost', async () => {
     global.fetch = async (url) => (String(url).includes('/account') ? account : { ok: true, json: async () => OFFERS });
     const before = scraper.getBudgetStatus().localTotal;
     const data = await scraper.fetchAmazonOffers('B0H78BB9TY');
     assert.deepStrictEqual(data, OFFERS, 'raw offers JSON returned');
-    assert.strictEqual(scraper.getBudgetStatus().localTotal, before + 1, 'exactly one credit recorded on success');
+    // 5, not 1: ScraperAPI bills amazon.ca structured endpoints at the e-commerce rate (MEASURED
+    // from the domain report). The old cost=1 under-counted the Amazon lanes 5×.
+    assert.strictEqual(scraper.getBudgetStatus().localTotal, before + 5, 'the real 5-credit cost is recorded on success');
   });
 
   test('hits the structured endpoint with the asin', async () => {
