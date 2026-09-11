@@ -119,6 +119,20 @@ const OFFERS_INTERVAL_MS = Number(process.env.AMAZON_OFFERS_INTERVAL_MS) || 2000
 const OFFERS_STALE_MS = Number(process.env.AMAZON_OFFERS_STALE_MS) || 10 * 60 * 1000; // sweep-missed
 const OFFERS_DAILY_CAP = Number(process.env.AMAZON_OFFERS_DAILY_CAP) || 4000; // ScraperAPI credits/day
 
+// PRIORITY offers lane — a dedicated, round-robin offers check over the hand-picked priorityAsins
+// (the 10 OOS 30th Celebration items), separate from the stalest-first general lane above. These
+// ASINs are search-invisible, so offers is the ONLY signal that can catch their restock, and they
+// are the client's max-priority set, so they get a guaranteed tight cadence instead of waiting
+// their turn in the stalest-first rotation. Own interval + own daily cap so it is tuned and budgeted
+// independently. At the shipped 18s interval (10 ASINs → ~180s/ASIN) it costs ~4,800 credits/day and
+// fits the current 1M/mo plan; flip PRIORITY_OFFERS_INTERVAL_MS to 6000 (~60s/ASIN, ~14,400/day) and
+// raise the cap to ~15000 only AFTER the ScraperAPI plan is upgraded. REVERT: AMAZON_PRIORITY_OFFERS=0.
+const PRIORITY_OFFERS_ENABLED = process.env.AMAZON_PRIORITY_OFFERS !== '0';
+// 7500 leaves comfortable headroom over the shipped 18s cadence (~4,800/day) so a retry storm or a
+// clock-skew day boundary can't quietly push it into the cap and stop the lane. Raise to ~15000 at
+// the same time PRIORITY_OFFERS_INTERVAL_MS is flipped to 6000 (~14,400/day) post plan-upgrade.
+const PRIORITY_OFFERS_DAILY_CAP = Number(process.env.AMAZON_PRIORITY_OFFERS_DAILY_CAP) || 7500;
+
 const DISCOVERY_INTERVAL_DEFAULT = 30 * 60 * 1000;
 const DISCOVERY_INTERVAL_FLOOR = 5 * 60 * 1000;
 // Escalating quiet ladder for a throttled AOD endpoint, mirroring the search backoff ladder. A
@@ -161,6 +175,15 @@ class AmazonAdapter extends BaseAdapter {
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
     this.watchlist = new Set(config.watchlist || []); // fast-polled by the scheduler
+    // Max-priority ASINs (subset of watchlist) that get the dedicated tight offers loop. Order is
+    // preserved so the round-robin cursor visits them predictably.
+    this._priorityAsins = (config.priorityAsins || []).map(String);
+    this._priorityOffersIntervalMs = (config.timing && config.timing.priorityOffersIntervalMs) || 18000;
+    this._priorityCursor = 0;   // round-robin position over _priorityAsins
+    this._lastPriorityOffersAt = 0;
+    this._priorityOffersDay = null; // YYYY-MM-DD window for the priority lane's own daily cap
+    this._priorityOffersToday = 0;
+    this._priorityCapLoggedDay = null; // so the "cap hit" warning fires once per day, not every poll
     this._aodCooldownUntil = 0;      // set when Amazon starts 503ing the offer endpoint
     this._aodThrottleStreak = 0;     // consecutive AOD 503s across ALL lanes; trips the shared cooldown
     this._aodCooldownLevel = 0;      // rung on the escalating cooldown ladder; reset by a real read
@@ -456,8 +479,14 @@ class AmazonAdapter extends BaseAdapter {
       let denied = 0;
       for (const [asin, product] of Object.entries(cached || {})) {
         if (!product || !product.name) continue;
-        if (this._denied.has(asin)) { denied++; continue; }
-        if (!isInScopeName(product.name)) { outOfScope++; continue; }
+        // A watchlist ASIN is the user's explicit pick and must ALWAYS hydrate back — otherwise a
+        // priority item whose stored name reads as merch/accessory (or that a divergence once
+        // denylisted) would silently vanish on the next redeploy (37 deploys in 28h observed), and
+        // its restock would be missed. The identity denylist and scope filter apply to discovered
+        // products, never to hand-picked ones.
+        const isWatched = this.watchlist.has(asin);
+        if (!isWatched && this._denied.has(asin)) { denied++; continue; }
+        if (!isWatched && !isInScopeName(product.name)) { outOfScope++; continue; }
         if (this._knownProducts.has(asin)) continue;
         this._knownProducts.set(asin, product);
         loaded++;
@@ -480,6 +509,34 @@ class AmazonAdapter extends BaseAdapter {
     // Before anything else, and before the search-blocked early return below — a cold cache is
     // what turns a restart into a flood, and that is true whether or not search is available.
     await this._hydrateFromRedis();
+
+    // Seed every watchlist ASIN not already known, so both offers lanes (which iterate
+    // _knownProducts) check it from the first poll. Without this, a hand-picked ASIN that has never
+    // been discovered — the 8 search-invisible 30th Celebration items — is simply absent from the
+    // map and is never checked at all. Seeded OOS (inStock:false) so the first in-stock read fires a
+    // clean false→true RESTOCK; the real title is adopted on the first offers read. Runs AFTER
+    // hydration and only when absent, so a real hydrated row (with its true name/state) always wins.
+    for (const asin of this.watchlist) {
+      this._denied.delete(asin); // a persisted denial must never block a priority ASIN from tracking
+      if (this._knownProducts.has(asin)) continue;
+      const seeded = this.classify({
+        sku: asin,
+        name: `Amazon ASIN ${asin}`, // placeholder; replaced by the live title on the first offers read
+        price: 0,
+        currency: 'CAD',
+        url: `https://www.amazon.ca/dp/${asin}`,
+        image: '',
+        inStock: false,
+        canAddToCart: false,
+        shipsToHome: true,
+        _watchlist: true,
+      });
+      // classify() sets isTCG from the (placeholder) name, i.e. false — force it true so a restock
+      // that fires before the real title is adopted is not silently dropped by deliver()'s isTCG
+      // filter. The stamp pass at the end of _collectProducts re-asserts this on every rebuilt row.
+      seeded.isTCG = true;
+      this._knownProducts.set(asin, seeded);
+    }
 
     // Amazon throttles by endpoint, as the AOD sweep found out the hard way. If search starts
     // failing, go properly quiet rather than hammering it into a deeper block.
@@ -552,6 +609,30 @@ class AmazonAdapter extends BaseAdapter {
     if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs) {
       this._lastAodSweepAt = now;
       await this._monitorKnownAsins(products);
+    }
+
+    // Stamp _watchlist on every watchlist product in ONE place — the single map that every build
+    // path (search, sweep, offers, priority, seed, carry-forward) funnels into before it leaves the
+    // adapter. classify() is NOT a reliable chokepoint (three of its call sites are throwaway
+    // category re-derivations that carry no sku), so stamping here is what guarantees a REBUILT
+    // restock row — not just the seeded baseline — reaches delivery with the flag set. The flag
+    // drives the limiter mute-exemption (alert-limiter.js), queue bypass, 3-channel routing, and the
+    // 45s restock dedup; the flood backstop in delivery.js deliver() bounds that last one.
+    // NB: cap-exemption (base.js) and scope-drop (above) key off watched.has(sku), the config Set —
+    // NOT this flag — so those never depend on the stamp having run.
+    for (const [sku, p] of Object.entries(products)) {
+      if (p && this.watchlist.has(String(sku))) {
+        p._watchlist = true;
+        // Force isTCG on a hand-picked ASIN. The user asserts it is relevant, so the isTCGProduct
+        // name heuristic must not override that — and it WOULD: the seeded "Amazon ASIN …"
+        // placeholder, and any divergent ASIN whose out-of-scope live title we deliberately do NOT
+        // adopt, both classify isTCG:false, and deliver()'s FIRST filter silently drops every
+        // isTCG:false product (a debug log, no warn). That would drop the exact restock this feature
+        // exists to catch. Safe: a genuinely wrong product now escalates to admin via the delivery
+        // gate rather than reaching customers. (Category may stay 'other'; routing already exempts
+        // _watchlist, so that is fine — only isTCG had no exemption.)
+        p.isTCG = true;
+      }
     }
 
     return products;
@@ -760,13 +841,21 @@ class AmazonAdapter extends BaseAdapter {
           // Pokemon booster while serving a PopSockets phone grip. The sweep already makes
           // exactly these two checks at the AOD update branch; this path simply skipped them.
           if (data && data.name && !isInScopeName(data.name)) {
-            logger.warn(`Amazon: ASIN ${product.sku} is no longer the product we stored — dropping. `
-              + `Was "${product.name}", now "${data.name}"`);
-            this._denyIdentity(product.sku, data.name);
-            this._knownProducts.delete(product.sku);
-            this._lastInStockAt.delete(product.sku);
-            delete products[product.sku];
-            continue;
+            if (this.watchlist.has(product.sku)) {
+              // A hand-picked ASIN is never denylisted or dropped — it stays tracked, and the
+              // delivery-time gate escalates a genuine divergence to admin rather than silently
+              // dropping it. Logged unthrottled so a divergence on a priority item is visible.
+              logger.warn(`Amazon: WATCHLIST ASIN ${product.sku} live title reads out of scope `
+                + `("${data.name.slice(0, 60)}") — KEEPING (priority), delivery gate will escalate`);
+            } else {
+              logger.warn(`Amazon: ASIN ${product.sku} is no longer the product we stored — dropping. `
+                + `Was "${product.name}", now "${data.name}"`);
+              this._denyIdentity(product.sku, data.name);
+              this._knownProducts.delete(product.sku);
+              this._lastInStockAt.delete(product.sku);
+              delete products[product.sku];
+              continue;
+            }
           }
           if (data && data.name && product.name && !sameProductName(product.name, data.name)) {
             logger.warn(`Amazon: ASIN ${product.sku} was relisted — "${product.name}" -> "${data.name}"`);
@@ -806,6 +895,11 @@ class AmazonAdapter extends BaseAdapter {
     // structured/offers call on the stalest search-invisible ASIN — the ones with no search tile,
     // which the sweep can never see. This is what guarantees a restock like B0H78BB9TY is caught.
     await this._runOffersLane(products);
+
+    // Priority offers lane: a dedicated round-robin over the hand-picked priorityAsins so the
+    // client's max-priority set gets a guaranteed tight cadence instead of waiting its turn in the
+    // stalest-first rotation above. Runs every poll; paces itself by PRIORITY_OFFERS_INTERVAL_MS.
+    await this._runPriorityOffersLane(products);
 
     // Carry forward anything this sweep did not surface — absence from a search page is
     // not evidence of going out of stock
@@ -974,11 +1068,18 @@ class AmazonAdapter extends BaseAdapter {
     // alone lets the next search tile re-admit the same wrong mapping (exactly what kept a magnesium
     // ASIN stamped as a Gardevoir deck alive poll after poll). Persisting the denial makes it stick.
     if (!isInScopeName(data.name)) {
-      logger.warn(`Amazon: offers-lane — ${target} live title out of scope ("${data.name.slice(0, 60)}") — denylisting`);
-      this._denyIdentity(target, data.name);
-      this._knownProducts.delete(target);
-      delete products[target];
-      return;
+      if (this.watchlist.has(target)) {
+        // Never denylist/drop a hand-picked ASIN — keep it tracked and let the delivery gate
+        // escalate a genuine divergence to admin. Fall through so its stock is still updated.
+        logger.warn(`Amazon: offers-lane — WATCHLIST ${target} live title out of scope `
+          + `("${data.name.slice(0, 60)}") — KEEPING (priority), delivery gate will escalate`);
+      } else {
+        logger.warn(`Amazon: offers-lane — ${target} live title out of scope ("${data.name.slice(0, 60)}") — denylisting`);
+        this._denyIdentity(target, data.name);
+        this._knownProducts.delete(target);
+        delete products[target];
+        return;
+      }
     }
 
     const cached = this._knownProducts.get(target) || {};
@@ -1011,6 +1112,95 @@ class AmazonAdapter extends BaseAdapter {
 
     logger.info(`Amazon: offers-lane — ${target} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`
       + ` (${this._offersToday}/${OFFERS_DAILY_CAP} credits today, oldest ${Math.round((now - oldest) / 60000)}min)`);
+  }
+
+  /**
+   * Dedicated offers loop for the hand-picked priorityAsins (the 10 OOS 30th Celebration items).
+   * Round-robins ONE paid structured/offers call per PRIORITY_OFFERS_INTERVAL_MS so every priority
+   * ASIN gets a guaranteed cadence (10 ASINs @ 6s ≈ 60s each; @ the shipped 18s ≈ 180s each),
+   * independent of the stalest-first general lane. Own daily cap so its spend is budgeted separately.
+   * Same fail-safes as the general lane — an unreadable payload or budget refusal no-ops and carries
+   * the cache forward, never flipping an ASIN OOS — except a priority ASIN is NEVER denylisted or
+   * dropped on a scope miss; the delivery-time gate escalates a genuine divergence to admin instead.
+   */
+  async _runPriorityOffersLane(products) {
+    if (!OFFERS_LANE_ENABLED || !PRIORITY_OFFERS_ENABLED) return;
+    if (!this._priorityAsins || this._priorityAsins.length === 0) return;
+    const now = Date.now();
+    if (now - this._lastPriorityOffersAt < this._priorityOffersIntervalMs) return;
+
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (this._priorityOffersDay !== day) { this._priorityOffersDay = day; this._priorityOffersToday = 0; }
+    if (this._priorityOffersToday >= PRIORITY_OFFERS_DAILY_CAP) {
+      // A priority lane that silently stops is the same class of failure as a silent drop. Say it
+      // once per day, unthrottled, so a hit cap (and thus paused priority detection) is visible.
+      if (this._priorityCapLoggedDay !== day) {
+        this._priorityCapLoggedDay = day;
+        logger.warn(`Amazon: PRIORITY offers lane hit its daily cap (${PRIORITY_OFFERS_DAILY_CAP}) — `
+          + 'priority restock detection is PAUSED until the UTC day rolls over. Raise '
+          + 'AMAZON_PRIORITY_OFFERS_DAILY_CAP or widen PRIORITY_OFFERS_INTERVAL_MS.');
+      }
+      return;
+    }
+
+    // Round-robin one ASIN per interval, cycling the whole list so none is starved.
+    const target = this._priorityAsins[this._priorityCursor % this._priorityAsins.length];
+    this._priorityCursor = (this._priorityCursor + 1) % this._priorityAsins.length;
+    if (!target) return;
+
+    this._lastPriorityOffersAt = now;
+    let json;
+    try { json = await this._fetchOffers(target); } catch { json = null; }
+    if (json === null) return; // budget refusal / HTTP error / timeout — carry forward, never OOS
+    this._priorityOffersToday += 1;
+
+    const data = this._offersToData(json);
+    if (!data) { // unreadable (no live title) — carry forward, NEVER read as OOS
+      logger.debug(`Amazon: priority-offers — ${target} unreadable payload, carried forward`);
+      return;
+    }
+
+    // NEVER denylist/drop a hand-picked ASIN on a scope miss (unlike the general lane). Keep it
+    // tracked and let the delivery gate escalate a genuine divergence. Logged so it is visible.
+    if (!isInScopeName(data.name)) {
+      logger.warn(`Amazon: priority-offers — ${target} live title reads out of scope `
+        + `("${data.name.slice(0, 60)}") — KEEPING (priority), delivery gate will escalate`);
+    }
+
+    const cached = this._knownProducts.get(target) || {};
+    // Adopt a relisted title only when it genuinely changed AND is still in scope. Adopting this
+    // also replaces the seeded "Amazon ASIN …" placeholder with the real title on the first read.
+    // Crucially, an OUT-OF-SCOPE live title is NOT adopted: keeping the stored name is what lets the
+    // delivery gate still see stored-vs-live divergence and escalate — adopting the wrong title would
+    // make them match and let a wrong-product alert through, defeating the whole never-drop escalation.
+    let name = cached.name;
+    let category = cached.category;
+    if (data.name && isInScopeName(data.name) && cached.name && !sameProductName(cached.name, data.name)) {
+      name = data.name;
+      const reclassified = this.classify({ name: data.name }).category;
+      if (reclassified !== 'other') category = reclassified;
+    } else if (data.name && isInScopeName(data.name) && !cached.name) {
+      name = data.name;
+    }
+
+    const product = {
+      ...cached,
+      sku: target,
+      name: name || cached.name || data.name,
+      category: category || cached.category || 'pokemon',
+      price: data.price || cached.price || 0,
+      inStock: data.inStock,
+      canAddToCart: data.inStock,
+      url: cached.url || `https://www.amazon.ca/dp/${target}`,
+      lastSeen: now,
+      _watchlist: true,
+    };
+    products[target] = product;
+    this._knownProducts.set(target, product);
+    if (data.inStock) this._lastInStockAt.set(target, now);
+
+    logger.info(`Amazon: priority-offers — ${target} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`
+      + ` (${this._priorityOffersToday}/${PRIORITY_OFFERS_DAILY_CAP} priority credits today)`);
   }
 
   /**
@@ -1415,12 +1605,17 @@ class AmazonAdapter extends BaseAdapter {
           // Checked against the shared scope rule, not a bespoke test, so an ASIN that stops
           // being a product we track leaves the same way any other out-of-scope product does.
           if (data.name && !isInScopeName(data.name)) {
-            logger.warn(`Amazon: ASIN ${asin} is no longer the product we stored — dropping. Was "${cached?.name}", now "${data.name}"`);
-            this._denyIdentity(asin, data.name);
-            this._knownProducts.delete(asin);
-            this._lastInStockAt.delete(asin);
-            delete products[asin];
-            continue;
+            if (this.watchlist.has(asin)) {
+              logger.warn(`Amazon: sweep — WATCHLIST ASIN ${asin} live title out of scope `
+                + `("${data.name.slice(0, 60)}") — KEEPING (priority), delivery gate will escalate`);
+            } else {
+              logger.warn(`Amazon: ASIN ${asin} is no longer the product we stored — dropping. Was "${cached?.name}", now "${data.name}"`);
+              this._denyIdentity(asin, data.name);
+              this._knownProducts.delete(asin);
+              this._lastInStockAt.delete(asin);
+              delete products[asin];
+              continue;
+            }
           }
 
           // Still in scope, but a relist can swap one tracked product for another — and a

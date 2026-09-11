@@ -465,11 +465,25 @@ class BaseAdapter {
       // Sorted so the kept subset is the SAME set every poll: with insertion order the
       // retained 500 rotated, which re-fired NEW_SKU for old products and left a 7-day
       // Redis key behind for every product that ever cycled through.
+      // Truncate to the cap, but NEVER drop a watchlist ASIN. The cap sorts keys and deletes the
+      // tail, and hand-picked ASINs (e.g. Amazon's B0H7* 30th Celebration set) sort LATE — so the
+      // plain cap silently deleted exactly the priority items before they could ever alert (they
+      // stay in the adapter's own map and are still stock-checked, but are stripped from the map
+      // handed to the poller, so their restock has nowhere to fire). Exempting them makes the
+      // effective cap maxProducts + (watchlist ∩ products), by design. Keyed off watched.has(sku)
+      // (the config Set) AND the _watchlist flag: the Set is the source of truth here and is set
+      // even before the flag is stamped, so cap-safety never depends on the stamp having run.
+      const watched = this.watchlist instanceof Set ? this.watchlist : new Set();
       const keys = Object.keys(products).sort();
       if (keys.length > this.maxProducts) {
-        logger.warn(`${this.name}: ${keys.length} products exceeds cap of ${this.maxProducts}, truncating`);
-        for (const key of keys.slice(this.maxProducts)) {
-          delete products[key];
+        const nonWatched = keys.filter((k) => !watched.has(String(k)) && !(products[k] && products[k]._watchlist));
+        const watchedCount = keys.length - nonWatched.length;
+        if (nonWatched.length > this.maxProducts) {
+          logger.warn(`${this.name}: ${keys.length} products exceeds cap of ${this.maxProducts}`
+            + `${watchedCount ? ` (${watchedCount} watchlist ASIN(s) exempt)` : ''}, truncating`);
+          for (const key of nonWatched.slice(this.maxProducts)) {
+            delete products[key];
+          }
         }
       }
       const elapsed = Date.now() - start;

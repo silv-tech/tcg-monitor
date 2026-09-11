@@ -38,6 +38,23 @@ const VERIFY_TIMEOUT_MS = Number(process.env.AMAZON_VERIFY_TIMEOUT_MS || 4000);
 
 const { sleep } = require('../utils/helpers');
 
+// Flood backstop for watchlist ASINs. Stamping _watchlist deliberately turns off every OTHER brake
+// for a priority item: the limiter is exempt (alert-limiter.js — "a flood of those means a real
+// drop, and they are already capped by the size of the watchlist"), the RESTOCK dedup window drops
+// from 600s to 45s (dedup.js WATCHLIST_RESTOCK_TTL, so genuine drop waves minutes apart each alert),
+// the queue is bypassed, and routing fans out to 3 channels. The limiter's "capped by the size of
+// the watchlist" assumption holds only while a SKU can alert at most once per 600s — the 45s TTL
+// removes it, so a single flapping buy box (confirmed OOS in ~12s, back moments later) could alert
+// every ~45s to 3 channels with nothing to stop it: the ZardoCards flood shape. This restores a
+// ceiling per ASIN WITHOUT lengthening the 45s TTL (which the wave behaviour needs): a rolling-hour
+// cap on DISPATCHED restock alerts per ASIN (the timestamp is recorded when we hand off to
+// routeEvent, i.e. it counts dispatch attempts, not confirmed sends — with a 45s dedup and a cap of
+// 8 the difference is immaterial). Over the cap we suppress THIS one but log it UNTHROTTLED, so a
+// capped priority alert is visible, never silent — the same principle as the identity escalation.
+const WATCHLIST_FLOOD_WINDOW_MS = 60 * 60 * 1000; // rolling hour, not calendar hour
+const WATCHLIST_FLOOD_MAX = Number(process.env.WATCHLIST_FLOOD_MAX) || 8; // sent restocks/ASIN/hour
+const WATCHLIST_FLOOD_TYPES = new Set(['RESTOCK', 'PREORDER_LIVE']);
+
 // Event priority for delivery ordering (#7) — lower number = higher priority
 const EVENT_PRIORITY = {
   RESTOCK: 0,
@@ -81,6 +98,7 @@ class DeliveryQueue {
     this.channelCache = new Map();
     this.pendingFreeCount = 0;
     this.inFlight = null;       // event currently being sent, for drain() to account for // track in-flight free-tier delays (best-effort, lost on restart)
+    this._wlRestockHistory = new Map(); // ASIN → recent SENT restock timestamps, for the flood cap
     // Injectable so the identity gate can be tested without a network call or an API key. The
     // fail-open path is the one that must be provable, and it is unprovable against a live fetch.
     this.verifyListing = (asin, storedName) => verifyAmazonListing(asin, { fetcher: offersFetcher, timeoutMs: VERIFY_TIMEOUT_MS, storedName });
@@ -166,6 +184,29 @@ class DeliveryQueue {
           logger.warn(`Alert suppressed by limiter (${verdict.suppressed} so far): ${event.type} — ${event.product?.name || 'unknown'}`);
         }
         continue;
+      }
+
+      // FLOOD BACKSTOP: a watchlist ASIN has every other brake off (see WATCHLIST_FLOOD_* above), so
+      // a flapping buy box could otherwise alert every ~45s forever. Cap SENT restock alerts per ASIN
+      // over a rolling hour. Placed HERE — after the limiter, before the _watchlist branch — because
+      // that branch calls routeEvent() directly and bypasses the queue, so a cap in processQueue would
+      // never see these 21 ASINs. A capped alert is suppressed but logged UNTHROTTLED (never silent),
+      // and marked sent (mirroring the scan-tier shape) so it can never enter a retry loop.
+      if (event.product?._watchlist && event.product.sku && !event._scanTier
+          && WATCHLIST_FLOOD_TYPES.has(event.type)) {
+        const sku = String(event.product.sku);
+        const nowTs = Date.now();
+        const hist = (this._wlRestockHistory.get(sku) || []).filter(t => nowTs - t < WATCHLIST_FLOOD_WINDOW_MS);
+        if (hist.length >= WATCHLIST_FLOOD_MAX) {
+          const p = event.product;
+          logger.warn(`WATCHLIST FLOOD CAP: suppressing ${event.type} for ${sku} — ${hist.length} `
+            + `restock alert(s) already dispatched in the last ${Math.round(WATCHLIST_FLOOD_WINDOW_MS / 60000)}min `
+            + `(likely a flapping buy box) | ${p.name || 'unknown'} | price=${p.price ?? '?'} | ${p.url || 'no url'}`);
+          markSent(event); // count as handled so events.js/poll-adapter cannot re-fire it in a loop
+          continue;
+        }
+        hist.push(nowTs);
+        this._wlRestockHistory.set(sku, hist);
       }
 
       if (event.product?._watchlist) {
@@ -405,6 +446,17 @@ class DeliveryQueue {
     // spent an hour unable to say what a mute had eaten.
     if (event._identity && event._identity.verdict === 'wrong-identity' && !event._scanTier) {
       const p = event.product || {};
+      // A hand-picked watchlist ASIN is the ONE case we must not silently drop — a silent drop is
+      // exactly the miss the priority list exists to prevent. But we also must not put a wrong-
+      // product buy link in a customer channel. So for a watchlist ASIN: ESCALATE to admin with the
+      // stored-vs-live divergence spelled out, and DO NOT denylist (it stays tracked). A divergent
+      // priority item going quiet becomes an operator notification, never a silent miss.
+      if (p._watchlist) {
+        logger.warn(`IDENTITY DIVERGENCE (watchlist — escalating to admin, NOT dropped): ${event.type} `
+          + `— stored "${p.name}" | live "${event._identity.title}" | sku=${p.sku} | ${event._identity.reason}`);
+        await this._escalateWatchlistDivergence(event); // self-contained try/catch — never throws here
+        return;
+      }
       logger.warn(`IDENTITY SUPPRESSED: ${event.type} — stored "${p.name}" | live "${event._identity.title}" `
         + `| sku=${p.sku} | ${event._identity.reason}`);
       state.denyIdentity('amazon', p.sku, `alert-time: ${event._identity.reason}`.slice(0, 200))
@@ -507,28 +559,46 @@ class DeliveryQueue {
       return;
     }
 
-    // --- WATCHLIST: high-priority, send to dedicated channel + admin ---
+    // --- WATCHLIST: high-priority ---
     if (product._watchlist) {
-      const watchCh = channelsConfig?.watchlistChannel;
-      const adminCh = channelsConfig?.adminChannel || config.discord.adminChannelId;
       const { embed, components } = buildAlertEmbed(event, 'paid');
-
-      // Watchlist channel (or admin if none) and the retailer channel are sent in parallel
-      const targetCh = watchCh || adminCh;
       const paidChannel = this.resolvePaidChannel(category, retailerId);
-      const sends = [];
-      if (targetCh) {
-        sends.push(this.sendToChannel(targetCh, embed, components, '🚨 **WATCHLIST ALERT** 🚨', 'paid'));
+      const WATCHLIST_HEADER = '🚨 **WATCHLIST ALERT** 🚨';
+
+      if (retailerId === 'amazon') {
+        // Amazon priority items post to the AMAZON channel (client's explicit choice), NOT the
+        // separate watchlist channel — the alert still carries the WATCHLIST header so it stands
+        // out. resolvePaidChannel returns the retailer channel before category, so a category:'other'
+        // priority row still resolves here. Divergent priority ASINs reach admin via the identity-
+        // escalation path instead. This branch is entirely separate so no other retailer's routing
+        // changes.
+        if (paidChannel) {
+          await this.sendToChannel(paidChannel, embed, components, WATCHLIST_HEADER, 'paid');
+          const e2e = event._detectedAt ? Date.now() - event._detectedAt : Date.now() - queuedAt;
+          logger.info(`WATCHLIST alert sent in ${e2e}ms: ${event.type} — ${product.name} (${product.sku})`);
+        } else {
+          logger.error(`WATCHLIST alert generated but no Amazon channel configured! SKU: ${product.sku}, Name: ${product.name}`);
+        }
       } else {
-        logger.error(`WATCHLIST alert generated but no target channel configured! SKU: ${product.sku}, Name: ${product.name}`);
-      }
-      if (paidChannel && paidChannel !== targetCh) {
-        sends.push(this.sendToChannel(paidChannel, embed, components, null, 'paid'));
-      }
-      await Promise.all(sends);
-      if (targetCh) {
-        const e2e = event._detectedAt ? Date.now() - event._detectedAt : Date.now() - queuedAt;
-        logger.info(`WATCHLIST alert sent in ${e2e}ms: ${event.type} — ${product.name} (${product.sku})`);
+        // Every other retailer: unchanged — watchlist channel (or admin if none) and the retailer
+        // channel are sent in parallel.
+        const watchCh = channelsConfig?.watchlistChannel;
+        const adminCh = channelsConfig?.adminChannel || config.discord.adminChannelId;
+        const targetCh = watchCh || adminCh;
+        const sends = [];
+        if (targetCh) {
+          sends.push(this.sendToChannel(targetCh, embed, components, WATCHLIST_HEADER, 'paid'));
+        } else {
+          logger.error(`WATCHLIST alert generated but no target channel configured! SKU: ${product.sku}, Name: ${product.name}`);
+        }
+        if (paidChannel && paidChannel !== targetCh) {
+          sends.push(this.sendToChannel(paidChannel, embed, components, null, 'paid'));
+        }
+        await Promise.all(sends);
+        if (targetCh) {
+          const e2e = event._detectedAt ? Date.now() - event._detectedAt : Date.now() - queuedAt;
+          logger.info(`WATCHLIST alert sent in ${e2e}ms: ${event.type} — ${product.name} (${product.sku})`);
+        }
       }
 
       const latency = Date.now() - queuedAt;
@@ -700,6 +770,43 @@ class DeliveryQueue {
     // each message gets its own attachment reference.
     const clone = EmbedBuilder.from(embed.data).setThumbnail(`attachment://${name}`);
     return { embed: clone, files: [new AttachmentBuilder(bytes, { name })] };
+  }
+
+  /**
+   * A watchlist ASIN whose live listing diverged from what we track: notify a human instead of
+   * silently dropping it (GAP A). Builds a MINIMAL, fully-validated EmbedBuilder — not
+   * buildAlertEmbed, which can throw on bad input (a thrown embed inside routeEvent skips markSent
+   * and retries forever) — and is wrapped so it never throws back to the caller. Divergence goes in
+   * the embed only; nothing here touches product.retailer or product.sku (the dedup base key).
+   */
+  async _escalateWatchlistDivergence(event) {
+    try {
+      const p = event.product || {};
+      const adminCh = channelsConfig?.adminChannel || config.discord.adminChannelId;
+      if (!adminCh) {
+        logger.warn(`Watchlist divergence for ${p.sku}: no admin channel configured to escalate to`);
+        return;
+      }
+      const s = (v, n) => String(v == null ? '' : v).slice(0, n) || '—';
+      const embed = new EmbedBuilder()
+        .setColor(0xffcc00)
+        .setTitle('⚠️ WATCHLIST IDENTITY DIVERGENCE — needs a human')
+        .setDescription('A priority ASIN\'s live listing no longer matches what we track. It was '
+          + 'NOT dropped (still watched) and NOT sent to customers. Check the link and update or '
+          + 'remove it from the watchlist as appropriate.')
+        .addFields(
+          { name: 'SKU', value: s(p.sku, 100) },
+          { name: 'Stored name', value: s(p.name, 1000) },
+          { name: 'Live title now', value: s(event._identity && event._identity.title, 1000) },
+          { name: 'Event / reason', value: s(`${event.type} — ${(event._identity && event._identity.reason) || ''}`, 1000) },
+          { name: 'Link', value: s(p.url || (p.sku ? `https://www.amazon.ca/dp/${p.sku}` : ''), 500) },
+        );
+      await this.sendToChannel(adminCh, embed, null, '⚠️ **Watchlist item needs review**', 'paid');
+      logger.info(`Watchlist divergence escalated to admin: sku=${p.sku}`);
+    } catch (err) {
+      // Never throw back into routeEvent — a throw there skips markSent and retries forever.
+      logger.warn(`Watchlist divergence escalation failed for ${event.product?.sku}: ${err.message}`);
+    }
   }
 
   async sendToChannel(channelId, embed, components, content, tier) {
