@@ -84,34 +84,44 @@ async function readOne(item) {
   if (looksBlocked(html, res)) return { blocked: true, why: res.status === 429 ? 'HTTP 429' : `challenge (${html.length}b)` };
   // A short body that is NOT a challenge is one bad response, not a wall. Skip the product
   // and carry on; stopping the whole bridge for a blip cost half an hour of reads.
-  if (html.length < 5000) return { miss: true };
+  //
+  // Every miss reports WHY. "20 pages parsed nothing" was a true statement that identified
+  // nothing: a short body, an unparseable page and a thrown fetch all looked identical, so
+  // diagnosing it meant guessing. The reason costs one string and ends the guessing.
+  if (html.length < 5000) return { miss: `http${res.status} short ${html.length}b` };
   const ld = extractProductLd(html);
-  if (!ld) return { miss: true };
+  if (!ld) return { miss: `http${res.status} no-ld ${Math.round(html.length / 1024)}kb` };
   return { record: { sku: item.sku, ld } };
 }
 
 /** Run the batch with a small pool, so a cycle is not a burst. */
 async function readBatch(items, concurrency) {
   const out = [];
+  const why = {};                       // miss reason -> count
   let blocked = null;
   let misses = 0;
   let next = 0;
+  const note = (r) => { misses++; why[r] = (why[r] || 0) + 1; };
   async function worker() {
     while (next < items.length && !blocked) {
       const item = items[next++];
       try {
         const r = await readOne(item);
         if (r.blocked) { blocked = r.why; break; }
-        if (r.miss) misses++;
+        if (r.miss) note(r.miss);
         else out.push(r.record);
       } catch (err) {
-        misses++;
+        // A thrown fetch is its own diagnosis and used to be indistinguishable from a page
+        // that simply parsed nothing.
+        note(`threw: ${String(err && err.message).slice(0, 40)}`);
       }
       await sleep(200 + Math.floor(Math.random() * 400));
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(6, concurrency)) }, worker));
-  return { records: out, blocked, misses };
+  const summary = Object.entries(why).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${v}x ${k}`).join(' | ');
+  return { records: out, blocked, misses, summary };
 }
 
 async function cycle() {
@@ -122,7 +132,7 @@ async function cycle() {
   if (!work.enabled) { await sleep(60000); return cycle(); }
   if (!work.items || work.items.length === 0) { await sleep(60000); return cycle(); }
 
-  const { records, blocked, misses } = await readBatch(work.items, work.concurrency || 2);
+  const { records, blocked, misses, summary } = await readBatch(work.items, work.concurrency || 2);
 
   if (records.length > 0) await send({ type: 'pc-results', records });
 
@@ -134,7 +144,7 @@ async function cycle() {
   if (misses > 0 && records.length === 0) {
     // Nothing parsed at all. Either the markup moved or something is wrong with this session;
     // either way, backing off beats hammering.
-    await send({ type: 'pc-note', text: `${misses} pages parsed nothing — backing off` });
+    await send({ type: 'pc-note', text: `${misses} read nothing — ${summary}` });
     await sleep(ERROR_BACKOFF_MS);
     return cycle();
   }
