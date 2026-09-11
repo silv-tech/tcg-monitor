@@ -747,6 +747,15 @@ class ShopifyAdapter extends BaseAdapter {
           // stamping here keeps the dedup key stable (deliver() normalises before filterDuplicates).
           retailerId: this.id,
           retailer: this.name,
+          // lastSeen must be stamped even though classify() is skipped. poll-adapter's
+          // confirmations ask "is this a genuine re-read, or a row replayed from cache?" by
+          // comparing lastSeen against the previous observation. A row that never carries the
+          // field would answer "replayed" forever, the out-of-stock hold would pin
+          // inStock:true permanently, and this shop could never record a sell-out. That is
+          // exactly the shape this lane produces for a product NOT on page 1 — its whole
+          // reason to exist — so the omission would be silent and total. The guard also fails
+          // open on a missing value, but both halves are needed: this is the honest signal.
+          lastSeen: Date.now(),
         };
         refreshed++;
       }

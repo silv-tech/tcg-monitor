@@ -4,7 +4,7 @@ const { diffProducts, EVENT_TYPES } = require('./events');
 const { recordPollLatency } = require('./proxy');
 
 const { recordProductCount } = require('../monitoring/health');
-const { pollAdapterOnce } = require('./poll-adapter');
+const { pollAdapterOnce, confirmObservation } = require('./poll-adapter');
 const autotune = require('./autotune');
 const speedGuard = require('../monitoring/speed-guard');
 const { isSelfSkip, isRateLimited } = require('../utils/stealth-http');
@@ -186,7 +186,33 @@ class Scheduler {
 
         if (oldProduct) {
           // Already known — check for stock changes (RESTOCK, PRICE_CHANGE)
-          const events = diffProducts({ [key]: oldProduct }, { [key]: product });
+          //
+          // Through the SAME confirmation guards the full poll uses. This lane had none, and it is
+          // the lane with the fewest brakes of any in the system: fetchProductPage stamps
+          // _watchlist, which exempts the row from the rate limiter, cuts the dedup window from
+          // 600s to 45s, bypasses the queue and fans the alert out to extra channels. A flicker
+          // read here reaches the client's channel faster and in more places than anywhere else,
+          // so it is the last place that should be believing a single observation.
+          //
+          // It also stopped the bookkeeping fields from ever being stored: writing `product`
+          // straight to state dropped _oosStreak, _steepDropStreak and _missingStreak, so even a
+          // streak the full poll had built up was reset by the next fast poll. Storing the
+          // confirmed row keeps them.
+          const confirmed = confirmObservation(product, oldProduct, adapter.name, key);
+          let events = diffProducts({ [key]: oldProduct }, { [key]: confirmed });
+
+          // A correction of an unverified price is not a sale — same suppression as the full poll.
+          const corrected = events.filter((e) => e.type === EVENT_TYPES.PRICE_CHANGE
+            && e.product && e.product._priceCorrected);
+          if (corrected.length > 0) {
+            events = events.filter((e) => !corrected.includes(e));
+            for (const e of corrected) {
+              logger.warn(`${adapter.name}: suppressed a watchlist price-change alert for `
+                + `${e.product.sku} — ${e.oldValue} -> ${e.newValue} was a correction of an `
+                + `unverified price, not a sale`);
+            }
+          }
+
           if (events.length > 0) {
             for (const event of events) {
               event._detectedAt = fetchStart;
@@ -205,8 +231,10 @@ class Scheduler {
               await this.onEvents(events);
             }
           }
-          // Always update state with latest data
-          await state.setProduct(adapter.id, key, product);
+          // Always update state with latest data — the CONFIRMED row, so a hold in progress and
+          // its streak counters survive to the next poll. Storing the raw read instead would
+          // discard the hold and let the unconfirmed value become the new baseline.
+          await state.setProduct(adapter.id, key, confirmed);
         } else {
           // NEW product from watchlist — fire NEW_SKU event
           const events = diffProducts({}, { [key]: product });
