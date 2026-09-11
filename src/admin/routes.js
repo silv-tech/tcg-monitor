@@ -105,6 +105,7 @@ router.post('/ingest/pokemoncenter', express.json({ limit: '8mb' }), async (req,
   try {
     const result = await adapter.ingestPushed((req.body && req.body.records) || []);
     logger.info(`Pokemon Center: PUSH — ${result.accepted} read, ${result.changed} changed`
+      + `${result.seeded ? `, ${result.seeded} first-read (seeded, no alert)` : ''}`
       + `${result.rejected ? `, ${result.rejected} rejected` : ''}`);
     return res.json({ ok: true, ...result });
   } catch (err) {

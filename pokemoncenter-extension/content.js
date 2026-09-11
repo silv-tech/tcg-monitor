@@ -53,24 +53,38 @@ function extractProductLd(html) {
 }
 
 /**
- * Is this a bot wall rather than a page?
+ * Is this a bot wall, or just a page we did not get?
  *
- * Deliberately NOT keyed on the word "datadome" or on captcha-delivery alone: those scripts load
- * on perfectly good Pokemon Center pages, and the monitor's own adapter carries a note about
- * exactly that mistake throwing away every real page. The reliable signals are a body far too
- * small to be a product page, or a redirect away from the product URL.
+ * The first version answered "anything under 5000 bytes is a block" and escalated a single
+ * short response into a 30-minute halt. That was wrong twice over, measured 2026-09-11: one
+ * 1053-byte response stopped the bridge for half an hour, the user saw no challenge at all, and
+ * the very next cycles fetched normally — a real challenge does not heal itself. Re-fetching the
+ * same URLs afterwards returned 200 and ~459KB every time.
+ *
+ * So a block has to be identified by WHAT came back, not how much. Two honest signals:
+ *   - HTTP 429, which needs no interpretation
+ *   - a body too small to be a product page AND carrying challenge markup AND carrying no
+ *     product data
+ *
+ * The markers alone are not enough: DataDome's scripts load on perfectly good Pokemon Center
+ * pages, and the monitor's own adapter carries a note about that exact mistake discarding every
+ * real page. All three conditions together is what makes it a wall.
  */
-function looksBlocked(html, res, wantedUrl) {
-  if (!html || html.length < 5000) return true;
-  if (res && res.redirected && !res.url.includes('/product/')) return true;
-  return false;
+function looksBlocked(html, res) {
+  if (res && res.status === 429) return true;
+  if (!html) return true;
+  if (html.length >= 5000) return false;
+  const challenged = /captcha-delivery|geo\.captcha|Pardon Our Interruption|Just a moment/i.test(html);
+  return challenged;
 }
 
 async function readOne(item) {
   const res = await fetch(item.url, { credentials: 'include', redirect: 'follow' });
   const html = await res.text();
-  if (res.status === 429) return { blocked: true, why: 'HTTP 429' };
-  if (looksBlocked(html, res, item.url)) return { blocked: true, why: `short body (${html.length}b)` };
+  if (looksBlocked(html, res)) return { blocked: true, why: res.status === 429 ? 'HTTP 429' : `challenge (${html.length}b)` };
+  // A short body that is NOT a challenge is one bad response, not a wall. Skip the product
+  // and carry on; stopping the whole bridge for a blip cost half an hour of reads.
+  if (html.length < 5000) return { miss: true };
   const ld = extractProductLd(html);
   if (!ld) return { miss: true };
   return { record: { sku: item.sku, ld } };

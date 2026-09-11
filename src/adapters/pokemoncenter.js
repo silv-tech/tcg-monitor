@@ -266,8 +266,52 @@ class PokemonCenterAdapter extends BaseAdapter {
    * happens HERE, through the same parseJsonLd the paid path used, so there is no second copy
    * of the extraction to drift out of step with the site.
    *
-   * @returns {{accepted:number, rejected:number, changed:number}}
+   * @returns {{accepted:number, rejected:number, changed:number, seeded:number}}
    */
+  /** The one place a Pokemon Center product row is shaped, so a seed cannot drift from a poll. */
+  _buildRow(sku, meta, avail) {
+    const a = avail || { inStock: false, price: null, image: '' };
+    return this.classify({
+      sku,
+      name: meta.name,
+      price: a.price,
+      currency: 'CAD',
+      url: meta.url,
+      image: a.image || '',
+      inStock: a.inStock,
+      canAddToCart: a.inStock,
+      shipsToHome: true,
+    });
+  }
+
+  /**
+   * Write a product's FIRST known stock straight to Redis, so learning it is not an event.
+   *
+   * Every product starts life recorded `inStock:false`, because that is the honest default for
+   * one nobody has read yet. The first real read then looks exactly like a restock to the diff:
+   * stored false, reported true. It is not one — the product may have been on the shelf for
+   * months; we simply had never looked.
+   *
+   * That distinction did not matter while the catalogue was 805 hand-filtered TCG products with
+   * a paid checker crawling them slowly. It matters enormously at 8,415 with a browser reading
+   * them in bulk: measured 2026-09-11, the bridge's first minutes produced "5 read, 5 changed"
+   * and five events, 1:1, every one a false restock into the client's channel.
+   *
+   * So seed the row before the diff can see it — the same thing EB Games' _seedRedis does for
+   * the same reason. Only ever on the FIRST read: once a product has a known stock value, a
+   * later change is a real transition and must alert.
+   */
+  async _seedFirstRead(sku, avail) {
+    const meta = this.sitemapProducts.get(sku);
+    if (!meta) return;
+    try {
+      await state.setProduct(this.id, sku, this._buildRow(sku, meta, avail));
+    } catch (err) {
+      // Not fatal: worst case the diff raises one first-sighting event for this product.
+      logger.debug(`Pokemon Center: could not seed ${sku}: ${err.message}`);
+    }
+  }
+
   async ingestPushed(records) {
     if (!Array.isArray(records) || records.length === 0) throw new Error('no records');
     if (records.length > 500) throw new Error(`too many records (${records.length} > 500)`);
@@ -275,6 +319,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     let accepted = 0;
     let rejected = 0;
     let changed = 0;
+    let seeded = 0;   // first-ever reads: recorded, never alerted on
 
     for (const rec of records) {
       const sku = rec && typeof rec.sku === 'string' ? rec.sku.trim() : '';
@@ -291,15 +336,21 @@ class PokemonCenterAdapter extends BaseAdapter {
       if (!parsed) { rejected++; this._noteCheckOutcome(sku, false); continue; }
 
       const prev = this.availabilityCache.get(sku);
-      if (!prev || prev.inStock !== parsed.inStock || prev.price !== parsed.price) changed++;
+      if (prev && (prev.inStock !== parsed.inStock || prev.price !== parsed.price)) changed++;
+      else if (!prev) seeded++;
 
-      this.availabilityCache.set(sku, {
+      const avail = {
         inStock: parsed.inStock,
         price: parsed.price,
         image: parsed.image,
         checkedAt: Date.now(),
         source: 'bridge',
-      });
+      };
+      this.availabilityCache.set(sku, avail);
+
+      // First time anyone has read this product: record it without letting the diff call it a
+      // restock. See _seedFirstRead — "changed" now means a genuine transition, not a discovery.
+      if (!prev) await this._seedFirstRead(sku, avail);
       // A successful read clears the fail streak and un-parks the SKU in one step.
       this._noteCheckOutcome(sku, true);
       accepted++;
@@ -310,7 +361,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       this._pushes = (this._pushes || 0) + 1;
       await this._saveAvailability();
     }
-    return { accepted, rejected, changed };
+    return { accepted, rejected, changed, seeded };
   }
 
   _noteCheckOutcome(sku, ok) {
@@ -580,18 +631,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     // leaving them here referenced a batch size that no longer exists and threw
     // "batchSize is not defined" on every poll.
     for (const [sku, meta] of this.sitemapProducts) {
-      const avail = this.availabilityCache.get(sku) || { inStock: false, price: null, image: '' };
-      products[sku] = this.classify({
-        sku,
-        name: meta.name,
-        price: avail.price,
-        currency: 'CAD',
-        url: meta.url,
-        image: avail.image || '',
-        inStock: avail.inStock,
-        canAddToCart: avail.inStock,
-        shipsToHome: true,
-      });
+      products[sku] = this._buildRow(sku, meta, this.availabilityCache.get(sku));
     }
 
     // Freshness must describe STOCK DETECTION, not the sitemap.

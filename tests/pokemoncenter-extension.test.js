@@ -8,11 +8,14 @@
  *      whose own page says InStock, with the listing also quoting USD instead of CAD. Accepting
  *      those would write false stock for the whole store.
  *
- *   2. What counts as a block. NOT the presence of "datadome" or "captcha-delivery": those
- *      scripts load on perfectly good Pokemon Center pages — verified, the working category page
- *      contains DataDome markers — and the monitor's own adapter carries a note about that exact
- *      mistake discarding every real page. The measured discriminator is size: a challenged
- *      response was 859 bytes, a real product page 440-451KB.
+ *   2. What counts as a block. Two traps here, and the first version fell into both.
+ *      NOT the presence of "datadome" or "captcha-delivery": those scripts load on perfectly
+ *      good pages — verified on the working category page — and the adapter carries a note about
+ *      that exact mistake discarding every real page.
+ *      And NOT size alone either: "under 5000 bytes = blocked" halted the bridge for 30 minutes
+ *      over one 1053-byte response. The user saw no challenge, the next cycles fetched normally,
+ *      and re-fetching those URLs returned 200/459KB. A real challenge does not heal itself.
+ *      A block is HTTP 429, or a body both too small to be a page AND carrying challenge markup.
  */
 
 const { test, describe } = require('node:test');
@@ -103,33 +106,37 @@ describe('extracting the product ld+json', () => {
 });
 
 describe('deciding whether we were blocked', () => {
-  test('the measured challenge response is caught', () => {
-    assert.strictEqual(looksBlocked('x'.repeat(859), { redirected: false, url: 'u' }), true,
-      '859 bytes is the exact size DataDome returned to a credentials-omitted fetch');
+  // The first version answered "under 5000 bytes = blocked" and halted for 30 minutes on a
+  // single 1053-byte response. Measured 2026-09-11: the user saw no challenge, the next cycles
+  // fetched normally, and re-fetching the same URLs returned 200/459KB every time. A real
+  // challenge does not heal itself — so size alone is not evidence, and a lone short body must
+  // cost one product, not half an hour of reads.
+  const CHALLENGE = '<html><head><script src="https://geo.captcha-delivery.com/captcha/"></script>'
+    + '</head><body>Please enable JS</body></html>';
+
+  test('a genuine challenge page is caught', () => {
+    assert.strictEqual(looksBlocked(CHALLENGE, { status: 200 }), true);
   });
 
-  test('a real product page is NOT treated as blocked, DataDome scripts and all', () => {
+  test('HTTP 429 is a block whatever the body says', () => {
+    assert.strictEqual(looksBlocked('x'.repeat(50000), { status: 429 }), true);
+  });
+
+  test('a SHORT body that is not a challenge is NOT a block', () => {
+    assert.strictEqual(looksBlocked('x'.repeat(1053), { status: 200 }), false,
+      '1053 bytes with no challenge markup halted the bridge for 30 minutes for nothing');
+  });
+
+  test('a real product page is never a block, DataDome scripts and all', () => {
     const html = page([REAL_PRODUCT])
       + '<script src="https://js.captcha-delivery.com/x.js"></script>datadome';
-    assert.strictEqual(looksBlocked(html, { redirected: false, url: 'https://www.pokemoncenter.com/en-ca/product/x/y' }), false,
+    assert.strictEqual(looksBlocked(html, { status: 200 }), false,
       'these scripts load on GOOD pages — keying on them discards every real page');
   });
 
-  test('an empty body is blocked', () => {
-    assert.strictEqual(looksBlocked('', { redirected: false, url: 'u' }), true);
-    assert.strictEqual(looksBlocked(null, { redirected: false, url: 'u' }), true);
-  });
-
-  test('a redirect away from the product is blocked', () => {
-    assert.strictEqual(
-      looksBlocked('y'.repeat(20000), { redirected: true, url: 'https://www.pokemoncenter.com/en-ca/interstitial' }),
-      true);
-  });
-
-  test('a redirect that still lands on a product is fine — slug changes happen', () => {
-    assert.strictEqual(
-      looksBlocked('y'.repeat(20000), { redirected: true, url: 'https://www.pokemoncenter.com/en-ca/product/x/new-slug' }),
-      false);
+  test('an empty body is a block', () => {
+    assert.strictEqual(looksBlocked('', { status: 200 }), true);
+    assert.strictEqual(looksBlocked(null, { status: 200 }), true);
   });
 });
 

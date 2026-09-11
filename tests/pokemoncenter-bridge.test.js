@@ -43,6 +43,10 @@ function adapter(skus = ['A1', 'A2', 'A3']) {
     url: 'https://www.pokemoncenter.com', intervalMs: 8000,
   });
   a._saveAvailability = async () => {};
+  // Seeding writes through state.setProduct, whose real getRedis() builds an ioredis client
+  // whose retry socket keeps `node --test` alive forever. The seeding BEHAVIOUR has its own
+  // suite below, which spies on this method.
+  a._seedFirstRead = async () => {};
   a.sitemapProducts = new Map(skus.map((s) => [s, {
     url: `https://www.pokemoncenter.com/en-ca/product/${s}/slug-${s}`, name: `Product ${s}`,
   }]));
@@ -272,5 +276,79 @@ describe('the sitemap lists every SKU in several languages', () => {
     const got = a.sitemapProducts.get('70-11607');
     assert.strictEqual(got.url, 'https://www.pokemoncenter.com/en-ca/product/70-11607/poke-ball-classic-clog-by-crocs-kids');
     assert.strictEqual(got.name, 'Poke Ball Classic Clog By Crocs Kids');
+  });
+});
+
+describe('learning a product stock is not a restock', () => {
+  // What actually happened on 2026-09-11, minutes after the bridge was first enabled:
+  //   PUSH — 5 read, 5 changed  ->  5 event(s) detected
+  //   PUSH — 3 read, 3 changed  ->  2 event(s) detected
+  // 100% "changed" is not stock moving. Every product is recorded inStock:false until somebody
+  // reads it, so the FIRST read of one that is genuinely on the shelf looks exactly like
+  // false -> true. It is not a restock; nothing moved, we had simply never looked. Those alerts
+  // went to a live client channel.
+  const seedCalls = [];
+  const withSeedSpy = () => {
+    const b = adapter();
+    seedCalls.length = 0;
+    b._seedFirstRead = async (sku, avail) => { seedCalls.push({ sku, inStock: avail.inStock }); };
+    return b;
+  };
+
+  test('a first-ever read is SEEDED, not counted as a change', async () => {
+    const b = withSeedSpy();
+    const r = await b.ingestPushed([{ sku: 'A1', ld: ld({ availability: 'InStock' }) }]);
+    assert.strictEqual(r.seeded, 1);
+    assert.strictEqual(r.changed, 0, 'discovering stock is not a transition');
+    assert.deepStrictEqual(seedCalls, [{ sku: 'A1', inStock: true }],
+      'the row must be written to Redis before the diff can call it a restock');
+  });
+
+  test('a SECOND read that actually moves IS a change, and is not re-seeded', async () => {
+    const b = withSeedSpy();
+    await b.ingestPushed([{ sku: 'A1', ld: ld({ availability: 'OutOfStock' }) }]);
+    seedCalls.length = 0;
+
+    const r = await b.ingestPushed([{ sku: 'A1', ld: ld({ availability: 'InStock' }) }]);
+    assert.strictEqual(r.changed, 1, 'a real restock must still alert — that is the product');
+    assert.strictEqual(r.seeded, 0);
+    assert.deepStrictEqual(seedCalls, [], 'seeding twice would silence a genuine restock');
+  });
+
+  test('an unchanged re-read is neither seeded nor changed', async () => {
+    const b = withSeedSpy();
+    await b.ingestPushed([{ sku: 'A1', ld: ld({ availability: 'InStock' }) }]);
+    seedCalls.length = 0;
+    const r = await b.ingestPushed([{ sku: 'A1', ld: ld({ availability: 'InStock' }) }]);
+    assert.deepStrictEqual({ changed: r.changed, seeded: r.seeded }, { changed: 0, seeded: 0 });
+  });
+
+  test('a whole first batch seeds every product and raises nothing', async () => {
+    const b = withSeedSpy();
+    const r = await b.ingestPushed([
+      { sku: 'A1', ld: ld({ availability: 'InStock' }) },
+      { sku: 'A2', ld: ld({ availability: 'InStock' }) },
+      { sku: 'A3', ld: ld({ availability: 'OutOfStock' }) },
+    ]);
+    assert.deepStrictEqual({ accepted: r.accepted, changed: r.changed, seeded: r.seeded },
+      { accepted: 3, changed: 0, seeded: 3 },
+      'the first sweep of 8,415 products must be silent, not 8,415 alerts');
+  });
+
+  test('a Redis failure during seeding does not lose the read', async () => {
+    // The realistic fault: Redis is unreachable, so the write inside _seedFirstRead rejects.
+    // Worst case is one first-sighting event for this product — never a dropped read.
+    const state = require('../src/core/state');
+    const real = state.setProduct;
+    state.setProduct = async () => { throw new Error('redis down'); };
+    try {
+      const b = adapter();
+      delete b._seedFirstRead;               // use the real one, so its own catch is exercised
+      const r = await b.ingestPushed([{ sku: 'A1', ld: ld() }]);
+      assert.strictEqual(r.accepted, 1, 'the stock read still lands even if seeding cannot');
+      assert.strictEqual(b.availabilityCache.get('A1').inStock, true);
+    } finally {
+      state.setProduct = real;
+    }
   });
 });
