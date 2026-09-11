@@ -83,7 +83,7 @@
     "adapter": "pokemoncenter",
     "intervalMs": 8000,
     "proxyTier": "residential",
-    "enabled": true,
+    "enabled": false,
     "color": "#ffcb05",
     "timing": {
       "checksPerPoll": 4,
@@ -96,10 +96,8 @@
     },
     "parseCanary": false,
     "_parseCanaryNote": "sitemap catalogue has no prices until a product is paid-checked",
-    "trackAllProducts": true,
-    "_trackAllProductsNote": "client asked 2026-09-11 to track the WHOLE store, not just TCG. Skips the tcgKeywords slug prefilter and isInScopeName in _parseSitemap, forces isTCG/category in classify (delivery.js drops isTCG===false and routes no 'other' category), and disables the out-of-scope purge. PC only — the other 17 retailers are untouched.",
-    "maxProducts": 12000,
-    "_maxProductsNote": "MEASURED 2026-09-11: sitemaps/products.xml carries 34,572 product URLs = 8,415 DISTINCT SKUs. This is 43% headroom over that. It is NOT a count of anything live — base.js sorts SKUs alphabetically and SILENTLY DELETES everything past this cap on every poll, which is exactly how the Amazon 30th Celebration drops were missed. PC SKUs cluster by prefix (699-* is 42% of the old TCG catalogue, bundle* sorts last), so a low cap wipes whole families including watchlist SKUs. Raise this BEFORE the catalogue reaches it; it is constructor-only, so it needs a deploy.",
+    "maxProducts": 1400,
+    "_maxProductsNote": "PC sitemap carries ~1195 TCG products; the default 500 cap hid ~695 of them. The WHOLE store is 8,415 distinct SKUs (measured 2026-09-11) — raise this BEFORE widening scope again, or base.js silently deletes the alphabetical tail every poll.",
     "watchlist": [
       "10-10035-115",
       "10-10193-102",
@@ -158,7 +156,8 @@
       "10-10118-101",
       "10-10399-112",
       "191-85953"
-    ]
+    ],
+    "_disabledNote": "Disabled 2026-09-11 at the client's request to rebuild Pokemon Center from scratch. Bright Data is also suspended, so nothing could read stock anyway."
   },
   {
     "_phase": 2,
@@ -380,7 +379,10 @@
     "proxyTier": "isp",
     "enabled": true,
     "color": "#9b59b6",
-    "extraGameNames": ["dragon ball", "dbs "],
+    "extraGameNames": [
+      "dragon ball",
+      "dbs "
+    ],
     "maxProducts": 8000,
     "collections": [],
     "searchKeywords": [

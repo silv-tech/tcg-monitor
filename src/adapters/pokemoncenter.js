@@ -271,51 +271,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     logger.info(`Pokemon Center: parking ${sku} for ${UNFETCHABLE_COOLDOWN_MS / 3600000}h — ${reason}`);
   }
 
-  /**
-   * Hand the browser bridge the next products to read, stalest first.
-   *
-   * The bridge exists because pokemoncenter.com is behind DataDome, which refuses every HTTP
-   * client and every proxy — but NOT a real browser. Measured 2026-09-11 in the user's own
-   * Chrome: a same-origin fetch of a product page returns the full server HTML with correct
-   * ld+json (`sku`, real `offers.availability`, `price`, `priceCurrency: CAD`), and four in
-   * parallel completed in 3.6s with no challenge. That is ~1.1 products/sec, so the whole
-   * 8,415-product catalogue is readable in ~2.1 hours. The paid transport it replaces manages
-   * 1,459 checks/day — 21 DAYS for one pass — which is why no amount of budget could deliver
-   * "track every product" and a browser can.
-   *
-   * Ordering is the same rule the paid rotation used: never-checked first, then stalest. The
-   * cache is the clock, and it is persisted, so progress survives a restart.
-   *
-   * This is a READ. It is deliberately a GET so the bridge polling for work cannot consume the
-   * 30-writes-per-minute-per-IP budget that the pushes themselves need.
-   */
-  getWorkBatch(limit = 100) {
-    const n = Math.max(1, Math.min(500, Number(limit) || 100));
-    const now = Date.now();
-    const candidates = [];
-    for (const [sku, meta] of this.sitemapProducts) {
-      // Parking is a Bright Data artifact — it counts unlock failures, and `expect_element`
-      // parks on a selector the unlocker never saw. None of that describes a browser, so a
-      // parked SKU is still perfectly readable here and must not be skipped.
-      const cached = this.availabilityCache.get(sku);
-      candidates.push([sku, (cached && cached.checkedAt) || 0, meta.url]);
-    }
-    candidates.sort((a, b) => a[1] - b[1]);
-    return candidates.slice(0, n).map(([sku, checkedAt, url]) => ({ sku, url, checkedAt }));
-  }
-
-  /**
-   * Accept stock read by the browser.
-   *
-   * Records are `{ sku, ld }`, where `ld` is the raw text of the product page's ld+json block.
-   * The bridge sends that block rather than the page: a PC product page is ~440KB but its
-   * ld+json is ~1.3KB, so a full catalogue pass is ~11MB instead of ~3.7GB. Parsing still
-   * happens HERE, through the same parseJsonLd the paid path used, so there is no second copy
-   * of the extraction to drift out of step with the site.
-   *
-   * @returns {{accepted:number, rejected:number, changed:number, seeded:number}}
-   */
-  /** The one place a Pokemon Center product row is shaped, so a seed cannot drift from a poll. */
+  /** The one place a Pokemon Center product row is shaped. */
   _buildRow(sku, meta, avail) {
     const a = avail || { inStock: false, price: null, image: '' };
     return this.classify({
@@ -329,86 +285,6 @@ class PokemonCenterAdapter extends BaseAdapter {
       canAddToCart: a.inStock,
       shipsToHome: true,
     });
-  }
-
-  /**
-   * Write a product's FIRST known stock straight to Redis, so learning it is not an event.
-   *
-   * Every product starts life recorded `inStock:false`, because that is the honest default for
-   * one nobody has read yet. The first real read then looks exactly like a restock to the diff:
-   * stored false, reported true. It is not one — the product may have been on the shelf for
-   * months; we simply had never looked.
-   *
-   * That distinction did not matter while the catalogue was 805 hand-filtered TCG products with
-   * a paid checker crawling them slowly. It matters enormously at 8,415 with a browser reading
-   * them in bulk: measured 2026-09-11, the bridge's first minutes produced "5 read, 5 changed"
-   * and five events, 1:1, every one a false restock into the client's channel.
-   *
-   * So seed the row before the diff can see it — the same thing EB Games' _seedRedis does for
-   * the same reason. Only ever on the FIRST read: once a product has a known stock value, a
-   * later change is a real transition and must alert.
-   */
-  async _seedFirstRead(sku, avail) {
-    const meta = this.sitemapProducts.get(sku);
-    if (!meta) return;
-    try {
-      await state.setProduct(this.id, sku, this._buildRow(sku, meta, avail));
-    } catch (err) {
-      // Not fatal: worst case the diff raises one first-sighting event for this product.
-      logger.debug(`Pokemon Center: could not seed ${sku}: ${err.message}`);
-    }
-  }
-
-  async ingestPushed(records) {
-    if (!Array.isArray(records) || records.length === 0) throw new Error('no records');
-    if (records.length > 500) throw new Error(`too many records (${records.length} > 500)`);
-
-    let accepted = 0;
-    let rejected = 0;
-    let changed = 0;
-    let seeded = 0;   // first-ever reads: recorded, never alerted on
-
-    for (const rec of records) {
-      const sku = rec && typeof rec.sku === 'string' ? rec.sku.trim() : '';
-      const ld = rec && typeof rec.ld === 'string' ? rec.ld : '';
-      if (!sku || !ld) { rejected++; continue; }
-
-      // Only ever write stock for a product the sitemap actually lists. A mis-targeted tab
-      // would otherwise write one product's stock under another's SKU, straight into a paid
-      // alert source.
-      if (!this.sitemapProducts.has(sku)) { rejected++; continue; }
-
-      // parseJsonLd expects a document to scan, not a bare JSON object.
-      const parsed = this._parseProductHtml(`<script type="application/ld+json">${ld}</script>`);
-      if (!parsed) { rejected++; this._noteCheckOutcome(sku, false); continue; }
-
-      const prev = this.availabilityCache.get(sku);
-      if (prev && (prev.inStock !== parsed.inStock || prev.price !== parsed.price)) changed++;
-      else if (!prev) seeded++;
-
-      const avail = {
-        inStock: parsed.inStock,
-        price: parsed.price,
-        image: parsed.image,
-        checkedAt: Date.now(),
-        source: 'bridge',
-      };
-      this.availabilityCache.set(sku, avail);
-
-      // First time anyone has read this product: record it without letting the diff call it a
-      // restock. See _seedFirstRead — "changed" now means a genuine transition, not a discovery.
-      if (!prev) await this._seedFirstRead(sku, avail);
-      // A successful read clears the fail streak and un-parks the SKU in one step.
-      this._noteCheckOutcome(sku, true);
-      accepted++;
-    }
-
-    if (accepted > 0) {
-      this._lastPushAt = Date.now();
-      this._pushes = (this._pushes || 0) + 1;
-      await this._saveAvailability();
-    }
-    return { accepted, rejected, changed, seeded };
   }
 
   _noteCheckOutcome(sku, ok) {
@@ -997,16 +873,12 @@ class PokemonCenterAdapter extends BaseAdapter {
       const sku = parts[parts.length - 2] || '';
       if (!sku || !slug) continue;
 
-      // Two gates, both skipped for a track-everything store. Measured 2026-09-11: the sitemap
-      // carries 34,572 product URLs / 8,415 distinct SKUs, and these two reduce that to 805.
-      // The client asked for the whole store, so for Pokemon Center both are bypassed; every
-      // other retailer still passes through them unchanged.
       const lowerSlug = slug.toLowerCase();
-      if (!this.trackAllProducts && !this.tcgKeywords.some(kw => lowerSlug.includes(kw))) continue;
+      if (!this.tcgKeywords.some(kw => lowerSlug.includes(kw))) continue;
 
       const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
       // The shared scope rule, applied to the exact name an alert would carry.
-      if (!this.trackAllProducts && !isInScopeName(name)) continue;
+      if (!isInScopeName(name)) continue;
 
       // The sitemap lists each SKU about four times, once per locale — 34,572 URLs for 8,415
       // products. Only the locale PREFIX was being rewritten, and only for en-*, so a

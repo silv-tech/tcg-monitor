@@ -578,8 +578,15 @@ async function purgeRetailer(retailerId) {
     `${PREFIX}index:${retailerId}`,
     `${STORE_CATEGORIES_PREFIX}${retailerId}`,
   ];
+  // `tcg:<retailerId>:*` catches ADAPTER-PRIVATE keys — state.js knows nothing about them, but a
+  // purge that leaves them behind is not a purge. Pokemon Center is the case that showed it:
+  // purging its 8,415 products left `tcg:pokemoncenter:availability` (a 14-day stock/price cache)
+  // and `tcg:pokemoncenter:unfetchable` untouched, so a rebuilt adapter would have loaded stale
+  // stock on its first poll and called it current. The namespace is the retailer's own, so this
+  // cannot reach another store's keys — note the shapes it must NOT match are `tcg:product:<id>:*`
+  // and `tcg:seen:<id>`, which put the kind before the id and are listed separately above.
   for (const pattern of [`${PREFIX}pricehistory:${retailerId}:*`, `${PREFIX}restock:${retailerId}:*`,
-    `${PREFIX}product:${retailerId}:*`]) {
+    `${PREFIX}product:${retailerId}:*`, `${PREFIX}${retailerId}:*`]) {
     let cursor = '0';
     do {
       const [next, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 1000);

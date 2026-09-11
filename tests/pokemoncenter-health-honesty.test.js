@@ -122,18 +122,4 @@ describe('a store that has STOPPED TRYING is not healthy either', () => {
     assert.ok(a._lastGoodReadAt > Date.now() - 1000);
   });
 
-  test('a bridge push counts as a successful read', async () => {
-    a.sitemapProducts = new Map([['A1', { url: 'u', name: 'n' }]]);
-    a._saveAvailability = async () => {};
-    // A first read seeds through state.setProduct, whose real getRedis() builds an ioredis
-    // client whose retry socket keeps `node --test` alive indefinitely.
-    a._seedFirstRead = async () => {};
-    a._lastGoodReadAt = 0;
-    await a.ingestPushed([{ sku: 'A1', ld: JSON.stringify({
-      '@type': 'Product', sku: 'A1', image: 'x',
-      offers: { availability: 'http://schema.org/InStock', price: 10 },
-    }) }]);
-    assert.ok(a._lastGoodReadAt > Date.now() - 1000,
-      'the bridge is a stock read like any other — health must count it');
-  });
 });
