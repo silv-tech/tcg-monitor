@@ -105,6 +105,10 @@ const MAX_PRICE_FILL_PER_POLL = Number(process.env.AMAZON_MAX_PRICE_FILL_PER_POL
 // REVERT: set AMAZON_ASIN_SWEEP=0 in the Railway env to disable it instantly (no code change).
 const ASIN_SWEEP_ENABLED = process.env.AMAZON_ASIN_SWEEP !== '0';
 const ASIN_BATCH_SIZE = Number(process.env.AMAZON_ASIN_BATCH_SIZE) || 20;      // ASINs per /s request
+// ASINs per FREE priority /s request. Sized to the /s result grid (~40 items) rather than to
+// ASIN_BATCH_SIZE, which paces the paid sweep: the priority list must fit in ONE request so no
+// ASIN loses freshness, and asking for more ASINs than the grid returns cannot work anyway.
+const PRIORITY_FREE_BATCH = Number(process.env.AMAZON_PRIORITY_FREE_BATCH) || 40;
 const ASIN_BATCHES_PER_POLL = Number(process.env.AMAZON_ASIN_BATCHES_PER_POLL) || 1; // +N /s req/poll
 
 // Offers lane — the GUARANTEED per-ASIN stock check for "search-invisible" ASINs. Amazon serves no
@@ -199,7 +203,8 @@ class AmazonAdapter extends BaseAdapter {
     // preserved so the round-robin cursor visits them predictably.
     this._priorityAsins = (config.priorityAsins || []).map(String);
     this._priorityOffersIntervalMs = (config.timing && config.timing.priorityOffersIntervalMs) || 18000;
-    this._priorityCursor = 0;   // round-robin position over _priorityAsins
+    this._priorityCursor = 0;   // round-robin position over _priorityAsins (PAID offers lane)
+    this._priorityFreeCursor = 0; // chunk position for the FREE /s lane; one chunk unless >40 ASINs
     this._lastPriorityOffersAt = 0;
     this._priorityOffersDay = null; // YYYY-MM-DD window for the priority lane's own daily cap
     this._priorityOffersToday = 0;
@@ -576,8 +581,30 @@ class AmazonAdapter extends BaseAdapter {
     // lesson the same day.
     if (now < this._searchBlockedUntil) {
       const left = Math.round((this._searchBlockedUntil - now) / 1000);
-      logger.warn(`Amazon: search quiet for another ${left}s (letting the block decay)`);
-      for (const [asin, cached] of this._knownProducts) products[asin] = cached;
+      logger.warn(`Amazon: search quiet for another ${left}s (letting the block decay) — `
+        + `offers lanes still running`);
+
+      // GO QUIET ON SEARCH, NOT ON EVERYTHING.
+      //
+      // This used to return here, which skipped _runDiscovery entirely — and _runDiscovery is
+      // where BOTH offers lanes and the burst live. So one poll whose keyword searches all failed
+      // bought 60s (escalating to 900s) of ZERO restock detection of any kind, for every ASIN.
+      // The block is on amazon.ca's /s endpoint; the offers lanes go through ScraperAPI, a
+      // different network that was never blocked, and the comment above `_runOffersLane` calls it
+      // "what guarantees a restock like B0H78BB9TY is caught". Silencing it bought nothing and
+      // cost exactly the search-invisible ASINs — the client's hand-given set — their only
+      // detection path, during the window a drop is most likely to be happening.
+      //
+      // Still skipped, deliberately: every free /s lane (keyword queries, _runAsinSweep and
+      // _runPriorityFreeCheck), because those DO hit the blocked endpoint and knocking is what
+      // stops a block from decaying.
+      await this._runOffersLane(products);
+      await this._runPriorityOffersLane(products);
+
+      // Conditional, so the fresh offers reads above are not overwritten by their cached rows.
+      for (const [asin, cached] of this._knownProducts) {
+        if (!(asin in products)) products[asin] = cached;
+      }
       return products;
     }
 
@@ -1330,7 +1357,26 @@ class AmazonAdapter extends BaseAdapter {
     if (!PRIORITY_FREE_ENABLED) return;
     if (!this._priorityAsins || this._priorityAsins.length === 0) return;
     const now = Date.now();
-    const chunk = this._priorityAsins.slice(0, ASIN_BATCH_SIZE); // all priority ASINs fit one pipe-joined query
+    // EVERY priority ASIN, not the first 20.
+    //
+    // This was `slice(0, ASIN_BATCH_SIZE)` with the comment "all priority ASINs fit one
+    // pipe-joined query" — true when the list was 10, silently false from the moment 4da5057 took
+    // it to 24. Four ASINs were permanently excluded from the $0 ~6s lane AND from arming the
+    // burst, falling back to the ~572s paid round-robin. One of them was B0GYVHLP4L, the Pitch
+    // Black ETB that commit was written to add for the client.
+    //
+    // Batched at the size of the /s result GRID (~40 items), not at ASIN_BATCH_SIZE (20, which
+    // paces the paid sweep): asking for more ASINs than the grid can return cannot work, and
+    // asking for fewer wastes a free request. A list inside one grid is sent whole every poll, so
+    // nothing loses freshness; a longer list rotates instead of being truncated. If Amazon
+    // returns fewer tiles than asked, the `wanted` filter below simply matches fewer — degraded
+    // coverage, never a wrong reading.
+    const chunks = [];
+    for (let i = 0; i < this._priorityAsins.length; i += PRIORITY_FREE_BATCH) {
+      chunks.push(this._priorityAsins.slice(i, i + PRIORITY_FREE_BATCH));
+    }
+    const chunk = chunks[this._priorityFreeCursor % chunks.length];
+    this._priorityFreeCursor = (this._priorityFreeCursor + 1) % chunks.length;
     let items;
     try { items = await this._freeSearch(chunk.join('|'), false, 1, { asinMode: true }); }
     catch { items = null; }
@@ -1646,6 +1692,18 @@ class AmazonAdapter extends BaseAdapter {
 
     // Carried through so discovery can tell "no price shown" apart from "priced at nothing".
     product._priceUnknown = !!item._priceUnknown;
+    // THE STOCK IN THIS ROW WAS NOT OBSERVED — it was replayed from cache (see `inStock` above).
+    //
+    // A tile with no price string and no "Currently unavailable" carries no stock signal, so this
+    // builder deliberately replays `cached.inStock` rather than asserting false. But it also
+    // stamps a fresh `lastSeen`, and poll-adapter's confirmations read a newer `lastSeen` as
+    // "somebody actually looked". So a held out-of-stock reading could be CONFIRMED by one of
+    // these replays ~6s later — the free priority lane emits them every poll — which is precisely
+    // the replay-confirmation the read-counting guard exists to prevent, in a form `lastSeen`
+    // cannot see. 43 of 90 measured tiles carried no price, so this is the common case, not an
+    // edge one. The flag tells the guard that freshness here covers identity and price only.
+    if (item._priceUnknown) product._stockUnobserved = true;
+    else delete product._stockUnobserved;
 
     // Category from the product itself, falling back to the query only when the product really
     // does name a tracked game. Previously this defaulted to 'pokemon' for anything the
@@ -1836,6 +1894,16 @@ class AmazonAdapter extends BaseAdapter {
             name: name || cached?.name,
             category: category || cached?.category,
             price: data.price || cached.price,
+            // PROVENANCE FOLLOWS THE VALUE — same rule as _buildFromSearch, same reason.
+            // _parseAod takes the first `a-price-whole` anywhere in the fragment: the OLID is
+            // scoped to the pinned block but the PRICE is not. So an AOD price is NOT
+            // authoritative, and this row spreads `...cached`, which would carry a _pricePinned
+            // earned by a real offers read onto a price that did not come from the pinned offer.
+            // That lie lets a later pinned read look like a pinned -> pinned steep drop, which
+            // publishes after one confirmation — the B0H78BB9TY false -61% through this lane
+            // instead of the search lane. Only when AOD actually supplied the price; if the
+            // cached price survives, its provenance survives with it.
+            _pricePinned: data.price ? false : !!cached._pricePinned,
             inStock: raisesStockBlind ? cached.inStock : data.inStock,
             canAddToCart: raisesStockBlind ? cached.canAddToCart : data.inStock,
             image: data.image || cached.image,
@@ -1910,16 +1978,34 @@ class AmazonAdapter extends BaseAdapter {
 
     if (data.inStock) this._lastInStockAt.set(asin, Date.now()); // keeps it in the fast lane
 
+    const cached = this._knownProducts.get(asin) || {};
     const product = this.classify({
       sku: asin,
       name: data.name,
-      price: data.price,
+      // Keep a known price when this read could not parse one. `_parseAod` returns price:null
+      // whenever its apex/a-price regexes miss, and this row then OVERWROTE the catalogue copy
+      // (`_knownProducts.set` below) as well as Redis — destroying the stored price, the price
+      // history and /scan output. delivery.js also drops any event whose price is null or <= 0,
+      // so non-restock events on that ASIN went silent until a price re-parsed.
+      price: data.price != null ? data.price : (cached.price ?? null),
+      // Provenance follows the value: AOD is unscoped (see the sweep builder), so a price read
+      // here is not authoritative; if the cached price survives, its provenance survives with it.
+      _pricePinned: data.price != null ? false : !!cached._pricePinned,
       currency: 'CAD',
       url: `https://www.amazon.ca/dp/${asin}`,
       image: data.image || '',
       inStock: data.inStock,
       canAddToCart: data.inStock,
       shipsToHome: true,
+      // Every other adapter stamps this (bestbuy, ebgames, costco, walmart); Amazon — the one
+      // with the client's hand-given list — did not. Without it a restock detected FIRST by the
+      // fast lane loses the rate-limiter exemption (so it can be muted away entirely), the queue
+      // bypass, the 45s dedup window, the WATCHLIST header and the priority-channel routing, and
+      // an identity divergence is silently suppressed instead of escalated. And because the fast
+      // lane writes inStock:true to Redis first, the offers lane then sees no transition, so there
+      // is no second correctly-routed alert. Latent while AMAZON_AOD_STEALTH is unset; wrong
+      // regardless.
+      _watchlist: true,
     });
     // Reconcile _knownProducts with what the fast loop just read. The sweep SKIPS hot ASINs, so
     // without this the main poll would keep carrying a stale cached row for a fast-lane ASIN and

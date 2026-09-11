@@ -61,8 +61,8 @@
     "adapter": "amazon",
     "intervalMs": 6000,
     "proxyTier": "residential-us",
-    "maxProducts": 700,
-    "_maxProductsNote": "catalogue is ~613 and grows ~130/day; the default 500 cap silently deleted the alphabetical tail (113 rows) every poll, which is why the 30th Celebration ASINs (B0H7*) never alerted — they sort at 584-589. Raise this BEFORE the catalogue reaches it: truncation is logged at warn but nothing fails.",
+    "maxProducts": 1000,
+    "_maxProductsNote": "RAISED 700 -> 1000 on 2026-09-12: measured 656 stored = 94% of the 700 cap, and truncation EXCLUDES ASINs silently (logged at warn, nothing fails) — the same class of defect as the priority lane's slice(0,20). Cost of the headroom: the free ASIN sweep laps in chunks of 20, so a fuller catalogue lengthens its ~228s lap proportionally; the 24 priority ASINs are on separate lanes and are unaffected. Original note: catalogue is ~613 and grows ~130/day; the default 500 cap silently deleted the alphabetical tail (113 rows) every poll, which is why the 30th Celebration ASINs (B0H7*) never alerted — they sort at 584-589. Raise this BEFORE the catalogue reaches it: truncation is logged at warn but nothing fails.",
     "enabled": true,
     "color": "#ff9900",
     "timing": {
