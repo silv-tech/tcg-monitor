@@ -337,7 +337,36 @@ class DeliveryQueue {
       if (product.retailerId === 'amazon' && product.sku) {
         const asin = product.sku;
         let olid = await getOfferListingId(asin);
-        let seller = await getSellerCache(asin);
+
+        // A SELLER IS A PROPERTY OF THE CURRENT BUY BOX, NOT OF THE ASIN.
+        //
+        // The OLID identifies a listing and is genuinely stable, so caching it for 30 days is fine.
+        // The seller is not: it changes every time the buy box changes — and a RESTOCK is precisely
+        // the event that changes it. Trusting a cached verdict here had the cache poisoned exactly
+        // when it does the most damage, because the normal resting state of an out-of-stock ASIN is
+        // a MARKETPLACE seller holding the buy box. So:
+        //
+        //   Amazon goes out of stock -> a third-party seller holds the buy box -> we cache
+        //   "Japan Big Mall" -> Amazon restocks -> the 30-day-old verdict suppresses the alert,
+        //   and the refetch below never runs because it only fires on an EMPTY cache.
+        //
+        // Confirmed firing in production twice on 2026-09-12, with no exemption for the client's
+        // hand-picked ASINs. A restock detected, verified by five independent paid reads, and
+        // silently dropped at the last step.
+        //
+        // NARROWLY: only a THIRD-PARTY cached verdict can suppress anything, so only that one is
+        // worth re-reading. A stale "Amazon" verdict silences nothing, and bypassing the cache for
+        // it would put the enrichment fetch — and its hard 60s abort in fetchAmazonOlidAndSeller —
+        // in front of every restock for no benefit. Measured enrichment tail: 23.25s, and one alert
+        // earlier today took 66s on exactly that path. The fix must not buy correctness with
+        // latency on the one event that is actually a race.
+        const cachedSeller = await getSellerCache(asin);
+        const cachedWouldSuppress = !!cachedSeller && !cachedSeller.toLowerCase().includes('amazon');
+        const sellerMustBeFresh = cachedWouldSuppress
+          && (event.type === 'RESTOCK' || event.type === 'PREORDER_LIVE' || !!product._watchlist);
+
+        let seller = sellerMustBeFresh ? null : cachedSeller;
+        const staleSeller = sellerMustBeFresh ? cachedSeller : null;
 
         if (!olid || !seller) {
           // Try ScraperAPI first (reliable — handles Amazon anti-bot, 5 credits)
@@ -382,8 +411,23 @@ class DeliveryQueue {
           if (!isSoldByAmazon) {
             event._thirdPartySeller = true;
             event._seller = seller;
-            logger.info(`Third-party seller detected for ${asin}: "${seller}"`);
+            // True whenever the verdict came off the wire this run — either the cache was empty, or
+            // it was deliberately bypassed. Only a cached verdict can be stale.
+            event._sellerFresh = sellerMustBeFresh || !cachedSeller;
+            logger.info(`Third-party seller detected for ${asin}: "${seller}"`
+              + `${event._sellerFresh ? ' (live read)' : ' (cached)'}`);
+          } else if (staleSeller && !staleSeller.toLowerCase().includes('amazon')) {
+            // The live read disagrees with what was cached. Worth a line: this is the exact case
+            // that was being silently suppressed, so it should be visible when it stops being.
+            logger.info(`Seller changed for ${asin}: cached "${staleSeller}" -> live "${seller}" `
+              + `— alert NOT suppressed`);
           }
+        } else if (sellerMustBeFresh && staleSeller) {
+          // A live read was required and could not be obtained. Fail OPEN, as the line below says,
+          // and do NOT fall back to the cached verdict: a stale "third-party" is what silenced a
+          // real restock for up to 30 days. Say so, because silence here used to be invisible.
+          logger.warn(`Seller re-read failed for ${asin} — ignoring the cached verdict `
+            + `"${staleSeller}" and sending anyway (a stale verdict must not suppress a restock)`);
         }
         // If no seller info (scrape failed), fail-open — send the alert anyway
       }

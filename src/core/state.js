@@ -475,7 +475,17 @@ async function cacheOfferListingId(asin, olid) {
 }
 
 // ─── Amazon seller cache ────────────────────────────────────────
-const SELLER_TTL = 86400 * 30; // 30 days — same as OLID
+// 6 hours — deliberately NOT "same as OLID", which is what this used to say.
+//
+// An OLID identifies a listing and is stable, so 30 days is right for it. A SELLER is whoever holds
+// the buy box right now, which changes every time stock changes. At 30 days one reading taken while
+// Amazon was out of stock — when a marketplace seller holds the buy box, i.e. the normal resting
+// state — suppressed every alert for that ASIN for a month, because delivery only refetches when
+// the cache is EMPTY. Confirmed suppressing real restocks in production 2026-09-12.
+//
+// delivery.js now forces a live read for restocks and priority ASINs regardless of this value; the
+// shorter TTL bounds the damage for every other path rather than relying on that one gate.
+const SELLER_TTL = 3600 * 6;
 
 async function getSellerCache(asin) {
   const key = `${PREFIX}seller:${asin}`;
