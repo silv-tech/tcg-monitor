@@ -605,6 +605,11 @@ class AmazonAdapter extends BaseAdapter {
       for (const [asin, cached] of this._knownProducts) {
         if (!(asin in products)) products[asin] = cached;
       }
+      // This path returns before _collectProducts' stamp pass, and the general offers lane's row
+      // sets neither _watchlist nor isTCG — and deliver()'s first filter silently drops an
+      // isTCG:false row. Without this, a restock found during a block reaches delivery and is
+      // thrown away, which would defeat the whole point of keeping the lanes running.
+      this._stampWatchlistRows(products);
       return products;
     }
 
@@ -674,6 +679,20 @@ class AmazonAdapter extends BaseAdapter {
     // 45s restock dedup; the flood backstop in delivery.js deliver() bounds that last one.
     // NB: cap-exemption (base.js) and scope-drop (above) key off watched.has(sku), the config Set —
     // NOT this flag — so those never depend on the stamp having run.
+    this._stampWatchlistRows(products);
+    return products;
+  }
+
+  /**
+   * Re-assert _watchlist and isTCG on every configured watchlist row in `products`.
+   *
+   * Extracted so the search-quiet path can run it too. That path returns before this pass, and the
+   * general offers lane's row sets neither flag — so a restock found during a block could reach
+   * delivery with isTCG undefined, which deliver()'s FIRST filter drops silently (debug log, no
+   * warn). The offers lanes are exactly what that path exists to keep running, so losing their
+   * alert at the last step would defeat it.
+   */
+  _stampWatchlistRows(products) {
     for (const [sku, p] of Object.entries(products)) {
       if (p && this.watchlist.has(String(sku))) {
         p._watchlist = true;
@@ -688,7 +707,6 @@ class AmazonAdapter extends BaseAdapter {
         p.isTCG = true;
       }
     }
-
     return products;
   }
 
@@ -1178,6 +1196,15 @@ class AmazonAdapter extends BaseAdapter {
       _pricePinned: data.price ? !!data.pricePinned : !!cached._pricePinned,
       inStock: data.inStock,
       canAddToCart: data.inStock,
+      // This read DID observe stock, so clear any blindness inherited via `...cached`.
+      // A price-less search tile marks its row `_stockUnobserved` so it cannot advance the
+      // out-of-stock confirmation. Spreading that flag onto a genuine offers read would stop the
+      // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
+      // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
+      _stockUnobserved: undefined,
+      // Same for price: this read supplied one (or fell back to the cached value, in which case
+      // `_pricePinned` above already records that nothing new was learned about it).
+      _priceUnobserved: undefined,
       url: cached.url || `https://www.amazon.ca/dp/${target}`,
       lastSeen: now,
     };
@@ -1285,6 +1312,15 @@ class AmazonAdapter extends BaseAdapter {
       _pricePinned: data.price ? !!data.pricePinned : !!cached._pricePinned,
       inStock: data.inStock,
       canAddToCart: data.inStock,
+      // This read DID observe stock, so clear any blindness inherited via `...cached`.
+      // A price-less search tile marks its row `_stockUnobserved` so it cannot advance the
+      // out-of-stock confirmation. Spreading that flag onto a genuine offers read would stop the
+      // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
+      // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
+      _stockUnobserved: undefined,
+      // Same for price: this read supplied one (or fell back to the cached value, in which case
+      // `_pricePinned` above already records that nothing new was learned about it).
+      _priceUnobserved: undefined,
       url: cached.url || `https://www.amazon.ca/dp/${target}`,
       lastSeen: now,
       _watchlist: true,
@@ -1702,8 +1738,19 @@ class AmazonAdapter extends BaseAdapter {
     // the replay-confirmation the read-counting guard exists to prevent, in a form `lastSeen`
     // cannot see. 43 of 90 measured tiles carried no price, so this is the common case, not an
     // edge one. The flag tells the guard that freshness here covers identity and price only.
-    if (item._priceUnknown) product._stockUnobserved = true;
-    else delete product._stockUnobserved;
+    // ...and the PRICE in it was not observed either — `price` above falls back to `cached.price`.
+    // Both flags are needed and neither substitutes for the other: the guards ask separate
+    // questions ("did anyone look at the stock?" / "did anyone look at the price?") and a row can
+    // be honest about one and blind about the other. Distinct from `_priceUnknown`, which means
+    // "the tile carried no price string" and drives the price-fill queue — that one must keep its
+    // existing meaning and lifecycle.
+    if (item._priceUnknown) {
+      product._stockUnobserved = true;
+      product._priceUnobserved = true;
+    } else {
+      delete product._stockUnobserved;
+      delete product._priceUnobserved;
+    }
 
     // Category from the product itself, falling back to the query only when the product really
     // does name a tracked game. Previously this defaulted to 'pokemon' for anything the
@@ -1906,6 +1953,11 @@ class AmazonAdapter extends BaseAdapter {
             _pricePinned: data.price ? false : !!cached._pricePinned,
             inStock: raisesStockBlind ? cached.inStock : data.inStock,
             canAddToCart: raisesStockBlind ? cached.canAddToCart : data.inStock,
+            // Clear any blindness inherited via `...cached` — this sweep read the product page, so
+            // it observed stock. Except when the read is itself withheld for want of a title
+            // (raisesStockBlind), which replays the cached value and so genuinely observed nothing.
+            _stockUnobserved: raisesStockBlind ? true : undefined,
+            _priceUnobserved: data.price ? undefined : true,   // no price parsed = none observed
             image: data.image || cached.image,
             lastSeen: Date.now(),
           };
@@ -1996,6 +2048,15 @@ class AmazonAdapter extends BaseAdapter {
       image: data.image || '',
       inStock: data.inStock,
       canAddToCart: data.inStock,
+      // This read DID observe stock, so clear any blindness inherited via `...cached`.
+      // A price-less search tile marks its row `_stockUnobserved` so it cannot advance the
+      // out-of-stock confirmation. Spreading that flag onto a genuine offers read would stop the
+      // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
+      // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
+      _stockUnobserved: undefined,
+      // Same for price: this read supplied one (or fell back to the cached value, in which case
+      // `_pricePinned` above already records that nothing new was learned about it).
+      _priceUnobserved: undefined,
       shipsToHome: true,
       // Every other adapter stamps this (bestbuy, ebgames, costco, walmart); Amazon — the one
       // with the client's hand-given list — did not. Without it a restock detected FIRST by the
@@ -2004,8 +2065,15 @@ class AmazonAdapter extends BaseAdapter {
       // an identity divergence is silently suppressed instead of escalated. And because the fast
       // lane writes inStock:true to Redis first, the offers lane then sees no transition, so there
       // is no second correctly-routed alert. Latent while AMAZON_AOD_STEALTH is unset; wrong
-      // regardless.
-      _watchlist: true,
+      // regardless. Gated on the CONFIGURED watchlist, matching costco.js — stamping it
+      // unconditionally would hand the privileges to the auto-promoted "hot" ASINs that
+      // getFastPollAsins() also drives (up to 10, by construction the ones currently flapping),
+      // which is worse than not stamping at all: delivery escalates a wrong-identity verdict on a
+      // _watchlist row to admin WITHOUT denylisting it, so a mis-identified ASIN would stay
+      // tracked instead of being dropped, and the dedup window would shrink 600s -> 45s on exactly
+      // the rows most likely to flap.
+      _watchlist: this.watchlist.has(String(asin)),
+      _priceUnobserved: data.price != null ? undefined : true,
     });
     // Reconcile _knownProducts with what the fast loop just read. The sweep SKIPS hot ASINs, so
     // without this the main poll would keep carrying a stale cached row for a fast-lane ASIN and
