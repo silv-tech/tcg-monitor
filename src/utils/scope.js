@@ -132,6 +132,13 @@ const SEALED_COLLECTION_FORMS = /(pin collection|poster collection|sticker colle
 const NON_TCG_MERCH = [
   'plamo', 'model kit', 'plastic model', 'figure kit',
   'playing cards', 'poker', 'jigsaw',
+  // A Toniebox is an audio player. It rode in because TCG_KEYWORDS contains 'box ', which
+  // matches inside "toniebox 2" — so "Tonies Pokemon Toniebox 2 Starter Set Lightning Yellow"
+  // scored as sealed Pokemon product and was, on 2026-09-11, the ONE in-stock row Costco had.
+  // A $239.99 audio player is what would have alerted the moment that store recovered.
+  // tests/costco-scope.test.js already listed it as must-reject: the local filter it replaced
+  // caught it, the shared rule did not, and nothing noticed because the store was dark.
+  'tonie',
 ];
 
 // Accessories — never alert on these even if they name a game

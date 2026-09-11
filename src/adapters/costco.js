@@ -149,7 +149,11 @@ class CostcoAdapter extends BaseAdapter {
       return { status: 200, html };
     } catch (err) {
       clearTimeout(timer);
-      if (proxyObj && (err.message?.includes('ECONNREFUSED') || err.message?.includes('socket hang up'))) {
+      // Use the shared test rather than a second, narrower copy of it. This one listed only
+      // ECONNREFUSED and socket-hang-up, so `connect EADDRNOTAVAIL <exit>` — the exact way
+      // Costco's only-used exit died on 2026-09-11 — never marked the proxy, never released the
+      // sticky pin, and never rotated to the three idle siblings.
+      if (proxyObj && this._isProxyBlock(err)) {
         markProxyBlocked(proxyObj);
       }
       throw err;
@@ -393,6 +397,12 @@ class CostcoAdapter extends BaseAdapter {
       const lastModified = res.headers.get('last-modified');
       if (etag || lastModified) this._sitemapValidators.set(url, { etag, lastModified });
       return { body: await res.text(), notModified: false };
+    } catch (err) {
+      // This path marked SUCCESS but never failure, so discovery traffic was invisible to proxy
+      // accounting: a dead exit could not be retired by this lane, it just logged
+      // "Costco: sitemap scan failed" every 30 minutes for as long as the route stayed down.
+      if (proxyObj && this._isProxyBlock(err)) markProxyBlocked(proxyObj);
+      throw err;
     } finally {
       clearTimeout(timer);
     }

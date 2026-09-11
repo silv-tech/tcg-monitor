@@ -100,12 +100,43 @@ class BaseAdapter {
     return { url: getProxyUrl(this.proxyTier, this.id), proxyObj: null };
   }
 
+  /**
+   * Is this error a reason to stop using THIS proxy exit and rotate to a sibling?
+   *
+   * Two families. The first is the site refusing us — 403, captcha, a block page. The second is
+   * the EXIT ITSELF being unreachable, which until 2026-09-11 nothing here recognised, and that
+   * cost Costco three hours of blindness:
+   *
+   *   Costco Canada: watchlist fast-poll error: ... connect EADDRNOTAVAIL 143.14.236.215:61234
+   *   Stealth: error on https://gdx-api.costco.com/...: Failed to connect to the server.
+   *   Costco Canada: found 0 products in 5ms
+   *
+   * 83 failures in one window, every one to that same address, each returning in 5-13ms because
+   * the socket never left the container. Costco has FOUR exits; that one had 15,528 requests and
+   * the other three had ZERO. Sibling addresses in the same range serving other retailers were
+   * fine, so the provider was up — that single route was not.
+   *
+   * Only markProxyBlocked() releases the sticky pin and rotates, and neither of these messages
+   * matched, so the pin held on a dead exit indefinitely while three healthy ones sat idle. The
+   * store reported consecutiveErrors:0 throughout, because the search path swallows rejections.
+   *
+   * Rotating on a transient blip is cheap — a sibling picks it up, the cooldown auto-recovers,
+   * and getNextIspProxy force-revives the least-blocked exit if a pool ever goes fully dark.
+   * NOT rotating costs a whole store until someone notices. That asymmetry is why connect-level
+   * failures belong here.
+   */
   _isProxyBlock(err) {
     const msg = err.message || '';
-    return msg.includes('403') || msg.includes('503') || msg.includes('Blocked')
+    // The site refusing us.
+    if (msg.includes('403') || msg.includes('503') || msg.includes('Blocked')
       || msg.includes('blocked') || msg.includes('CAPTCHA') || msg.includes('captcha')
-      || msg.includes('Access Denied') || msg.includes('connection refused')
-      || msg.includes('ECONNREFUSED') || msg.includes('socket hang up');
+      || msg.includes('Access Denied')) return true;
+    // The exit being unreachable. `Failed to connect to the server.` is impit's wording, and on a
+    // proxied request the connection being refused is the connection to the PROXY.
+    return msg.includes('connection refused') || msg.includes('ECONNREFUSED')
+      || msg.includes('socket hang up') || msg.includes('EADDRNOTAVAIL')
+      || msg.includes('EHOSTUNREACH') || msg.includes('ENETUNREACH')
+      || msg.includes('Failed to connect to the server');
   }
 
   async fetch(url, opts = {}) {

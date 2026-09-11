@@ -37,6 +37,9 @@ const TCG_KEYWORDS = [
 ];
 
 const NON_TCG_KEYWORDS = [
+  // An audio player, not a card product. 'box ' in TCG_KEYWORDS matches inside "toniebox 2",
+  // so this scored as sealed Pokemon product on both gates — see the note in scope.js.
+  'tonie',
   // Accessories — not sealed product
   'deck box', 'deckbox', 'playmat', 'play mat', 'binder', 'card binder',
   'sleeves', 'card sleeves', 'penny sleeves', 'card protector', 'protector case',
