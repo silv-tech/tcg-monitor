@@ -352,3 +352,63 @@ describe('learning a product stock is not a restock', () => {
     }
   });
 });
+
+describe('products with SIZES use a different offer shape entirely', () => {
+  // Measured on the live store 2026-09-11. Widening past TCG surfaced a shape we had never met:
+  // anything with sizes (clothing, footwear) nests one Offer per size inside an AggregateOffer,
+  // and has no top-level `availability` at all. The reader looked only for that field, so all
+  // 7,610 non-TCG products read as out of stock with no price — and the browser bridge reported
+  // "20 read nothing, http200 no-ld 447kb" on twenty perfectly good pages.
+  const AGGREGATE = {                        // the Crocs clog, 70-11607, exactly as served
+    '@type': 'Product', mpn: '70-11607', name: 'Poke Ball Classic Clog By Crocs Kids',
+    offers: {
+      '@type': 'AggregateOffer', lowPrice: 74.99, highPrice: 74.99, offerCount: 9,
+      priceCurrency: 'CAD',
+      offers: [
+        { '@type': 'Offer', sku: '70-11607-106', availability: 'http://schema.org/InStock', price: 74.99 },
+        { '@type': 'Offer', sku: '70-11607-103', availability: 'http://schema.org/OutOfStock', price: 74.99 },
+        { '@type': 'Offer', sku: '70-11607-102', availability: 'http://schema.org/OutOfStock', price: 74.99 },
+      ],
+    },
+  };
+  const allGone = JSON.parse(JSON.stringify(AGGREGATE));
+  allGone.offers.offers.forEach((o) => { o.availability = 'http://schema.org/OutOfStock'; });
+
+  const wrap = (j) => `<script type="application/ld+json">${JSON.stringify(j)}</script>`;
+
+  test('one size in stock means the product is in stock', async () => {
+    const b = adapter(['70-11607']);
+    const r = await b.ingestPushed([{ sku: '70-11607', ld: JSON.stringify(AGGREGATE) }]);
+    assert.strictEqual(r.accepted, 1, 'a sized product must be readable at all');
+    const got = b.availabilityCache.get('70-11607');
+    assert.strictEqual(got.inStock, true, 'somebody can buy it, so it is in stock');
+    assert.strictEqual(got.price, 74.99, 'lowPrice is what the shopper sees');
+  });
+
+  test('every size gone means out of stock', async () => {
+    const b = adapter(['70-11607']);
+    await b.ingestPushed([{ sku: '70-11607', ld: JSON.stringify(allGone) }]);
+    assert.strictEqual(b.availabilityCache.get('70-11607').inStock, false);
+    assert.strictEqual(b.availabilityCache.get('70-11607').price, 74.99,
+      'an out-of-stock product still has a price, and the alert needs it');
+  });
+
+  test('the plain single-Offer shape still works', async () => {
+    const b = adapter(['A1']);
+    await b.ingestPushed([{ sku: 'A1', ld: ld({ availability: 'InStock', price: 59.99 }) }]);
+    const got = b.availabilityCache.get('A1');
+    assert.deepStrictEqual({ inStock: got.inStock, price: got.price }, { inStock: true, price: 59.99 });
+  });
+
+  test('the extension accepts the aggregate page too, or the server never sees it', () => {
+    const { extractProductLd } = (() => {
+      const vm = require('vm'); const fs = require('fs'); const path = require('path');
+      const sandbox = { setTimeout, URLSearchParams, module: { exports: {} }, console };
+      vm.createContext(sandbox);
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '../pokemoncenter-extension/page.js'), 'utf8'), sandbox);
+      return sandbox.module.exports;
+    })();
+    assert.ok(extractProductLd(wrap(AGGREGATE)), 'a sized product page must be extractable');
+    assert.ok(extractProductLd(wrap(allGone)), 'out of stock is still real data worth sending');
+  });
+});

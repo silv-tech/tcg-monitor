@@ -40,6 +40,53 @@ const CATEGORY_MAX_PAGES = 12;
 const CATEGORY_CONCURRENCY = 3;
 const CATEGORY_PAGE_ATTEMPTS = 2;
 
+/**
+ * Read stock and price out of a schema.org `offers`, whichever shape it arrives in.
+ *
+ * Pokemon Center uses two, and until the catalogue was widened beyond TCG we only ever met one:
+ *
+ *   Offer           a single product      { "@type":"Offer", availability, price }
+ *   AggregateOffer  anything with SIZES   { "@type":"AggregateOffer", lowPrice, highPrice,
+ *                                           offerCount, offers:[ {sku, availability, price} ] }
+ *
+ * Measured 2026-09-11: the TCG zip binder 10-10320-101 is the first shape; the Crocs clog
+ * 70-11607 is the second, with nine size variants of which four were InStock and three were not.
+ * The old reader looked only for `offers.availability`, which an AggregateOffer does not have —
+ * so every clothing and footwear product in the store read as out of stock with no price, and
+ * the browser bridge reported "20 read nothing, http200 no-ld 447kb" on twenty perfectly good
+ * pages. That is 7,610 of the 8,415 products.
+ *
+ * A sized product is IN STOCK if any size is. That is the honest answer for a stock monitor:
+ * somebody can buy it. Price comes from lowPrice, which is what the shopper sees first.
+ */
+function readOffers(offers) {
+  const none = { inStock: false, price: null };
+  if (!offers) return none;
+
+  const list = Array.isArray(offers) ? offers : [offers];
+  let inStock = false;
+  let price = null;
+
+  for (const o of list) {
+    if (!o || typeof o !== 'object') continue;
+
+    if (Array.isArray(o.offers) && o.offers.length > 0) {          // AggregateOffer
+      for (const v of o.offers) {
+        if (v && String(v.availability || '').includes('InStock')) { inStock = true; break; }
+      }
+      const low = Number(o.lowPrice);
+      if (Number.isFinite(low) && low > 0) price = price == null ? low : Math.min(price, low);
+      continue;
+    }
+
+    if (String(o.availability || '').includes('InStock')) inStock = true;   // plain Offer
+    const p = typeof o.price === 'number' ? o.price : normalizePrice(String(o.price || ''));
+    if (Number.isFinite(p) && p > 0) price = price == null ? p : Math.min(price, p);
+  }
+
+  return { inStock, price };
+}
+
 class PokemonCenterAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
@@ -1128,10 +1175,10 @@ class PokemonCenterAdapter extends BaseAdapter {
       try {
         const json = JSON.parse(html.substring(start, end).trim());
         if (json['@type'] === 'Product') {
-          const availability = json.offers?.availability || '';
+          const { inStock, price } = readOffers(json.offers);
           return {
-            inStock: availability.includes('InStock'),
-            price: typeof json.offers?.price === 'number' ? json.offers.price : normalizePrice(String(json.offers?.price || '')),
+            inStock,
+            price,
             // PC ships `image` as an ARRAY of five-plus gallery URLs. Stored raw it reaches
             // embeds.setThumbnail(), which throws on an array and loses the alert permanently
             // (see the note there). Take the first URL — it is the primary product shot.

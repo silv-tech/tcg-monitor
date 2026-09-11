@@ -36,10 +36,22 @@
       let json;
       try { json = JSON.parse(raw); } catch { continue; }
       if (json['@type'] !== 'Product') continue;
-      const offers = Array.isArray(json.offers) ? json.offers[0] : json.offers;
-      // The category listing also carries Product blocks, but with an empty sku and a constant
-      // OutOfStock. Requiring an availability keeps a wrong page from looking right.
-      if (!offers || !offers.availability) continue;
+
+      // Pokemon Center uses TWO offer shapes, and requiring only the first threw away 7,610 of
+      // the store's 8,415 products:
+      //   Offer           a single item     { availability, price }
+      //   AggregateOffer  anything SIZED    { lowPrice, offers:[ {sku, availability, price} ] }
+      // Measured 2026-09-11 — the TCG zip binder is the first, the Crocs clog the second with
+      // nine size variants. Demanding `offers.availability` made every clothing and footwear
+      // page read as "no product data": twenty good 447KB pages, nothing extracted.
+      //
+      // The check stays deliberately loose — the server owns the parsing. It only has to be
+      // tight enough to reject the category listing's Product cells, which carry no offers at
+      // all beyond a constant OutOfStock and an empty sku.
+      const list = Array.isArray(json.offers) ? json.offers : [json.offers];
+      const usable = list.some((o) => o && (o.availability
+        || (Array.isArray(o.offers) && o.offers.some((v) => v && v.availability))));
+      if (!usable) continue;
       return raw;
     }
     return null;
