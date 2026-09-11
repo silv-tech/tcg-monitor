@@ -139,6 +139,93 @@ describe('a row can be fresh about price and blind about stock', () => {
     inStock: true, category: 'pokemon', lastSeen: T0, _stockUnobserved: true,
   });
 
+  /**
+   * ROUND 3 caught this as the FOURTH instance of the same pattern: the conditional was written
+   * correctly in the AOD sweep and fetchProductPage, and unconditionally in the two offers
+   * builders. `_offersToData` returns `inStock: price != null`, so `data.price === null` means
+   * there was no buy box and NO price was parsed — and `price: data.price || cached.price` is then
+   * a pure replay out of the catalogue. Declaring that an observation let a steep drop confirm off
+   * one real read, ~18s apart instead of 6s.
+   */
+  test('an OOS offers read (no price parsed) is a price REPLAY, not an observation', () => {
+    const a = makeAdapter();
+    a._knownProducts.set(ASIN, {
+      sku: ASIN, name: 'Pokemon TCG Elite Trainer Box', price: 40, _pricePinned: false,
+      inStock: true, category: 'pokemon',
+    });
+    const products = {};
+    // No buy box: _offersToData yields price null / inStock false.
+    a._applyOffersData(ASIN, { name: 'Pokemon TCG Elite Trainer Box', price: null, inStock: false },
+      products, Date.now(), 'offers-lane');
+
+    const out = products[ASIN] || a._knownProducts.get(ASIN);
+    assert.strictEqual(out.price, 40, 'the price is replayed from cache');
+    assert.strictEqual(out._priceUnobserved, true,
+      'so it must NOT claim to be a price observation');
+  });
+
+  test('a priced offers read IS a price observation', () => {
+    const a = makeAdapter();
+    a._knownProducts.set(ASIN, { sku: ASIN, name: 'x', price: 40, inStock: true, category: 'pokemon' });
+    const products = {};
+    a._applyOffersData(ASIN, { name: 'Pokemon TCG Elite Trainer Box', price: 89.99, inStock: true,
+      pricePinned: true }, products, Date.now(), 'offers-lane');
+    const out = products[ASIN] || a._knownProducts.get(ASIN);
+    assert.strictEqual(out._priceUnobserved, undefined);
+    assert.strictEqual(out._pricePinned, true);
+  });
+
+  test('end to end: an OOS offers read cannot confirm a held steep drop', () => {
+    const a = makeAdapter();
+    a._knownProducts.set(ASIN, {
+      sku: ASIN, name: 'Pokemon TCG Elite Trainer Box', price: 40, _pricePinned: false,
+      inStock: true, category: 'pokemon',
+    });
+    const products = {};
+    a._applyOffersData(ASIN, { name: 'Pokemon TCG Elite Trainer Box', price: null, inStock: false },
+      products, Date.now(), 'offers-lane');
+
+    // Redis mid-hold: a -60% drop was seen once and held.
+    const stored = row({ price: 100, _pricePinned: false, _steepDropStreak: 1, _priceHeld: true });
+    const next = confirm(products[ASIN], stored);
+
+    assert.strictEqual(next._steepDropStreak, 1, 'the replay must not advance the streak');
+    assert.strictEqual(next.price, 100, 'so the hold stays on');
+    const drops = diffProducts({ [ASIN]: stored }, { [ASIN]: next })
+      .filter((e) => e.type === EVENT_TYPES.PRICE_CHANGE);
+    assert.deepStrictEqual(drops, [], 'and no price drop reaches the client');
+  });
+
+  test('the price-fill lane clears both flags — it is the FIFTH writer', () => {
+    // Missed when the other four were fixed because it MUTATES the row _buildFromSearch produced
+    // rather than building an object literal: counting literals instead of writers is what let it
+    // through. Leaving _stockUnobserved set is the worse half — poll-adapter would refuse the
+    // in-stock reading as a blind replay, store inStock:false, and the row would never be re-queued
+    // (it now has a price), so the restock this lane exists to rescue would be lost permanently.
+    const a = makeAdapter();
+    a._searchQueries = ['pokemon'];
+    a._freeSearch = async () => ([{
+      asin: ASIN, name: 'Pokemon TCG Elite Trainer Box', inStock: true, _priceUnknown: true,
+    }]);
+    a._runAsinSweep = async () => {};
+    a._runPriorityFreeCheck = async () => {};
+    a._runOffersLane = async () => {};
+    a._runPriorityOffersLane = async () => {};
+    a._stealthCheckAsin = async () => ({
+      name: 'Pokemon TCG Elite Trainer Box', price: 89.99, inStock: true, image: '',
+    });
+
+    const products = {};
+    return a._runDiscovery(products).then(() => {
+      const out = products[ASIN] || a._knownProducts.get(ASIN);
+      assert.ok(out, 'the tile produced a row');
+      assert.strictEqual(out.price, 89.99, 'the price-fill resolved it from the product page');
+      assert.ok(!out._stockUnobserved,
+        'a real AOD buy-box read observed stock — leaving this set loses the restock permanently');
+      assert.ok(!out._priceUnobserved, 'and it observed a price');
+    });
+  });
+
   test('the OFFERS lane clears it — an offers read observes stock', () => {
     const a = makeAdapter();
     a._knownProducts.set(ASIN, blindCached());
@@ -230,22 +317,23 @@ describe('a blind row may not drive EITHER direction', () => {
     assert.strictEqual(real.price, 45, 'the guard must not become unsatisfiable');
   });
 
-  test('a blind replay cannot MANUFACTURE a restock', () => {
-    // Reachable whenever Redis and the adapter catalogue disagree: an ASIN is dropped from the
-    // returned map, stale cleanup writes inStock:false to Redis after two polls while
-    // _knownProducts still holds true, and the next price-less tile replays that true.
+  test('a blind replay IS allowed to drive a restock — refusing it was reverted', () => {
+    // This was guarded and the guard was removed, deliberately. Refusing a blind replay prevents a
+    // transient false restock but causes a PERMANENT missed one: a non-priority ASIN whose tile
+    // never carries a price is only ever refreshed blind, its lastSeen stays fresh (the free sweep
+    // laps in ~200s) so _runOffersLane never targets it past OFFERS_STALE_MS (600s), and with AOD
+    // disabled nothing else observes its stock. Once Redis and the catalogue diverge it would be
+    // pinned out of stock forever. A wasted click beats silence from a stock monitor.
     const next = confirm(
       row({ inStock: true, _stockUnobserved: true, lastSeen: T0 + 6000 }),
       row({ inStock: false, _oosStreak: 2 }),
     );
-    assert.strictEqual(next.inStock, false, 'nothing was observed, so nothing is asserted');
-
-    const events = diffProducts({ [ASIN]: row({ inStock: false, _oosStreak: 2 }) }, { [ASIN]: next });
-    assert.ok(!events.some((e) => e.type === EVENT_TYPES.RESTOCK),
-      'a false RESTOCK on the priority channel is the worst possible output');
+    assert.strictEqual(next.inStock, true,
+      'the replay is the best evidence available, so it is taken');
+    assert.strictEqual(next._oosStreak, 0);
   });
 
-  test('a REAL restock is not delayed by that guard', () => {
+  test('a REAL restock fires on the first observation', () => {
     const next = confirm(row({ inStock: true, lastSeen: T0 + 6000 }),
       row({ inStock: false, _oosStreak: 2 }));
     assert.strictEqual(next.inStock, true, 'a genuine read always sets stockRead');
@@ -253,35 +341,41 @@ describe('a blind row may not drive EITHER direction', () => {
   });
 });
 
-describe('an unscoped read may not overwrite an authoritative price', () => {
-  test('a RISE from pinned to unverified is refused, in-flight hold intact', () => {
-    // How the trusted price got destroyed silently, and how a real sale then got suppressed:
-    // the rise zeroed the streak and made {229, unpinned} the baseline with no alert, and the next
-    // genuine pinned read at 45 became unpinned->pinned = a CORRECTION, filtering the event out.
+describe('a provenance downgrade does not discard an in-flight confirmation', () => {
+  test('an unscoped RISE takes the price but KEEPS the drop streak', () => {
+    // Refusing the rise outright was tried and REVERTED: it re-asserted _pricePinned on every rise,
+    // so the row could never reach a branch that released it, and a non-priority ASIN with one old
+    // pinned read froze at that price indefinitely — publishing $89.99 on restocks for a product
+    // costing $129.99, with no _priceHeld marking it as doubted. This is the narrower half: the
+    // unscoped price is taken honestly, but it is not treated as evidence the sale went away.
     const prev = row({ price: 100, _pricePinned: true, _steepDropStreak: 1 });
     const next = confirm(row({ price: 229, _pricePinned: false, lastSeen: T0 + 6000 }), prev);
 
-    assert.strictEqual(next.price, 100, 'the authoritative number stands');
-    assert.strictEqual(next._pricePinned, true, 'and the flag still describes the value in the row');
+    assert.strictEqual(next.price, 229, 'the price is not frozen — that was the worse bug');
+    assert.strictEqual(next._pricePinned, false, 'and provenance stays honest about it');
     assert.strictEqual(next._steepDropStreak, 1,
-      'an unscoped reading is not evidence that the sale went away');
+      'an unscoped reading is not evidence that a sale being confirmed went away');
   });
 
-  test('and the genuine sale still publishes afterwards', () => {
-    const prev = row({ price: 100, _pricePinned: true, _steepDropStreak: 1 });
-    const held = confirm(row({ price: 229, _pricePinned: false, lastSeen: T0 + 6000 }), prev);
-    const real = confirm(row({ price: 45, _pricePinned: true, lastSeen: T0 + 240_000 }), held);
-
-    assert.strictEqual(real.price, 45, 'confirmed by a second authoritative read');
-    assert.strictEqual(real._priceCorrected, undefined,
-      'this is a real -55% sale, NOT a correction — suppressing it was the bug');
-  });
-
-  test('a rise between two prices of the SAME provenance is ordinary', () => {
+  test('a rise between two prices of the SAME provenance clears the streak', () => {
     const next = confirm(row({ price: 229, _pricePinned: true, lastSeen: T0 + 6000 }),
       row({ price: 100, _pricePinned: true, _steepDropStreak: 1 }));
     assert.strictEqual(next.price, 229, 'a real price rise is taken');
-    assert.strictEqual(next._steepDropStreak, 0, 'and the stale drop streak is cleared');
+    assert.strictEqual(next._steepDropStreak, 0,
+      'here the rise IS evidence — both readings are authoritative');
+  });
+
+  test('KNOWN REMAINING GAP: the correction branch still compares to the stored price', () => {
+    // Documented rather than silently left. After an unscoped excursion the next genuine pinned
+    // read looks like unpinned -> pinned, so a REAL steep sale is classified as a correction and
+    // suppressed. The real fix is to compare against the last AUTHORITATIVE price rather than
+    // whatever unpinned value happens to be stored; that is a design change, not a patch, and is
+    // deliberately not attempted in the same sitting as the four fixes above.
+    const afterExcursion = row({ price: 229, _pricePinned: false, _steepDropStreak: 1 });
+    const real = confirm(row({ price: 45, _pricePinned: true, lastSeen: T0 + 240_000 }),
+      afterExcursion);
+    assert.strictEqual(real._priceCorrected, true,
+      'still treated as a correction — this assertion is a REMINDER, not an endorsement');
   });
 });
 

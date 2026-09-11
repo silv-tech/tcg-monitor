@@ -660,11 +660,15 @@ class AmazonAdapter extends BaseAdapter {
         logger.warn(`Amazon: guessed-row scan failed: ${err.message}`));
     }
 
-    // The AOD known-ASIN sweep is our ONLY reliable restock detector for tracked products, and
-    // it uses a different endpoint (AOD) over a different pool (residential-us) than search (ISP
-    // exits). It was previously skipped whenever SEARCH looked unhealthy — which blinded restock
-    // detection during a search block for no reason, since the two do not share a pool. Gate it
-    // only on its own cadence and its own AOD cooldown (handled inside _monitorKnownAsins).
+    // The AOD known-ASIN sweep. STALE CLAIM CORRECTED: this comment used to say it was "our ONLY
+    // reliable restock detector for tracked products". It is not, and has not been since the offers
+    // lane took that job — _runOffersLane is now what "guarantees a restock like B0H78BB9TY is
+    // caught", and AOD is disabled outright (AMAZON_AOD_STEALTH unset) because the endpoint blocked.
+    // Believing that stale claim is what kept a 19-minute no-op sweep in the hot path.
+    //
+    // It still uses a different endpoint over a different pool (residential-us) than search (ISP
+    // exits), so it is correctly NOT gated on search health — the two share no pool. Gated on its
+    // own cadence, its own AOD cooldown, and (first) on AOD being enabled at all.
     if (now - this._lastAodSweepAt >= this.aodSweepIntervalMs) {
       this._lastAodSweepAt = now;
       await this._monitorKnownAsins(products);
@@ -938,6 +942,18 @@ class AmazonAdapter extends BaseAdapter {
 
           if (data && data.price > 0) {
             product.price = data.price;
+            // This is a REAL AOD buy-box read, so it clears both blind flags the tile stamped.
+            //
+            // This lane is the fifth writer of a product row, and it was missed when the other four
+            // were fixed because it MUTATES the row `_buildFromSearch` produced rather than building
+            // an object literal — counting literals instead of writers is what let it through.
+            // Leaving `_stockUnobserved` set here is the worse half: poll-adapter would then refuse
+            // the in-stock reading as a blind replay, store inStock:false, AND the row would never
+            // be re-queued (it now has a price), so the restock this lane exists to rescue would be
+            // lost permanently. Latent only because AOD is disabled; wrong regardless.
+            delete product._stockUnobserved;
+            delete product._priceUnobserved;
+            delete product._priceUnknown;
             // AOD settles STOCK too, not just price. The tile marked this out of stock only
             // because it showed no price; AOD reads the actual buy box (an offer listing id
             // plus a price), so if it says buyable, it is. Without this the item keeps a real
@@ -1202,9 +1218,13 @@ class AmazonAdapter extends BaseAdapter {
       // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
       // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
       _stockUnobserved: undefined,
-      // Same for price: this read supplied one (or fell back to the cached value, in which case
-      // `_pricePinned` above already records that nothing new was learned about it).
-      _priceUnobserved: undefined,
+      // Price is CONDITIONAL, exactly like `_pricePinned` directly above — and for the same reason.
+      // `_offersToData` returns `inStock: price != null`, so `data.price === null` means there was
+      // no buy box and NO price was parsed at all; `price: data.price || cached.price` is then a
+      // pure replay out of the catalogue. Clearing the flag unconditionally there declared a replay
+      // to be an observation, which let a steep drop confirm off one real read — the same
+      // self-confirmation this flag was added to prevent, at ~18s instead of 6s.
+      _priceUnobserved: data.price ? undefined : true,
       url: cached.url || `https://www.amazon.ca/dp/${target}`,
       lastSeen: now,
     };
@@ -1318,9 +1338,13 @@ class AmazonAdapter extends BaseAdapter {
       // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
       // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
       _stockUnobserved: undefined,
-      // Same for price: this read supplied one (or fell back to the cached value, in which case
-      // `_pricePinned` above already records that nothing new was learned about it).
-      _priceUnobserved: undefined,
+      // Price is CONDITIONAL, exactly like `_pricePinned` directly above — and for the same reason.
+      // `_offersToData` returns `inStock: price != null`, so `data.price === null` means there was
+      // no buy box and NO price was parsed at all; `price: data.price || cached.price` is then a
+      // pure replay out of the catalogue. Clearing the flag unconditionally there declared a replay
+      // to be an observation, which let a steep drop confirm off one real read — the same
+      // self-confirmation this flag was added to prevent, at ~18s instead of 6s.
+      _priceUnobserved: data.price ? undefined : true,
       url: cached.url || `https://www.amazon.ca/dp/${target}`,
       lastSeen: now,
       _watchlist: true,
@@ -1787,6 +1811,26 @@ class AmazonAdapter extends BaseAdapter {
    * Returns cached data for ASINs where the fetch fails (prevents false OOS).
    */
   async _monitorKnownAsins(products) {
+    // AOD IS DISABLED — DO NOT WALK THE CATALOGUE TO CALL A FUNCTION THAT RETURNS null.
+    //
+    // AOD was replaced by the offers lane, but it was switched off at the LEAF: _stealthCheckAsin
+    // returns null immediately unless AMAZON_AOD_STEALTH=1. The loop around it kept running, and
+    // that loop sleeps 1.6-2.2s between every ASIN to pace a 0.45 req/s endpoint budget. With 596
+    // known ASINs that is ~19 MINUTES of sleeping to accomplish nothing:
+    //
+    //   MEASURED 2026-09-11: poll body 1,146,747 ms, logging
+    //   "Amazon: MONITOR — 0/596 ASINs updated (free stealth). 0% success."
+    //
+    // It runs inside a 6s poll, so the scheduler abandons the poll at 120s ("Adapter timeout after
+    // 120000ms") while the sweep keeps going. That produced TWO total Amazon blackouts in a 26
+    // minute window — 7.7% of the time with zero detection on EVERY lane, free and paid — because
+    // an abandoned poll returns no products at all. Snapshots confirmed 0 of 24 priority ASINs
+    // fresh during them.
+    //
+    // Read at call time, mirroring the leaf gate, so flipping AMAZON_AOD_STEALTH=1 restores the
+    // whole lane with no code change.
+    if (process.env.AMAZON_AOD_STEALTH !== '1') return;
+
     // Single-flight: the 120s poll timeout ORPHANS a long sweep (JS can't cancel it) but frees the
     // poll guard, so the next poll could start a second sweep that races this one over _aodCursor
     // and _knownProducts. Skip if one is already running — the carried-forward cache (set in
@@ -2054,9 +2098,13 @@ class AmazonAdapter extends BaseAdapter {
       // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
       // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
       _stockUnobserved: undefined,
-      // Same for price: this read supplied one (or fell back to the cached value, in which case
-      // `_pricePinned` above already records that nothing new was learned about it).
-      _priceUnobserved: undefined,
+      // Price is CONDITIONAL, exactly like `_pricePinned` directly above — and for the same reason.
+      // `_offersToData` returns `inStock: price != null`, so `data.price === null` means there was
+      // no buy box and NO price was parsed at all; `price: data.price || cached.price` is then a
+      // pure replay out of the catalogue. Clearing the flag unconditionally there declared a replay
+      // to be an observation, which let a steep drop confirm off one real read — the same
+      // self-confirmation this flag was added to prevent, at ~18s instead of 6s.
+      _priceUnobserved: data.price ? undefined : true,
       shipsToHome: true,
       // Every other adapter stamps this (bestbuy, ebgames, costco, walmart); Amazon — the one
       // with the client's hand-given list — did not. Without it a restock detected FIRST by the

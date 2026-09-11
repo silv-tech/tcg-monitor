@@ -12,6 +12,14 @@
  * together, and count a 503 from ANY lane toward tripping that cooldown (not only the sweep).
  */
 
+// These tests exercise the AOD lane's INTERNAL mechanics, so the lane has to be on. AOD is disabled
+// in production (AMAZON_AOD_STEALTH unset) and `_monitorKnownAsins` now returns immediately in that
+// case — otherwise the sweep walked the whole catalogue sleeping 1.6-2.2s per ASIN to call a leaf
+// that returns null, ~19 minutes of nothing, which timed out the poll and blacked out every Amazon
+// lane. The mechanics below still matter because the flag can be flipped back on, so enable it here.
+// node --test runs each file in its own process, so this does not leak to other suites.
+process.env.AMAZON_AOD_STEALTH = '1';
+
 const { test, describe, afterEach } = require('node:test');
 const assert = require('node:assert');
 

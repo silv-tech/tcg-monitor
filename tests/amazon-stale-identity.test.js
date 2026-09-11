@@ -22,6 +22,14 @@
 const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert');
 
+// These tests drive the real _monitorKnownAsins (the AOD sweep), so the lane has to be on. AOD is
+// disabled in production (AMAZON_AOD_STEALTH unset) and the sweep now returns immediately in that
+// case — otherwise it walked the whole catalogue sleeping 1.6-2.2s per ASIN to call a leaf that
+// returns null: ~19 minutes of nothing, which timed out the 6s poll and blacked out every Amazon
+// lane. The identity mechanics below still matter because the flag can be flipped back on.
+// node --test runs each file in its own process, so this does not leak to other suites.
+process.env.AMAZON_AOD_STEALTH = '1';
+
 const AmazonAdapter = require('../src/adapters/amazon');
 const state = require('../src/core/state');
 // The identity denylist is Redis-backed, and state.js calls its own internal getRedis(), so a

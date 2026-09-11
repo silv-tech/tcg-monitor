@@ -13,6 +13,14 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert');
 
+// The SPEED tests below exercise the AOD sweep's cursor mechanics, so the lane has to be on. AOD is
+// disabled in production (AMAZON_AOD_STEALTH unset) and `_monitorKnownAsins` now returns at once in
+// that case — otherwise it walked the whole catalogue sleeping 1.6-2.2s per ASIN to call a leaf that
+// returns null: ~19 minutes of nothing, which timed out the 6s poll and blacked out every Amazon
+// lane. The cursor mechanics still matter because the flag can be flipped back on.
+// node --test runs each file in its own process, so this does not leak to other suites.
+process.env.AMAZON_AOD_STEALTH = '1';
+
 const AmazonAdapter = require('../src/adapters/amazon');
 
 // The AOD sweep caches the offer-listing id / seller in Redis (fire-and-forget). In a bare
