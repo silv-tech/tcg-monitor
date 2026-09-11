@@ -70,20 +70,34 @@
       "watchlistIntervalMs": 30000,
       "priorityOffersIntervalMs": 18000
     },
-    "_priorityOffersNote": "priorityOffersIntervalMs paces the dedicated priority offers loop (one paid structured/offers call per interval, round-robin over priorityAsins). 18000ms cycles the 10 priority ASINs in ~180s = ~4,800 credits/day, which fits the current 1M/mo ScraperAPI plan. FLIP TO 6000 (→ ~60s/ASIN, ~14,400/day) ONLY AFTER the plan is upgraded to ~1.5M/mo, and raise AMAZON_PRIORITY_OFFERS_DAILY_CAP to ~15000 at the same time — otherwise the priority lane's own daily cap (default 5000) will stop it partway through the day. Shipping safe at 180s; the 60s flip is a one-value change.",
+    "_priorityOffersNote": "priorityOffersIntervalMs paces the priority offers round-robin (one paid structured/offers call per interval, cycling priorityAsins). At the MEASURED 5 credits/call, 18000ms = 4,800 CALLS/day = ~24,000 credits/day (NOT the old 4,800-credit figure — that was stale 1-credit math). Baseline per-ASIN cadence = 18s × (#priorityAsins): with 24 ASINs that is ~432s/ASIN for a lone first-item — the BURST (fires all priorityAsins in parallel on any OOS→in-stock flip) is what catches a drop WAVE in seconds. Tightening the baseline for all of them (18s→lower) multiplies cost and needs a ScraperAPI plan upgrade; the auto-promotion redesign (general lane → burst) is the path to dropping this manual list.",
     "priorityAsins": [
+      "B0H77W4411",
+      "B0H77VZBX4",
+      "B0H7FDBNSB",
+      "B0G3CV6Z9D",
+      "B0DYR8D7YC",
+      "B0G3CY83L5",
+      "B0G78HDPPR",
+      "B0GW2DK37Q",
+      "B0DLPL7LC5",
+      "B0H2JVZYZZ",
+      "B0G76GTMNW",
+      "B0H6DTXPK1",
+      "B0F6PMVQWQ",
+      "B0F6PJ15QH",
       "B0H784PD4X",
       "B0H78BB9TY",
       "B0H783FY5Z",
       "B0H788HLPY",
       "B0H7815T4Y",
-      "B0H77W4411",
       "B0H7818RCM",
       "B0H784PJ49",
       "B0H7F8BHC3",
-      "B0H7818YHY"
+      "B0H7818YHY",
+      "B0GYVHLP4L"
     ],
-    "_priorityAsinsNote": "The 10 Pokemon TCG 30th Celebration ASINs — all currently OOS and search-invisible, so the paid offers lane is the ONLY signal that can catch their restock. They are a subset of watchlist (below); watchlist gets the never-miss exemptions, priorityAsins additionally get the tight dedicated offers cadence.",
+    "_priorityAsinsNote": "Every hand-given ASIN gets the priority/burst lane (client asked for all of them fast), so a drop WAVE catches all of them in seconds via the burst. Baseline first-item cadence is 18s×count (~432s at 24) — a plan upgrade tightens that. B0GYVHLP4L = Mega Evolution Pitch Black ETB (added 2026-09-12). The 10 30th-Celebration items remain the core; the rest were promoted from watchlist-only. Auto-promotion (general offers lane arms the burst on any invisible in-scope flip) is the planned replacement for hand-curating this list.",
     "watchlist": [
       "B0H77W4411",
       "B0H77VZBX4",
@@ -107,7 +121,8 @@
       "B0H7818RCM",
       "B0H784PJ49",
       "B0H7F8BHC3",
-      "B0H7818YHY"
+      "B0H7818YHY",
+      "B0GYVHLP4L"
     ]
   },
   {
