@@ -29,6 +29,10 @@
 (() => {
   const TAG = 'tcg-pc-bridge';
 
+  // Every wall this site is known to raise. Imperva/Incapsula is the one it actually uses under
+  // load; the others are kept because they have all been seen on this domain at some point.
+  const BLOCK_MARKERS = /Incapsula|_Incapsula_Resource|incident ID|Request unsuccessful|distil|captcha-delivery|geo\.captcha|Pardon Our Interruption|Just a moment/i;
+
   /**
    * Pull the Product ld+json out of a fetched page.
    *
@@ -63,22 +67,35 @@
   }
 
   /**
-   * Is this a bot wall, or just a page we did not get?
+   * The wall this site actually puts up, captured verbatim.
    *
-   * An earlier version answered "anything under 5000 bytes is a block" and turned a single
-   * 1053-byte response into a 30-minute halt. The user saw no challenge, the next cycles fetched
-   * normally, and re-fetching those URLs returned 200/459KB — a real challenge does not heal
-   * itself. Size alone is not evidence.
+   * Not DataDome — IMPERVA. Under sustained reading pokemoncenter.com answers HTTP **200** with
+   * a ~1050-byte page (measured 1048-1058b across dozens) whose only content is:
    *
-   * Nor are the markers alone: DataDome's scripts load on perfectly good Pokemon Center pages,
-   * and the monitor's adapter carries a note about that exact mistake discarding every real page.
-   * A block is HTTP 429, or a body both too small to be a page AND carrying challenge markup.
+   *     sessionStorage.setItem(...)  distil  document.referrer  <iframe>
+   *     "Request unsuccessful. Incapsula incident ID ..."
+   *
+   * Status 200, no Retry-After, no x-datadome header, no redirect. It looks like a successful
+   * fetch to everything except a human reading the body. Measured 2026-09-11: one good 435KB
+   * page, then ELEVEN consecutive blocks.
+   *
+   * The first detector missed it entirely — it looked for DataDome and Cloudflare wording, so
+   * these were reported as "short body" and the bridge kept hammering a server that was refusing
+   * every request. The monitor's own adapter had known about Imperva all along
+   * (`isChallengePage` matches `_Incapsula_Resource`); the markers simply were not carried here.
+   *
+   * Two traps remain live in this function and both cost a release already:
+   *   - keying on `datadome`/`captcha-delivery` ALONE is wrong: those scripts load on perfectly
+   *     good pages, and the adapter carries a note about that mistake discarding every real page.
+   *   - keying on SIZE alone is wrong: it turned one short response into a 30-minute halt when
+   *     nothing was blocking us.
+   * A block is HTTP 429, or a body both too small to be a page AND carrying wall markup.
    */
   function looksBlocked(html, res) {
     if (res && res.status === 429) return true;
     if (!html) return true;
     if (html.length >= 5000) return false;
-    return /captcha-delivery|geo\.captcha|Pardon Our Interruption|Just a moment/i.test(html);
+    return BLOCK_MARKERS.test(html);
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

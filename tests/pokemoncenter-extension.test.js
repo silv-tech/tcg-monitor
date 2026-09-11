@@ -157,3 +157,40 @@ describe('the reader lives in the PAGE world, and stays inert under test', () =>
       'the relay needs chrome.runtime, which does not exist in the MAIN world');
   });
 });
+
+describe('the wall this site actually raises is IMPERVA, not DataDome', () => {
+  // Captured verbatim from the live site 2026-09-11. Under sustained reading pokemoncenter.com
+  // answers HTTP 200 with ~1050 bytes — measured 1048-1058b across dozens — no Retry-After, no
+  // x-datadome header, no redirect. It looks like a successful fetch to everything except a
+  // human reading the body. One good 435KB page, then eleven consecutive blocks.
+  //
+  // The first detector looked only for DataDome and Cloudflare wording, so it called these
+  // "short body" and the bridge kept hammering a server refusing every request.
+  const IMPERVA = '<html><head><meta name="robots" content="noindex"><script>'
+    + '(function(){window.sessionStorage.setItem("distil_referrer",document.referrer);})();'
+    + '</script><script src="/vice-come-Soldenyson-it-non-Banquoh-Chare-Hart-C" async></script>'
+    + '</head><body><h2>Request unsuccessful. Incapsula incident ID: 1097000730123456789-123</h2>'
+    + '<iframe src="/_Incapsula_Resource?CWUDNSAI=9"></iframe></body></html>';
+
+  test('the Imperva block page is recognised as a block', () => {
+    // The live pages measured 1048-1058 bytes; this fixture is a trimmed copy of the same
+    // markup. What matters is that it is far below a product page and carries the wall's words.
+    assert.ok(IMPERVA.length < 5000, 'well under the size of any real product page');
+    assert.strictEqual(looksBlocked(IMPERVA, { status: 200 }), true,
+      'HTTP 200 with an Incapsula incident body is a wall, not a page');
+  });
+
+  test('its distinguishing words each trip the check on their own', () => {
+    for (const marker of ['Incapsula', 'Request unsuccessful', 'distil', '_Incapsula_Resource']) {
+      assert.strictEqual(looksBlocked(`<html><body>${marker}</body></html>`, { status: 200 }), true, marker);
+    }
+  });
+
+  test('nothing is extracted from it, so it can never be mistaken for stock', () => {
+    assert.strictEqual(extractProductLd(IMPERVA), null);
+  });
+
+  test('a real page mentioning none of it is still fine', () => {
+    assert.strictEqual(looksBlocked(page([REAL_PRODUCT]), { status: 200 }), false);
+  });
+});
