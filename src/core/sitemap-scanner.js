@@ -277,6 +277,41 @@ function isPokemonCenterTCG(url) {
   return PC_TCG_KEYWORDS.some(kw => slug.includes(kw));
 }
 
+/**
+ * EVERY Pokemon Center product is trackable. The client asked for the whole store, not a TCG
+ * subset, and `isPokemonCenterTCG` above was discarding roughly 7,600 of the 8,415 distinct SKUs —
+ * which is what the "0 TCG" in `34593 product URLs … 0 new URLs, 0 TCG` meant.
+ *
+ * Widening cannot retro-fire on the existing catalogue: `diffUrls` seeds the Redis set with ALL
+ * URLs unfiltered (its `sadd` runs on every batch regardless of this predicate) and applies the
+ * filter only AFTER the diff, so everything already in the sitemap is already known.
+ *
+ * `isPokemonCenterTCG` is kept, not deleted — it is the honest answer to "is this a card product",
+ * and the adapter will want it when stock tracking returns.
+ */
+function pcIsTrackable(url) {
+  if (!url || typeof url !== 'string') return false;
+  if (!url.includes('/product/')) return false;
+  return !!pcExtractSlug(url);
+}
+
+/**
+ * A batch this large is not a day's new listings — it is the sitemap's URL SHAPE having moved
+ * (a locale path change, a domain change, a trailing slash), which makes every URL miss the Redis
+ * set at once. With the TCG filter gone that would be ~34,600 alerts in a single pass.
+ *
+ * The existing first-run guard does not cover it: that only fires when the set is EMPTY, and after
+ * a shape change the set is full of URLs that no longer match anything.
+ *
+ * So the batch is re-seeded loudly instead of alerted. 500 is well above any real day at this
+ * store and far below the ~8,415-SKU catalogue.
+ */
+const PC_MAX_NEW_PER_SCAN = Number(process.env.PC_MAX_NEW_PER_SCAN) || 500;
+
+function pcIsImplausibleBatch(newCount) {
+  return newCount > PC_MAX_NEW_PER_SCAN;
+}
+
 async function scanPokemonCenter() {
   logger.info('Early SKU [Pokemon Center]: scanning sitemap...');
   const start = Date.now();
@@ -300,10 +335,24 @@ async function scanPokemonCenter() {
     return [];
   }
 
-  const tcgUrls = newUrls.filter(isPokemonCenterTCG);
-  logger.info(`Early SKU [Pokemon Center]: ${elapsed}s — ${newUrls.length} new URLs, ${tcgUrls.length} TCG`);
+  // ALL products, not just TCG — the client tracks the whole store.
+  const trackable = newUrls.filter(pcIsTrackable);
+  const tcgCount = trackable.filter(isPokemonCenterTCG).length;
+  logger.info(`Early SKU [Pokemon Center]: ${elapsed}s — ${newUrls.length} new URLs, `
+    + `${trackable.length} trackable (${tcgCount} TCG, ${trackable.length - tcgCount} other)`);
 
-  return tcgUrls.map(url => {
+  // A batch this size is a sitemap URL-shape change, not a day's listings. Everything is already
+  // in the Redis set by now (diffUrls sadd'd it), so returning nothing re-seeds by definition.
+  if (pcIsImplausibleBatch(trackable.length)) {
+    logger.error(`Early SKU [Pokemon Center]: ${trackable.length} "new" URLs exceeds `
+      + `PC_MAX_NEW_PER_SCAN (${PC_MAX_NEW_PER_SCAN}) — treating this as a sitemap URL-shape `
+      + 'change and RE-SEEDING instead of alerting. No alerts sent. If this is genuine, raise '
+      + 'PC_MAX_NEW_PER_SCAN; if not, the URL format moved and the slug/locale parsing needs '
+      + 'updating. Sample: ' + trackable.slice(0, 3).join(' | '));
+    return [];
+  }
+
+  return trackable.map(url => {
     const sku = pcExtractSku(url);
     const slug = pcExtractSlug(url);
     const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -374,4 +423,12 @@ async function scanSitemaps() {
   return allEvents;
 }
 
-module.exports = { scanSitemaps, SCAN_INTERVAL_MS };
+module.exports = {
+  scanSitemaps,
+  SCAN_INTERVAL_MS,
+  // Exported for testing: the trackability decision and the flood guard are the two things that
+  // decide whether a client gets every new Pokemon Center listing or 34,600 alerts at once.
+  pcIsTrackable,
+  pcIsImplausibleBatch,
+  PC_MAX_NEW_PER_SCAN,
+};
