@@ -124,11 +124,25 @@ const OFFERS_LANE_ENABLED = process.env.AMAZON_OFFERS_LANE !== '0';
 // against a budget whose sustainable rate to month-end is 27,540/day. At 60s it is 1,140 calls =
 // 5,700 credits/day, saving 11,400.
 //
-// Why this lane and not the client-facing one: it serves the ~600 NON-watchlist, search-invisible
-// ASINs stalest-first, so at 3,420 calls/day each was already only reached about every 2.5 hours.
-// 60s makes that ~7.6 hours on the least valuable rows in the catalogue. NONE of the client's 24
-// priority ASINs depend on it — they have their own round-robin plus a free tile check every poll
-// at zero cost — so this buys runway without touching the lane a competitor beat us on.
+// CORRECTION, measured after the change landed. The justification written here first said this
+// lane "serves the ~600 NON-watchlist, search-invisible ASINs … every 2.5 hours, becoming ~7.6
+// hours". That was wrong, and the real numbers are worse per-row and better per-pool:
+//
+//   MEASURED pool: 18-32 LIVE search-invisible rows, not ~600. (Rows whose lastSeen never moves
+//   across a window: 78 over 7.8 min, 63 over 23.4 min; minus the 45-46 dead hydration-skipped
+//   rows that no lane touches at all, that is 32 and 18 respectively. 13 of the 18 are IN STOCK.)
+//   MEASURED lap AT 60s: p50 1,470s (24.5 min), p90 2,764s. At the old 20s it was ~1/3 of that.
+//
+// So the cut tripled the blind window on ~20-30 rows, over half of them currently in stock, rather
+// than stretching 2.5h to 7.6h across 600. The decision still stands on its actual merit — 0 of the
+// client's 24 priority ASINs are in that set (verified across 5 snapshots over 23.4 min; they are
+// covered by the priority round-robin plus, for 11 of them, a free tile check every poll) — but the
+// honest cost is "a sell-out on one of ~18 in-stock non-priority rows is noticed up to 24.5 min
+// late", not "the least valuable rows in the catalogue".
+//
+// Recorded here because a stale justification in a comment is how this codebase kept a 19-minute
+// no-op AOD sweep in the hot path: the comment said it was the only reliable restock detector long
+// after that stopped being true, and nobody re-read the code.
 const OFFERS_INTERVAL_MS = Number(process.env.AMAZON_OFFERS_INTERVAL_MS) || 60000;
 const OFFERS_STALE_MS = Number(process.env.AMAZON_OFFERS_STALE_MS) || 10 * 60 * 1000; // sweep-missed
 const OFFERS_DAILY_CAP = Number(process.env.AMAZON_OFFERS_DAILY_CAP) || 4000; // ScraperAPI credits/day
