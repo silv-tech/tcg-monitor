@@ -43,13 +43,22 @@ const REAL_DRIFTS = [
 ];
 
 // Real sealed products the scope rule wrongly rejects, with the name we had stored.
+// FIXTURE UPDATED 2026-09-12. The three ASINs this file was written around (B0GSCJ3V5C,
+// B0GSC9654K, B0GTRFRHW3) are no longer scope false positives: the root cause was fixed in
+// scope.js — `/\bpromotion(?:al)? cards?\b/i` matched the SINGULAR, which is how a sealed box
+// describes its own contents, and the marker is now plural-only as its own comment always
+// specified. See tests/scope-singular-promo-card.test.js.
+//
+// The guard below is NOT redundant, so this file keeps testing it with a false positive that is
+// still live. B0H7818YHY logs, on EVERY paid read:
+//   priority-offers — B0H7818YHY live title reads out of scope
+//   ("Pokémon TCG: 30th Celebration Binder Collection") — KEEPING (priority)
+// It is genuine sealed product rejected by ACCESSORY_KEYWORDS on the word "binder". It survives
+// only because it is watchlisted; a non-watchlisted Binder Collection would be deleted outright.
+// That is the class this guard exists for: our filter's opinion must never denylist a real product.
 const SCOPE_FALSE_POSITIVES = [
-  ["Pokemon TCG: Mega Evolution: Ascended Heroes: Pack of 2 Blister Packs (2 Booster Packs, Promotion Card and Coin) (Larry's Komala)",
-   "Pokemon TCG: Mega Evolution: Ascended Heroes: Pack of 2 Blister Packs (2 Booster Packs, Promotion Card and Coin) (Larry's Komala)"],
-  ['Pokemon TCG Mega Evolution Ascended Heroes 2-pack blister',
-   "Pokemon TCG: Mega Evolution: Ascended Heroes: 2-pack blister (2 supplementary packages, promotional card and coins) (Erika's Tangela)"],
-  ['Mega Zygarde-ex Premium Collection',
-   'Mega Zygarde-ex Premium Collection by GCC Pokemon (one promotional card, one giant lenticular card, one sticker and eight expansion packs)'],
+  ['Pokemon TCG 30th Celebration Binder Collection',
+   'Pokémon TCG: 30th Celebration Binder Collection'],
 ];
 
 describe('every real drift is still caught', () => {

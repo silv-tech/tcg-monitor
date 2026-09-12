@@ -281,7 +281,19 @@ const SINGLE_CARD_MARKERS = [
   //   "NM-Mint" / "Slightly Played" — condition grades. Nothing factory-sealed is graded.
   // Verified against 3,386 live in-scope products and 7,500 hobbiesville listings: 101 singles
   // removed, and every sealed product above still kept.
-  /\bpromotion(?:al)? cards?\b/i,
+  // PLURAL ONLY. The `s?` here matched the SINGULAR too, which is precisely how a sealed box
+  // describes its own contents ("...2 Booster Packs, Promotion Card and Coin"), so three genuine
+  // sealed products were deleted from the Amazon catalogue on EVERY poll, continuously:
+  // B0GSC9654K and B0GSCJ3V5C (Ascended Heroes blisters) and B0GTRFRHW3 (Mega Zygarde-ex Premium
+  // Collection). They never reached Redis — `_buildFromSearch` re-admitted them each poll on the
+  // looser hasGameScope/isTCGProduct pair and the scope purge deleted them again — so they could
+  // never diff and never alert. Measured live 2026-09-12, firing every 30-90s for hours.
+  //
+  // Making it plural-only is not a new heuristic; it is what the contract three lines above
+  // already specifies ("plural CARDS, i.e. the cards, not the box"). Note also that isSingleCard
+  // runs BEFORE the DEFINITE_SEALED shortcut, so two of those three matched a definite sealed form
+  // and never got to say so — the ordering gives this marker no second chance to be wrong.
+  /\bpromotion(?:al)? cards\b/i,
   /\(P-\d{2,4}\)/,
   /\b(?:NM|LP|MP|HP|SP)-(?:mint|near ?mint|lightly played|played)\b/i,
   /\bslightly played\b/i,
