@@ -93,27 +93,100 @@ describe('a stale third-party verdict cannot suppress a restock', () => {
    * The same null pair comes back when the API key is missing or the budget is paused, so a budget
    * exhaustion would have flipped suppression OFF for every restock at once.
    */
-  test('a RECENT third-party verdict is trusted, not discarded — the cooldown case', async () => {
+  /**
+   * THE LOST RESTOCK — measured in production 2026-09-12 01:15:28Z.
+   *
+   * B0H7FDBNSB "30th Celebration Knock Out Collection", a client priority ASIN. We read it IN STOCK
+   * at $16.99 and suppressed the alert on a cached "ONE AT A TIME CANADA" verdict. Amazon itself
+   * held the buy box — a competing monitor alerted it at 01:14:34 — so the cached verdict was
+   * simply WRONG and the client lost the restock.
+   *
+   * It was suppressed because the verdict was RECENT, and the age test trusted recency. That is the
+   * wrong question: a seller verdict taken BEFORE a restock is stale by definition however many
+   * seconds old it is, because the restock IS the event that changes who holds the buy box. The
+   * normal resting state of an out-of-stock ASIN is a marketplace seller holding it, so recency is
+   * exactly what made a wrong verdict look trustworthy.
+   */
+  test('THE LOST RESTOCK: a RECENT verdict cannot suppress a restock', async () => {
+    calls.cachedSeller = 'ONE AT A TIME CANADA';
+    calls.cachedAgeMs = 60_000;          // one minute old — the case that lost B0H7FDBNSB
+    calls.liveSeller = 'Amazon.ca';      // Amazon actually holds the buy box
+
+    const e = event();                   // RESTOCK
+    await delivery.enrichEvent(e);
+
+    assert.strictEqual(calls.liveFetches, 1,
+      'a restock must re-read regardless of how recent the cached verdict is');
+    assert.ok(!e._thirdPartySeller, 'and the real Amazon restock must go out');
+  });
+
+  test('THE LOST RESTOCK, re-read refused: fail OPEN and send', async () => {
+    // The scraper refuses a second read of the same ASIN inside its 5-minute cooldown, returning
+    // the same {null,null} as a genuine failure. Falling back to the pre-restock verdict is what
+    // must never happen again: a wasted click beats a suppressed Amazon restock.
+    calls.cachedSeller = 'ONE AT A TIME CANADA';
+    calls.cachedAgeMs = 60_000;
+    calls.liveSeller = null;             // cooldown / budget pause / missing key
+
+    const e = event();
+    await delivery.enrichEvent(e);
+
+    assert.ok(!e._thirdPartySeller,
+      'an unobtainable re-read must not resurrect a verdict taken before the transition');
+  });
+
+  test('PREORDER_LIVE is a stock transition too', async () => {
+    calls.cachedSeller = 'ONE AT A TIME CANADA';
+    calls.cachedAgeMs = 30_000;
+    calls.liveSeller = 'Amazon.ca';
+
+    const e = event({ type: 'PREORDER_LIVE' });
+    await delivery.enrichEvent(e);
+    assert.strictEqual(calls.liveFetches, 1);
+    assert.ok(!e._thirdPartySeller);
+  });
+
+  test('a GENUINE third-party restock is STILL suppressed when the live read says so', async () => {
+    // Failing open applies only when the verdict cannot be obtained. A fresh live read that says
+    // third-party is real evidence and still suppresses.
+    calls.cachedSeller = 'ONE AT A TIME CANADA';
+    calls.cachedAgeMs = 60_000;
+    calls.liveSeller = 'ONE AT A TIME CANADA';
+
+    const e = event();
+    await delivery.enrichEvent(e);
+    assert.strictEqual(e._thirdPartySeller, true);
+    assert.strictEqual(e._sellerFresh, true, 'and it is marked as a live verdict, not a cached one');
+  });
+
+  /**
+   * These two originally asserted this behaviour for a RESTOCK. Production disproved that on
+   * 2026-09-12: trusting a recent verdict on a stock transition suppressed a real Amazon restock
+   * (B0H7FDBNSB, above). The age rule is still right for events that are NOT a transition — there
+   * the buy box has not necessarily changed, so a verdict younger than the re-read cooldown is the
+   * best evidence available and a budget pause must not flip suppression off wholesale.
+   */
+  test('a RECENT verdict IS trusted on a non-transition event — the cooldown case', async () => {
     calls.cachedSeller = 'Japan Big Mall';
     calls.cachedAgeMs = 45_000;          // 45s old: inside the re-read cooldown
     calls.liveSeller = null;             // a re-read would be refused and return nulls
 
-    const e = event();                   // RESTOCK
+    const e = event({ type: 'PRICE_CHANGE' });
     await delivery.enrichEvent(e);
 
     assert.strictEqual(calls.liveFetches, 0,
       'a verdict younger than the cooldown cannot be re-read, so it must not be discarded');
     assert.strictEqual(e._thirdPartySeller, true,
-      'it was taken during this same stock episode — it is evidence, not staleness');
+      'no stock transition happened, so the recent verdict still describes the buy box');
   });
 
-  test('a budget pause cannot flip suppression OFF for every restock at once', async () => {
+  test('a budget pause cannot flip suppression OFF wholesale on non-transition events', async () => {
     // scraper-api returns the same {null,null} when the key is missing or the budget is paused.
     calls.cachedSeller = 'Japan Big Mall';
     calls.cachedAgeMs = 2 * 60_000;
     calls.liveSeller = null;
 
-    const e = event();
+    const e = event({ type: 'PRICE_CHANGE' });
     await delivery.enrichEvent(e);
     assert.strictEqual(e._thirdPartySeller, true,
       'an unavailable re-read must never be read as "Amazon holds the buy box"');

@@ -385,11 +385,31 @@ class DeliveryQueue {
         //          -> "fail open" -> a scalper listing is DELIVERED to the client.
         //
         // The same null pair comes back when the API key is missing or the budget is paused, so
-        // without an age test a budget exhaustion would flip suppression OFF for every restock at
-        // once. A verdict younger than the cooldown cannot be re-read anyway, and was taken during
-        // this same stock episode, so it is the best evidence available — trust it.
+        // without an age test a budget exhaustion would flip suppression OFF for every alert at
+        // once. A verdict younger than the cooldown cannot be re-read anyway, so for events that
+        // are NOT a stock transition it is the best evidence available — trust it.
         const cachedAgeMs = cachedWouldSuppress ? await getSellerCacheAgeMs(asin) : null;
-        const cachedIsRecent = cachedAgeMs != null && cachedAgeMs < SELLER_RECHECK_AFTER_MS;
+
+        // BUT AGE IS THE WRONG QUESTION FOR A STOCK TRANSITION, and that cost a real restock.
+        //
+        // MEASURED 2026-09-12 01:15:28Z, B0H7FDBNSB "30th Celebration Knock Out Collection", a
+        // client priority ASIN. We read it IN STOCK at $16.99 and suppressed the alert on a cached
+        // "ONE AT A TIME CANADA" verdict. Amazon itself held the buy box — a competing monitor
+        // alerted it at 01:14:34 — so the verdict was simply WRONG, and the client lost the restock.
+        //
+        // The verdict was recent in wall-clock terms, so the age test trusted it. That test asks
+        // the wrong thing. A seller verdict taken BEFORE a restock is stale BY DEFINITION however
+        // many seconds old it is, because the restock IS the event that changes who holds the buy
+        // box — and the normal resting state of an out-of-stock ASIN is a marketplace seller
+        // holding it. Recency is exactly what made it look trustworthy.
+        //
+        // So a stock transition invalidates the verdict outright. If the re-read cannot be obtained
+        // we FAIL OPEN and send: an alert naming a third-party seller is a wasted click, while a
+        // suppressed Amazon restock is the product failing at its one job. That is the client's
+        // explicit instruction after losing this one.
+        const isStockTransition = event.type === 'RESTOCK' || event.type === 'PREORDER_LIVE';
+        const cachedIsRecent = !isStockTransition
+          && cachedAgeMs != null && cachedAgeMs < SELLER_RECHECK_AFTER_MS;
 
         // Match the identity gate's type set rather than a narrower hand-picked one. Measured
         // 2026-09-12: the only two Amazon events in a 40-minute window were PRICE_CHANGE on
@@ -463,9 +483,10 @@ class DeliveryQueue {
           // what we are discarding is genuinely old. Say so, because silence here used to be
           // invisible.
           const ageMin = cachedAgeMs == null ? '?' : (cachedAgeMs / 60000).toFixed(0);
-          logger.warn(`Seller re-read failed for ${asin} — ignoring the ${ageMin}min-old cached `
-            + `verdict "${staleSeller}" and sending anyway (a stale verdict must not suppress a `
-            + `restock)`);
+          logger.warn(`Seller re-read failed for ${asin} (${event.type}) — ignoring the `
+            + `${ageMin}min-old cached verdict "${staleSeller}" and SENDING ANYWAY. A verdict taken `
+            + `before a stock transition cannot say who holds the buy box now; suppressing a real `
+            + `Amazon restock on one is how B0H7FDBNSB was lost on 2026-09-12.`);
         }
         // If no seller info (scrape failed), fail-open — send the alert anyway
       }
