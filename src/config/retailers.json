@@ -68,9 +68,9 @@
     "timing": {
       "aodSweepIntervalMs": 300000,
       "watchlistIntervalMs": 30000,
-      "priorityOffersIntervalMs": 18000
+      "priorityOffersIntervalMs": 15000
     },
-    "_priorityOffersNote": "priorityOffersIntervalMs paces the priority offers round-robin (one paid structured/offers call per interval, cycling priorityAsins). At the MEASURED 5 credits/call, 18000ms = 4,800 CALLS/day = ~24,000 credits/day (NOT the old 4,800-credit figure — that was stale 1-credit math). Baseline per-ASIN cadence = 18s × (#priorityAsins): with 24 ASINs that is ~432s/ASIN for a lone first-item — the BURST (fires all priorityAsins in parallel on any OOS→in-stock flip) is what catches a drop WAVE in seconds. Tightening the baseline for all of them (18s→lower) multiplies cost and needs a ScraperAPI plan upgrade; the auto-promotion redesign (general lane → burst) is the path to dropping this manual list.",
+    "_priorityOffersNote": "SET TO 15000 on 2026-09-12, and the reason is quantization, not a cadence increase. The lane only evaluates its interval on a poll tick (~6s, occasionally 12s), so 18000 — an exact multiple of 6000 — landed on tick 3 or tick 4 depending on ~6.3s of jitter, and the MEASURED gap was 24.0s p50, not 18s. 15000 resamples to a true ~18s effective gap: per-ASIN lap 576s -> 432s, expected detection 288s -> 216s, for +6,000 credits/day. Do NOT read 15000 as 'a paid call every 15s'. A competing monitor beat us by 3m23s on B0H77VZBX4 (2026-09-12) purely on this lap. priorityOffersIntervalMs paces the priority offers round-robin (one paid structured/offers call per interval, cycling priorityAsins). At the MEASURED 5 credits/call, 18000ms = 4,800 CALLS/day = ~24,000 credits/day (NOT the old 4,800-credit figure — that was stale 1-credit math). Baseline per-ASIN cadence = 18s × (#priorityAsins): with 24 ASINs that is ~432s/ASIN for a lone first-item — the BURST (fires all priorityAsins in parallel on any OOS→in-stock flip) is what catches a drop WAVE in seconds. Tightening the baseline for all of them (18s→lower) multiplies cost and needs a ScraperAPI plan upgrade; the auto-promotion redesign (general lane → burst) is the path to dropping this manual list.",
     "priorityAsins": [
       "B0H77W4411",
       "B0H77VZBX4",
