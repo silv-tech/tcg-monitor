@@ -299,14 +299,50 @@ describe('a stale third-party verdict cannot suppress a restock', () => {
   });
 });
 
-describe('seller cache TTL', () => {
-  test('is hours, not a month — a buy box is not a stable fact', () => {
+describe('seller cache: retention is long, trust is short', () => {
+  // This pair used to be ONE knob, and collapsing them caused a live incident both ways.
+  //
+  // Originally SELLER_TTL was 30 days and a month-old verdict suppressed a genuine Amazon
+  // restock (B0H7FDBNSB, a client priority ASIN, 2026-09-12). The TTL was cut to 6h to fix it.
+  // But a TTL does not distrust a verdict, it DELETES it — and a deleted verdict means the
+  // suppression gate never engages, because it keys off `cachedWouldSuppress`. Six hours after
+  // any read, third-party listings started failing open into the client's channel (B0FP9ZZ68C,
+  // "Sold by Brick Arsenal LLC", same day).
+  //
+  // Neither value was wrong; the single knob was. So both halves are pinned here, separately.
+
+  test('RETENTION: the verdict survives long enough to still be evidence', () => {
     const src = require('fs').readFileSync(require.resolve('../src/core/state'), 'utf8');
     const m = src.match(/const SELLER_TTL = ([^;]+);/);
     assert.ok(m, 'SELLER_TTL must still be declared');
     const ttl = Function(`"use strict"; return (${m[1]});`)();
-    assert.ok(ttl <= 86400,
-      `SELLER_TTL is ${ttl}s — a seller verdict older than a day says nothing about stock now`);
-    assert.ok(ttl >= 3600, 'but not so short that every alert pays for a re-read');
+    assert.ok(ttl >= 86400 * 7,
+      `SELLER_TTL is ${ttl}s — too short, and the gate goes BLIND rather than cautious: `
+      + 'getSellerCache returns null, cachedWouldSuppress is false, and a marketplace listing '
+      + 'fails open into the client channel. That is how B0FP9ZZ68C shipped.');
+  });
+
+  test('TRUST: age is measured from a stored timestamp, not inferred from the TTL', () => {
+    // Deriving age from the TTL is what welded the two together: changing retention silently
+    // rewrote every existing key's apparent age. Keep them independent.
+    const src = require('fs').readFileSync(require.resolve('../src/core/state'), 'utf8');
+    const fn = src.slice(src.indexOf('async function getSellerCacheAgeMs'),
+      src.indexOf('async function cacheSellerInfo'));
+    assert.match(fn, /Date\.now\(\)\s*-\s*entry\.at/,
+      'age must come from the stored write time');
+    assert.ok(!/pttl/.test(fn),
+      'age must NOT be derived from the remaining TTL — that couples trust to retention');
+    assert.match(src, /JSON\.stringify\(\{\s*s:/,
+      'cacheSellerInfo must store the timestamp alongside the seller');
+  });
+
+  test('TRUST: a stock transition still invalidates any cached verdict, at any age', () => {
+    // The B0H7FDBNSB protection. A verdict taken BEFORE a restock cannot say who holds the buy
+    // box after it, however many seconds old it is — so recency must not rescue it here.
+    const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
+    assert.match(src, /const isStockTransition\s*=\s*event\.type === 'RESTOCK'/,
+      'the transition rule must still exist');
+    assert.match(src, /const cachedIsRecent\s*=\s*!isStockTransition/,
+      'recency must remain gated on NOT being a stock transition');
   });
 });

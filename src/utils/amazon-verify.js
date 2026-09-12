@@ -57,10 +57,19 @@ const OLID = [
   /"offerListingId"\s*:\s*"([^"]{10,})"/,
 ];
 
+// FULFILMENT IS NOT SELLERSHIP.
+//
+// There was a third pattern here — /Ships from[\s\S]{0,120}?>([^<]{2,60})</i — and on any FBA
+// marketplace listing it returns "Amazon", because Amazon is the shipper. That value then meets
+// an `includes('amazon')` test in the delivery gate and the alert is PUBLISHED.
+//
+// That is exactly B0FP9ZZ68C: "Ships from Amazon / Sold by Brick Arsenal LLC", delivered to the
+// client's paid channel twice on 2026-09-12. Reading the shipper as the seller does not degrade
+// gracefully — it produces a confident WRONG answer in the one direction that costs money, so
+// no answer is strictly better than this pattern.
 const SELLER = [
   /id="sellerProfileTriggerId"[^>]*>([^<]{2,60})</,
   /Sold by[\s\S]{0,120}?>([^<]{2,60})</i,
-  /Ships from[\s\S]{0,120}?>([^<]{2,60})</i,
 ];
 
 function first(html, patterns) {

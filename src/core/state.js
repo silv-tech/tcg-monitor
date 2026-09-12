@@ -485,34 +485,79 @@ async function cacheOfferListingId(asin, olid) {
 //
 // delivery.js now forces a live read for restocks and priority ASINs regardless of this value; the
 // shorter TTL bounds the damage for every other path rather than relying on that one gate.
-const SELLER_TTL = 3600 * 6;
+//
+// RETENTION IS NOT TRUST — and conflating them caused a live regression on 2026-09-12.
+//
+// This was cut 30d -> 6h to stop stale verdicts suppressing restocks. It did that, and it also
+// DELETED the evidence: past six hours `getSellerCache` returns null, so `cachedWouldSuppress` is
+// false, the gate never engages, and a failed live read fails OPEN. B0FP9ZZ68C ("Gem Pack Vol.2",
+// sold by Brick Arsenal LLC, shipped by Amazon) reached the client's channel exactly that way —
+// the log shows the OLID scrape starting and no seller line following it.
+//
+// Staleness is now asked directly, by getSellerCacheAgeMs() below and the transition rule in
+// delivery.js, so the TTL no longer has to encode it. Keep the value for a long time; decide
+// whether to TRUST it at the point of use. A 20-day-old "Brick Arsenal LLC" is weak evidence for
+// who holds the buy box this second, but it is strong evidence that this ASIN is a marketplace
+// listing — and far better than the nothing that replaced it.
+const SELLER_TTL = 86400 * 30;
+
+/**
+ * The stored form is `{"s":"<seller>","at":<ms>}`, with a bare string accepted for entries
+ * written by older builds.
+ *
+ * The timestamp is stored rather than inferred because deriving age from the remaining TTL welds
+ * RETENTION to TRUST: every change to SELLER_TTL silently rewrites what "how old is this" means,
+ * and every key already in Redis starts reporting a fabricated age. That coupling is not
+ * hypothetical — cutting the TTL 30d -> 6h to stop stale verdicts suppressing restocks also
+ * deleted the evidence six hours on, which is how a marketplace listing (B0FP9ZZ68C, sold by
+ * Brick Arsenal LLC) reached the client's channel on 2026-09-12. Keep the verdict for a long
+ * time; judge its age honestly; decide trust at the point of use.
+ */
+function parseSellerEntry(raw) {
+  if (raw == null) return null;
+  const text = String(raw);
+  if (text.startsWith('{')) {
+    try {
+      const obj = JSON.parse(text);
+      if (obj && typeof obj.s === 'string') {
+        return { seller: obj.s, at: Number.isFinite(obj.at) ? obj.at : null };
+      }
+    } catch { /* fall through to the legacy reading */ }
+  }
+  // Legacy: a bare seller name with no timestamp. Readable, but its age is unknowable.
+  return { seller: text, at: null };
+}
 
 async function getSellerCache(asin) {
   const key = `${PREFIX}seller:${asin}`;
-  return await getRedis().get(key);
+  const entry = parseSellerEntry(await getRedis().get(key));
+  return entry ? entry.seller : null;
 }
 
 /**
  * How old is the cached seller verdict, in milliseconds? null when there is none.
  *
  * Staleness is the whole question for this cache — "is this verdict from before the stock change
- * or after it?" — and the previous code could not ask it, so a 45-second-old verdict was discarded
- * exactly like a 30-day-old one. Derived from the key's remaining TTL rather than by storing a
- * timestamp, so the stored format is unchanged and entries written by older builds still work.
+ * or after it?" — so a 45-second-old verdict must be distinguishable from a month-old one.
+ *
+ * A legacy entry carries no timestamp, and its age genuinely cannot be recovered. It reports the
+ * full TTL: maximally old, never fresh. That is the safe direction — it forces a live re-read
+ * rather than letting an unknown-age verdict pass as recent.
  */
 async function getSellerCacheAgeMs(asin) {
   const key = `${PREFIX}seller:${asin}`;
-  const remainingMs = await getRedis().pttl(key);
-  // -2 = no such key, -1 = key exists with no expiry (shouldn't happen; treat as unknown-old).
-  if (remainingMs === -2) return null;
-  if (remainingMs < 0) return SELLER_TTL * 1000;
-  return Math.max(0, SELLER_TTL * 1000 - remainingMs);
+  const raw = await getRedis().get(key);
+  if (raw == null) return null;
+  const entry = parseSellerEntry(raw);
+  if (!entry || entry.at == null) return SELLER_TTL * 1000;
+  return Math.max(0, Date.now() - entry.at);
 }
 
 async function cacheSellerInfo(asin, seller) {
   if (!seller) return;
   const key = `${PREFIX}seller:${asin}`;
-  await getRedis().set(key, seller, 'EX', SELLER_TTL);
+  const payload = JSON.stringify({ s: String(seller), at: Date.now() });
+  await getRedis().set(key, payload, 'EX', SELLER_TTL);
 }
 
 // ─── Early detection keywords ────────────────────────────────────

@@ -35,6 +35,7 @@ const { scrapeAmazonOfferListingId } = require('../utils/browser');
 const { fetchAmazonOlidAndSeller } = require('../utils/scraper-api');
 const { offersFetcher } = require('../utils/scraper-api');
 const { verifyAmazonListing } = require('../utils/amazon-verify');
+const { isSoldByAmazon, isThirdPartySeller } = require('../utils/amazon-seller');
 
 // Alert types that put a buy link in front of a customer. A wrong identity on any of these
 // sends someone to the wrong product; the rest are not worth a credit to verify.
@@ -368,7 +369,7 @@ class DeliveryQueue {
         // earlier today took 66s on exactly that path. The fix must not buy correctness with
         // latency on the one event that is actually a race.
         const cachedSeller = await getSellerCache(asin);
-        const cachedWouldSuppress = !!cachedSeller && !cachedSeller.toLowerCase().includes('amazon');
+        const cachedWouldSuppress = isThirdPartySeller(cachedSeller);
 
         // STALENESS IS THE WHOLE QUESTION, so it has to be asked with an actual age.
         //
@@ -415,6 +416,20 @@ class DeliveryQueue {
         // 2026-09-12: the only two Amazon events in a 40-minute window were PRICE_CHANGE on
         // non-watchlist rows, and BOTH were suppressed on cached verdicts this gate had excluded.
         // A NEW_SKU puts a buy link in front of the client exactly as a RESTOCK does.
+        // NOTE on the asymmetry here, which looks like a bug and is not:
+        //
+        // `cachedWouldSuppress` is true only for a NON-Amazon value, so a cached "Amazon.ca"
+        // skips both live reads and waves the alert through. A census on 2026-09-12 found 20 live
+        // ASINs on "Amazon.ca" verdicts 2-8 days old that had never been re-read, and the normal
+        // resting state of a sold-out ASIN is a marketplace seller taking the buy box — so those
+        // verdicts are exactly the ones a restock invalidates.
+        //
+        // Forcing a re-read here was tried and REVERTED: it costs every restock a ~60s round trip
+        // (see "latency must not be the price"), and it is redundant. RESTOCK, NEW_SKU,
+        // PRICE_CHANGE and PREORDER_LIVE are all VERIFY_TYPES, so the identity read below already
+        // fetches the pinned offer's seller and overrules a wrong cached verdict for free. What
+        // remains uncovered is the low-stakes tail (SHIPPING_CHANGE, LOW_STOCK, CART_AVAILABLE),
+        // where a stale permission can persist — deliberately accepted rather than paid for.
         const sellerMustBeFresh = cachedWouldSuppress && !cachedIsRecent
           && (VERIFY_TYPES.has(event.type) || !!product._watchlist);
 
@@ -459,9 +474,7 @@ class DeliveryQueue {
 
         // Seller verification: suppress third-party seller alerts
         if (seller) {
-          const sellerLower = seller.toLowerCase();
-          const isSoldByAmazon = sellerLower.includes('amazon');
-          if (!isSoldByAmazon) {
+          if (isThirdPartySeller(seller)) {
             event._thirdPartySeller = true;
             event._seller = seller;
             // True whenever the verdict came off the wire this run — either the cache was empty, or
@@ -469,7 +482,7 @@ class DeliveryQueue {
             event._sellerFresh = sellerMustBeFresh || !cachedSeller;
             logger.info(`Third-party seller detected for ${asin}: "${seller}"`
               + `${event._sellerFresh ? ' (live read)' : ' (cached)'}`);
-          } else if (staleSeller && !staleSeller.toLowerCase().includes('amazon')) {
+          } else if (isThirdPartySeller(staleSeller)) {
             // The live read disagrees with what was cached. Worth a line: this is the exact case
             // that was being silently suppressed, so it should be visible when it stops being.
             logger.info(`Seller changed for ${asin}: cached "${staleSeller}" -> live "${seller}" `
@@ -488,7 +501,17 @@ class DeliveryQueue {
             + `before a stock transition cannot say who holds the buy box now; suppressing a real `
             + `Amazon restock on one is how B0H7FDBNSB was lost on 2026-09-12.`);
         }
-        // If no seller info (scrape failed), fail-open — send the alert anyway
+        // If no seller info (scrape failed), fail-open — send the alert anyway.
+        //
+        // Say so. A fail-open used to leave NO line in the log at LOG_LEVEL=info, which is why a
+        // 100% fail-open rate — all 6 Amazon alerts delivered in a 4.5h window went out with no
+        // verdict at all — took a client complaint to surface rather than showing up in the logs.
+        // The identity read below may still supply an authoritative seller; this records only
+        // that the cheap path came back blind.
+        if (!seller) {
+          logger.info(`No seller verdict for ${asin} (${event.type}) — cheap path blind, `
+            + 'falling through to the buy-box read');
+        }
       }
 
       // ─── Identity: is this still the product we think it is? ───────────────
@@ -510,9 +533,62 @@ class DeliveryQueue {
       if (product.retailerId === 'amazon' && product.sku && !event._scanTier
           && VERIFY_TYPES.has(event.type)) {
         event._identity = await this.verifyListing(product.sku, product.name);
+
+        // ─── AUTHORITATIVE SELLER ───────────────────────────────────────────
+        //
+        // verifyAmazonListing already returns the PINNED offer's seller_name
+        // (`amazon-verify.js:174`): structured JSON, scoped to the buy box by construction, read
+        // LIVE at alert time, and already paid for by the call above. It was being fetched and
+        // thrown away on every verified event while the seller gate guessed from HTML regexes.
+        //
+        // This is what stops B0FP9ZZ68C. The gate above deliberately nulls any cached verdict on
+        // a stock transition — a verdict taken before a restock cannot say who holds the buy box
+        // after it — and then FAILS OPEN when the live re-read fails. "Ships from Amazon / Sold
+        // by Brick Arsenal LLC" was published to the client's paid channel exactly that way.
+        // Here the answer is already in hand, so there is nothing to fail open about.
+        //
+        // It also settles the opposite case, which is how B0H7FDBNSB was lost: a WRONG cached
+        // third-party verdict can no longer suppress a genuine Amazon restock, because the buy
+        // box overrules it. Both failure directions now resolve on the same live signal.
+        // `inStock` is the guard that makes this the PINNED offer rather than the cheapest-listing
+        // fallback (`amazon-verify.js:169` falls back to `listings[0]` when nothing is flagged
+        // pinned, and to the cheapest priced offer when there is no buy box at all). Only a
+        // pinned offer answers "who is selling this right now"; the fallback answers "who is
+        // cheapest", and suppressing on that would silence an Amazon listing over an unrelated
+        // marketplace offer.
+        const liveSeller = event._identity && event._identity.inStock
+          ? event._identity.seller
+          : null;
+        if (liveSeller) {
+          if (isThirdPartySeller(liveSeller)) {
+            if (!event._thirdPartySeller) {
+              logger.info(`Third-party seller (buy box) for ${product.sku}: "${liveSeller}"`);
+            }
+            event._thirdPartySeller = true;
+            event._seller = liveSeller;
+            event._sellerFresh = true;
+          } else if (isSoldByAmazon(liveSeller) && event._thirdPartySeller) {
+            // The earlier verdict said marketplace; the buy box says Amazon. The buy box wins —
+            // suppressing here is precisely the lost-restock failure.
+            logger.info(`Seller gate overruled for ${product.sku}: cached/scraped `
+              + `"${event._seller}" vs buy box "${liveSeller}" — NOT suppressed`);
+            event._thirdPartySeller = false;
+            event._seller = liveSeller;
+            event._sellerFresh = true;
+          }
+          // Cache the authoritative reading so the cheap path benefits from it next time. Never
+          // await: a Redis hiccup must not cost the alert.
+          cacheSellerInfo(product.sku, liveSeller)
+            .catch((err) => logger.debug(`seller cache write failed for ${product.sku}: ${err.message}`));
+        }
       }
     } catch (err) {
-      logger.debug(`Event enrichment failed: ${err.message}`);
+      // WARN, not debug. Everything above this — the seller gate AND the identity gate — lives
+      // inside this try, and the Redis reads at the top of it can throw. At LOG_LEVEL=info a
+      // debug line is discarded, so a single Redis hiccup silently skipped both gates and
+      // delivered the alert with no record that either had been bypassed.
+      logger.warn(`Event enrichment failed (seller + identity gates SKIPPED, alert still sent): `
+        + `${event.type} sku=${event.product?.sku} — ${err.message}`);
     }
   }
 
