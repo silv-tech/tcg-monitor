@@ -521,9 +521,19 @@ class DeliveryQueue {
 
     // FINAL SAFETY: Last-resort OOS guard before any Discord send
     // Catches anything that slipped past the deliver() filter (defense in depth)
-    // RESTOCK and PREORDER_LIVE are exempt — they signal availability transitions
+    // RESTOCK and PREORDER_LIVE are exempt — they signal availability transitions.
+    //
+    // EARLY_SKU is exempt too, and it was NOT before. deliver() deliberately waves it through (see
+    // the guard there, which names EARLY_SKU in its comment) and this copy — "defense in depth" —
+    // then killed it. The same rule implemented twice with two different exemption lists, so the
+    // second one silently undid the first.
+    //
+    // An EARLY_SKU is BY DEFINITION a product spotted before it is buyable: the sitemap lane finds
+    // a URL and there is no stock and no price to read. So `!inStock` was true for every one of
+    // them, and every early-listing alert died here — for Pokemon Center, whose sitemap lane
+    // enumerates all ~34,600 product URLs free every 12h, and for Walmart's lane too.
     if (!event._scanTier && event.product &&
-        event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE') {
+        event.type !== 'RESTOCK' && event.type !== 'PREORDER_LIVE' && event.type !== 'EARLY_SKU') {
       if (!event.product.inStock) {
         logger.warn(`OOS guard (routeEvent): blocked ${event.type} — ${event.product?.name || 'unknown'} (inStock=${event.product.inStock})`);
         return;
