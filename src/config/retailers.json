@@ -472,8 +472,9 @@
     "_creditNote": "LD is DataDome-protected, so ScraperAPI bills ~10 credits/request no matter the tier — it was ~80% of the entire ScraperAPI bill at the old 30s/30min/15min cadence (~48k credits/day). Every request still covers the whole catalogue (fast poll) or all 78 stores for a SKU (enrichment); the only safe lever is FREQUENCY, not dropping SKUs (per-SKU enrichment is the primary IN-STORE restock detector — pickup-only store, ~1/3 of restocks are shelf-only and invisible to the online flag). These intervals cut ~48k → ~14k credits/day with no coverage lost; worst-case shelf-restock latency ~63min, fine for a pickup-reserve (not a checkout race).",
     "timing": {
       "sweepIntervalMs": 3600000,
-      "storeEnrichIntervalMs": 3600000
+      "storeEnrichIntervalMs": 10800000
     },
+    "_storeEnrichNote": "RAISED 60min -> 180min on 2026-09-12 for budget runway. MEASURED: 25 tracked SKUs x 1 GET each, hourly = 600 calls/day, and LD is billed ~10 credits (see _creditNote) = 6,000 credits/day, against a total burn of ~55,500/day and a sustainable-to-month-end rate of 27,540/day. At 180min that is 2,000 credits/day, saving 4,000. Worst-case shelf-restock latency goes ~63min -> ~183min, which the _creditNote's own reasoning accepts: this is a pickup-reserve chain, not a checkout race. REVERT this first if in-store restock latency matters more than runway.",
     "watchlist": []
   }
 ]

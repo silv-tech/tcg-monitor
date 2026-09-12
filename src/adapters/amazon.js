@@ -119,7 +119,17 @@ const ASIN_BATCHES_PER_POLL = Number(process.env.AMAZON_ASIN_BATCHES_PER_POLL) |
 // cannot. Paced to one paid call per interval and hard-capped per day so it never eats the budget.
 // REVERT: AMAZON_OFFERS_LANE=0. An ASIN is "invisible" once the sweep hasn't refreshed it in STALE_MS.
 const OFFERS_LANE_ENABLED = process.env.AMAZON_OFFERS_LANE !== '0';
-const OFFERS_INTERVAL_MS = Number(process.env.AMAZON_OFFERS_INTERVAL_MS) || 20000; // ≥1 paid call/20s
+// 60s, RAISED from 20s on 2026-09-12 — the largest credit saving available with the least cost to
+// coverage. MEASURED: this lane ran 3,420 calls/day = 17,100 credits/day, ~31% of a 55,500/day burn
+// against a budget whose sustainable rate to month-end is 27,540/day. At 60s it is 1,140 calls =
+// 5,700 credits/day, saving 11,400.
+//
+// Why this lane and not the client-facing one: it serves the ~600 NON-watchlist, search-invisible
+// ASINs stalest-first, so at 3,420 calls/day each was already only reached about every 2.5 hours.
+// 60s makes that ~7.6 hours on the least valuable rows in the catalogue. NONE of the client's 24
+// priority ASINs depend on it — they have their own round-robin plus a free tile check every poll
+// at zero cost — so this buys runway without touching the lane a competitor beat us on.
+const OFFERS_INTERVAL_MS = Number(process.env.AMAZON_OFFERS_INTERVAL_MS) || 60000;
 const OFFERS_STALE_MS = Number(process.env.AMAZON_OFFERS_STALE_MS) || 10 * 60 * 1000; // sweep-missed
 const OFFERS_DAILY_CAP = Number(process.env.AMAZON_OFFERS_DAILY_CAP) || 4000; // ScraperAPI credits/day
 
