@@ -118,9 +118,8 @@ describe('the gate uses the shared rule, not its own copy', () => {
     // verifyAmazonListing was returning the pinned offer's seller and nothing read it. If this
     // wiring is removed, B0FP9ZZ68C ships again.
     const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
-    assert.match(src, /event\._identity\.inStock[\s\S]{0,80}event\._identity\.seller/,
+    assert.match(src, /event\._identity\.inStock[\s\S]{0,120}event\._identity\.seller/,
       'the pinned-offer seller must be read from the identity result');
-    assert.match(src, /isThirdPartySeller\(liveSeller\)/);
     // The inStock guard is load-bearing, not decoration: amazon-verify falls back to
     // `listings[0]` and then to the cheapest priced offer when nothing is pinned. Without this
     // guard a cheapest-listing seller would be treated as the buy-box holder, and an Amazon
@@ -129,10 +128,59 @@ describe('the gate uses the shared rule, not its own copy', () => {
       'only a PINNED offer answers "who is selling this"; the fallback answers "who is cheapest"');
   });
 
-  test('a wrong cached verdict cannot outrank the live buy box', () => {
-    // The B0H7FDBNSB direction. The override must be able to CLEAR the flag, not only set it.
+  test('the buy box is read BEFORE the scrapes, not after', () => {
+    // This ordering IS the fix. Reading the scrapes first cost two measured client-priority
+    // restocks 12,907ms and 11,877ms, roughly 9s of it spent re-deriving a seller the offers
+    // endpoint was about to return in ~1.5s. If someone moves the verify call back below the
+    // scrapes, the latency returns silently and nothing else in the suite would notice.
     const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
-    assert.match(src, /event\._thirdPartySeller = false/,
-      'the buy box must be able to overrule a stale third-party verdict');
+    const verify = src.indexOf('await this.verifyListing(');
+    const scraper = src.indexOf('await fetchAmazonOlidAndSeller(');
+    const playwright = src.indexOf('await scrapeAmazonOfferListingId(');
+    assert.ok(verify > 0 && scraper > 0 && playwright > 0, 'all three call sites must exist');
+    assert.ok(verify < scraper,
+      'the offers read must precede the ScraperAPI scrape — it is faster AND better evidence');
+    assert.ok(verify < playwright,
+      'the offers read must precede the Playwright fallback');
+  });
+
+  test('the scrapes are still reachable as a fallback', () => {
+    // The fix reorders; it must not DELETE the fallback. The cheap path returned a seller on 20
+    // of 22 reads (all third-party), so it is what catches most marketplace listings when the
+    // buy box gives nothing. Its gate must still admit a missing seller.
+    const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
+    assert.match(src, /if \(!olid \|\| !seller\)/,
+      'the scrape gate must still fire when either the OLID or the seller is missing');
+  });
+
+  test('the OLID is still fetched when absent — the alert needs the Offer Id field', () => {
+    // With the seller resolved early, `if (!olid || !seller)` reduces to `if (!olid)`, so a
+    // missing OLID is still fetched. 694 of ~699 tracked ASINs have one cached (median 25.8d
+    // TTL), so this rarely costs anything — but a brand-new ASIN must not lose the field.
+    const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
+    assert.match(src, /if \(result\.olid && !olid\)/, 'the OLID is still taken from the scrape');
+    assert.match(src, /if \(olid\) event\._offerListingId = olid;/,
+      'and still surfaced on the event for the embed');
+  });
+
+  test('a wrong cached verdict cannot outrank the live buy box', () => {
+    // The B0H7FDBNSB direction, and it is now structural rather than a correction applied after
+    // the fact: the buy-box seller is chosen FIRST, so a stale third-party verdict never reaches
+    // the decision at all. `liveSeller ||` is the whole guarantee — if that precedence is
+    // reversed, a 30-day-old "ONE AT A TIME CANADA" starts suppressing real restocks again.
+    const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
+    assert.match(src, /let seller = liveSeller \|\| \(sellerMustBeFresh \? null : cachedSeller\);/,
+      'the buy box must take precedence over the cached verdict');
+  });
+
+  test('the overrule is still logged when the buy box disagrees with the cache', () => {
+    // Two of these fired in production within an hour of shipping the gate — each one a genuine
+    // Amazon listing that would previously have been suppressed. The line must survive the
+    // reorder, or the only visible evidence of the fix working disappears.
+    const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
+    assert.match(src, /Seller gate overruled/,
+      'a cache-vs-buy-box disagreement must stay visible in the log');
+    assert.match(src, /const overruledCached = /,
+      'and must be computed before `seller` is overwritten');
   });
 });
