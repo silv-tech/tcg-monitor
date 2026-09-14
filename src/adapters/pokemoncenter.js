@@ -33,6 +33,95 @@ const UNFETCHABLE_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
 // The parent TCG category. Its listing pages carry ~32 products each and support a real
 // server-side in-stock filter, so the whole in-stock set is five requests rather than 1,195.
+// Headed-browser category sweep. A category ends when a page returns zero tiles (page 20 of
+// trading-card-game is empty while page 8 has 34), so this ceiling is a runaway guard rather
+// than an expected value.
+const PC_SWEEP_MAX_PAGES = 40;
+// The grid is client-rendered after hydration -- at 6s the content area is still empty and only
+// the mega-menu has /en-ca/product/ links, which is what made an earlier parser report
+// navigation entries as products.
+const PC_RENDER_WAIT_MS = 8000;
+const PC_PAGE_TIMEOUT_MS = 60000;
+// Browsing pace, not burst pace. This is a store the client buys from.
+const PC_PAGE_SPACING_MS = 4000;
+// A persistent profile so the Imperva session looks like a returning visitor rather than a new
+// one on every page.
+const PC_BROWSER_PROFILE = '/tmp/pc-sweep-profile';
+
+/**
+ * Runs INSIDE the page. Returns one row per distinct SKU: { sku, name, price, inStock }.
+ *
+ * A tile is located by walking up from a product anchor to the nearest ancestor whose text
+ * contains a price. That is the only reliable boundary here: the mega-menu carries its own
+ * /en-ca/product/ links (66 anchors on a page with ~31 products), and each product renders
+ * twice -- once for the image, once for the title -- so results are deduped by SKU.
+ *
+ * inStock is TRUE only on a positive price with no SOLD OUT, FALSE only on an explicit SOLD OUT,
+ * and NULL otherwise. Null is dropped by the caller: an unreadable tile must never become a
+ * stock transition.
+ */
+function pcExtractTiles() {
+  const out = [];
+  const seen = new Set();
+  for (const a of document.querySelectorAll('a[href*="/en-ca/product/"]')) {
+    const href = a.getAttribute('href') || '';
+    const m = href.match(/\/product\/([^/]+)\/([^/?#]*)/);
+    if (!m || seen.has(m[1])) continue;
+    let el = a;
+    let hops = 0;
+    while (el && hops < 6 && !/\$\s*\d+\.\d{2}/.test(el.innerText || '')) {
+      el = el.parentElement; hops += 1;
+    }
+    if (!el) continue;                       // no priced ancestor: a menu link, not a tile
+    seen.add(m[1]);
+    // RAW text only. The stock verdict is deliberately NOT decided here: this function is
+    // serialised into the page by page.evaluate(), so it cannot call module scope and nothing in
+    // it can be unit-tested. Keeping the rule out of here means there is exactly one copy of it,
+    // in pcVerdict() below, and that copy is testable. A rule that lives only in an untestable
+    // place is how the Amazon seller gate silently stopped working.
+    out.push({
+      sku: m[1],
+      slug: m[2] || '',
+      text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+    });
+  }
+  return out;
+}
+
+/**
+ * The stock verdict for one tile, from the text a shopper actually sees.
+ *
+ * THE SAFETY RULE, and the reason it points the way it does:
+ *
+ *   SOLD OUT present            -> false   an explicit statement
+ *   a positive price, no badge  -> true    the buyable state on this site
+ *   anything else               -> NULL    unreadable; the caller drops it
+ *
+ * Null is not a third state for storage, it is a refusal to answer. Every stored Pokemon Center
+ * row currently reads inStock:false because nothing could ever see stock, so a parser that
+ * guessed "in stock" on an unreadable tile would manufacture a restock wave into a paid channel,
+ * and one that guessed "out of stock" would mark a live catalogue dead and then fire that wave on
+ * recovery. Neither is self-correcting. Silence is.
+ *
+ * @param {string} text  tile innerText, whitespace-collapsed
+ * @returns {{price: number|null, inStock: boolean|null}}
+ */
+function pcVerdict(text) {
+  const t = typeof text === 'string' ? text : '';
+  const m = t.match(/\$\s*([\d,]+\.\d{2})/);
+  const price = m ? Number(m[1].replace(/,/g, '')) : null;
+  const validPrice = Number.isFinite(price) && price > 0 ? price : null;
+
+  // SOLD OUT wins over a price: a sold-out tile still shows what it cost.
+  if (/sold\s*out/i.test(t)) return { price: validPrice, inStock: false };
+  if (validPrice != null) return { price: validPrice, inStock: true };
+  return { price: null, inStock: null };
+}
+
+/** Tile name from the URL slug — the grid truncates long titles, the slug does not. */
+function pcNameFromSlug(slug) {
+  return String(slug || '').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
 const CATEGORY_URL = 'https://www.pokemoncenter.com/en-ca/category/trading-card-game';
 // 137 in stock at 32 a page is five; the ceiling is a runaway guard, not an expected value.
 const CATEGORY_MAX_PAGES = 12;
@@ -860,6 +949,196 @@ class PokemonCenterAdapter extends BaseAdapter {
     return out;
   }
 
+  /**
+   * Sweep this store's category pages with a HEADED browser and read stock from what renders.
+   *
+   * WHY A HEADED BROWSER, AND WHY THAT IS NOT PARANOIA
+   * --------------------------------------------------
+   * Measured 2026-09-13, all from this container, all against the same category URL:
+   *
+   *   stealth GET, residential / datacenter / direct   403
+   *   /_next/data/<build>/....json                     403
+   *   Patchright HEADLESS, direct and via residential  Imperva interstitial, escalates to hCaptcha
+   *   full Chromium --headless=new, both exits         same interstitial, never clears
+   *   HEADED Chromium under Xvfb, residential          RENDERS -- prices, SOLD OUT, the lot
+   *
+   * The same container gets clean 200s on /robots.txt and /sitemaps/* throughout, so this was
+   * never an IP ban. HEADLESS is the signal being fingerprinted, and a virtual display is the
+   * whole difference. See the Dockerfile for the two packages that make it possible.
+   *
+   * WHY EXTRACTION HAPPENS IN THE PAGE
+   * ----------------------------------
+   * An earlier version of this posted rendered HTML to an ingest route and regexed it there. That
+   * failed on real markup -- 33 of 34 tiles unreadable, 0 prices -- because tile boundaries are
+   * not recoverable from a flat HTML string: the mega-menu carries its own /en-ca/product/ links,
+   * and a price sits several elements above the anchor. In the page, `innerText` of the nearest
+   * priced ancestor gives exactly the tile a shopper sees, so the extraction below is the same
+   * thing a human reads.
+   *
+   * THE SAFETY RULE: a tile that yields no definite verdict is UNKNOWN, never a guess. Unknown
+   * rows are dropped, so a parser that goes blind produces SILENCE rather than a restock wave.
+   *
+   * @returns {{pages:number, products:number, inStock:number, outOfStock:number, unknown:number}}
+   */
+  async sweepCategoryHeaded(slug, opts = {}) {
+    const maxPages = Math.max(1, Number(opts.maxPages) || PC_SWEEP_MAX_PAGES);
+    const base = `https://www.pokemoncenter.com/en-ca/category/${slug}`;
+    const { chromium } = require('patchright');
+
+    const proxyUrl = getProxyUrl('residential');
+    if (!proxyUrl) throw new Error('no residential proxy configured');
+    const u = new URL(proxyUrl);
+
+    const rows = new Map();
+    let pages = 0;
+    let ctx;
+    try {
+      ctx = await chromium.launchPersistentContext(PC_BROWSER_PROFILE, {
+        headless: false,                       // load-bearing; see above
+        channel: 'chromium',
+        proxy: {
+          server: `${u.protocol}//${u.hostname}:${u.port}`,
+          username: u.username ? decodeURIComponent(u.username) : undefined,
+          password: u.password ? decodeURIComponent(u.password) : undefined,
+        },
+        locale: 'en-CA',
+        timezoneId: 'America/Toronto',
+        viewport: { width: 1440, height: 900 },
+        args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+      });
+      const page = ctx.pages()[0] || await ctx.newPage();
+
+      for (let n = 1; n <= maxPages; n += 1) {
+        const url = n === 1 ? base : `${base}?page=${n}`;
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PC_PAGE_TIMEOUT_MS });
+        await page.waitForTimeout(PC_RENDER_WAIT_MS);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(1500);
+
+        let found = await page.evaluate(pcExtractTiles);
+
+        // An empty page is the end of the category -- page 20 of trading-card-game returns zero
+        // tiles while page 8 returns 34. That is the only pagination signal the site gives: there
+        // are no pager links in the DOM at all, though ?page=N itself works.
+        //
+        // But an empty page is ALSO what a slow client-side render looks like, and the two are
+        // indistinguishable from one sample. Measured: a sweep of pages 1-4 stopped at page 3
+        // with zero tiles, on a category whose pages 5 and 8 each carry 34. Treating that as the
+        // end truncates the catalogue silently -- the sweep reports success, most products are
+        // never looked at, and their stored stock quietly goes stale.
+        //
+        // So an empty page is re-read once, with a longer wait, before it is believed.
+        if (found.length === 0) {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PC_PAGE_TIMEOUT_MS });
+          await page.waitForTimeout(PC_RENDER_WAIT_MS * 2);
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+          await page.waitForTimeout(2500);
+          found = await page.evaluate(pcExtractTiles);
+          if (found.length > 0) {
+            logger.debug(`Pokemon Center: ${slug} page ${n} was empty on first read, `
+              + `${found.length} tiles on retry`);
+          }
+        }
+
+        pages += 1;
+        // Per-page accounting, because a sweep total hides exactly the failure that matters.
+        //
+        // Measured 2026-09-13: a 6-page sweep reported 129 products / 0 sold out and stopped at
+        // page 5, while DIRECT reads of ?page=5 and ?page=8 minutes earlier returned 24 and 32
+        // sold-out tiles. Page 8 plainly exists, so "page 6 is empty" was wrong — and the stop
+        // landed precisely where sold-out items begin. A single total cannot distinguish "the
+        // category ended" from "sequential paging silently stopped advancing", and the second
+        // costs the client every out-of-stock transition in the store.
+        const so = found.filter((r) => /sold\s*out/i.test(r.text)).length;
+        // The landed URL matters as much as the count: if this SPA drops ?page=N on a same-session
+        // navigation and serves page 1 again, every "page" would return the same in-stock head of
+        // the catalogue — which is exactly what 129 products / 0 sold out looks like.
+        const landed = page.url().replace('https://www.pokemoncenter.com/en-ca/category/', '');
+        logger.info(`Pokemon Center: SWEEP ${slug} page ${n} — ${found.length} tiles, `
+          + `${so} sold out, landed=${landed}`);
+        if (found.length === 0) break;
+        // The verdict is applied HERE, in Node, where it is testable — see pcVerdict().
+        for (const r of found) {
+          if (rows.has(r.sku)) continue;
+          const v = pcVerdict(r.text);
+          rows.set(r.sku, {
+            sku: r.sku, name: pcNameFromSlug(r.slug), price: v.price, inStock: v.inStock,
+          });
+        }
+        await sleep(PC_PAGE_SPACING_MS);
+      }
+    } finally {
+      if (ctx) await ctx.close().catch(() => {});
+    }
+
+    const all = [...rows.values()];
+    const inStock = all.filter((r) => r.inStock === true);
+    const outOfStock = all.filter((r) => r.inStock === false);
+    const unknown = all.filter((r) => r.inStock == null);
+
+    logger.info(`Pokemon Center: SWEEP ${slug} — ${pages} page(s), ${all.length} products, `
+      + `${inStock.length} in stock, ${outOfStock.length} sold out, ${unknown.length} unreadable`);
+
+    if (process.env.PC_BROWSER_ALERTS !== '1') {
+      // OBSERVE-ONLY, and deliberately the default.
+      //
+      // Every stored Pokemon Center row sits at inStock:false because nothing could ever see
+      // stock -- not because the product is out of stock. The first sweep that CAN see would
+      // therefore read as a restock on every available product at once (~135 in this category
+      // alone) straight into the client's paid channel. Those are first observations, not
+      // restocks, and nothing in the stored state distinguishes them.
+      //
+      // So the first runs measure. Seeding gets wired against real numbers, then alerts go on.
+      logger.info('Pokemon Center: SWEEP observe-only (set PC_BROWSER_ALERTS=1 to write)');
+      return { pages, products: all.length, inStock: inStock.length,
+        outOfStock: outOfStock.length, unknown: unknown.length };
+    }
+
+    for (const r of all) {
+      if (r.inStock == null) continue;          // never store a guess
+      const prev = this.availabilityCache.get(r.sku) || {};
+      this.availabilityCache.set(r.sku, {
+        inStock: r.inStock,
+        price: r.price != null ? r.price : (prev.price != null ? prev.price : null),
+        image: prev.image || '',
+        checkedAt: Date.now(),
+      });
+      this._noteCheckOutcome(r.sku, true);
+    }
+    await this._saveAvailability();
+
+    return { pages, products: all.length, inStock: inStock.length,
+      outOfStock: outOfStock.length, unknown: unknown.length };
+  }
+
+  /**
+   * The store's category slugs, from the categories sitemap.
+   *
+   * Free and unguarded -- the same surface that already gives this adapter its product list, and
+   * what lets a sweep cover the WHOLE store rather than a hardcoded TCG subset.
+   */
+  async listCategorySlugs() {
+    // Residential exit, matching scanSitemap(). The container's DIRECT exit was reputation-
+    // flagged by this host on 2026-09-13 and was still serving "Pardon Our Interruption" twelve
+    // minutes later, while the residential exit stayed clean throughout -- so this must not
+    // quietly fall back to no proxy.
+    const xml = await stealthGet('https://www.pokemoncenter.com/sitemaps/categories.xml', {
+      proxyUrl: getProxyUrl('residential'),
+      maxRetries: 2,
+      timeoutMs: 30000,
+      headers: { 'Accept': 'application/xml, text/xml, */*' },
+    });
+    if (!xml || !xml.includes('<loc>') || this.isChallengePage(xml)) {
+      throw new Error('categories sitemap unavailable');
+    }
+    const slugs = new Set();
+    for (const m of xml.matchAll(/<loc>([^<]+)<\/loc>/g)) {
+      const hit = m[1].match(/\/category\/([^/?#<]+)/);
+      if (hit && hit[1]) slugs.add(hit[1]);
+    }
+    return [...slugs];
+  }
+
   _parseSitemap(xml) {
     const urlMatches = xml.match(/<loc>([^<]+)<\/loc>/g) || [];
     const newProducts = new Map();
@@ -1109,3 +1388,7 @@ class PokemonCenterAdapter extends BaseAdapter {
 }
 
 module.exports = PokemonCenterAdapter;
+// Exported for tests: the stock verdict decides what reaches a paid channel, and the function
+// that reads the DOM around it cannot be tested at all (page.evaluate serialises it).
+module.exports.pcVerdict = pcVerdict;
+module.exports.pcNameFromSlug = pcNameFromSlug;
