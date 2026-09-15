@@ -72,6 +72,38 @@ function ensureWritableHome() {
 
 // Xvfb's own errors used to go to stdio:'ignore', so a display that never came up looked like a
 // Chrome crash. Now its stderr is logged and launch waits for the X socket to exist.
+// Walk __NEXT_DATA__ for arrays of product-like objects and log where they are, what fields they
+// carry, one full sample, and any paging totals, so the stock field (if any) can be read off.
+function summarizeNextData(text) {
+  if (!text) { log('NEXT_DATA', 'absent'); return; }
+  let json;
+  try { json = JSON.parse(text); } catch (e) { log('NEXT_DATA', `unparseable ${text.length}b: ${e.message}`); return; }
+  const arrays = [];
+  const totals = [];
+  const walk = (node, path, depth) => {
+    if (!node || typeof node !== 'object' || depth > 12) return;
+    if (Array.isArray(node)) {
+      const objs = node.filter((x) => x && typeof x === 'object' && !Array.isArray(x));
+      if (objs.length >= 5 && objs.some((o) => Object.keys(o).some((k) => /sku|mpn|productid|slug/i.test(k)))) {
+        arrays.push({ path, length: node.length, keys: [...new Set(objs.flatMap((o) => Object.keys(o)))].slice(0, 60), sample: objs[0] });
+      }
+      node.slice(0, 3).forEach((x, i) => walk(x, `${path}[${i}]`, depth + 1));
+      return;
+    }
+    for (const [k, v] of Object.entries(node)) {
+      if (/total|count|pagesize|perpage|numresults|page$/i.test(k) && (typeof v === 'number' || typeof v === 'string')) {
+        totals.push({ path: `${path}.${k}`, value: v });
+      }
+      walk(v, `${path}.${k}`, depth + 1);
+    }
+  };
+  walk(json, '$', 0);
+  log('NEXT_DATA', { bytes: text.length, buildId: json.buildId, page: json.page, query: json.query,
+    pagePropsKeys: Object.keys((json.props && json.props.pageProps) || {}).slice(0, 40),
+    productArrays: arrays.map((a) => ({ path: a.path, length: a.length, keys: a.keys })), totals: totals.slice(0, 30) });
+  if (arrays[0]) logBody('nextdata-sample', JSON.stringify(arrays[0].sample));
+}
+
 async function startDisplay() {
   if (process.env.DISPLAY) return null;
   const fs = require('fs');
@@ -152,6 +184,36 @@ async function probe() {
         nextData: /__NEXT_DATA__/.test(html),
       });
       log('TILES', verdicts.slice(0, 40));
+
+      // Probe 1 (2026-09-15) found NO XHR fills the grid: the products arrive in the document, and
+      // __NEXT_DATA__ is present. So: does that blob carry stock in structured form?
+      if (pageNo === 1) {
+        const nd = await page.evaluate(() => {
+          const el = document.getElementById('__NEXT_DATA__');
+          return el ? el.textContent : null;
+        }).catch(() => null);
+        summarizeNextData(nd);
+
+        // And does paging INSIDE the app fetch a small JSON payload instead of a whole document?
+        // One client-side route change, no new navigation; the response listener logs what it pulls.
+        pageNo = 2;
+        const pushed = await page.evaluate(async () => {
+          const r = window.next && window.next.router;
+          if (!r || typeof r.push !== 'function') return 'no next.router';
+          await r.push(`${location.pathname}?page=2`);
+          return 'pushed';
+        }).catch((e) => `error ${e.message}`);
+        await page.waitForTimeout(12000);
+        const tiles2 = await page.evaluate(extractTiles).catch(() => []);
+        const v2 = tiles2.map((t) => ({ sku: t.sku, ...pcVerdict(t.text) }));
+        log('CLIENT_NAV', {
+          pushed, landed: page.url(), tiles: tiles2.length,
+          inStock: v2.filter((v) => v.inStock === true).length,
+          soldOut: v2.filter((v) => v.inStock === false).length,
+          firstSkus: v2.slice(0, 5).map((v) => v.sku),
+        });
+        break;
+      }
       if (pageNo < PAGES) await new Promise((r) => setTimeout(r, SPACING_MS));
     }
   } finally {
