@@ -55,18 +55,43 @@ function extractTiles() {
   return out;
 }
 
+// The image runs as a --system user with no home directory. Chrome needs a writable HOME for its
+// profile and crash database; without one it dies at launch with SIGTRAP and
+// "chrome_crashpad_handler: --database is required" (first deploy, 2026-09-15).
+function ensureWritableHome() {
+  const fs = require('fs');
+  const home = process.env.HOME;
+  let ok = false;
+  try { fs.accessSync(home, fs.constants.W_OK); ok = !!home; } catch { ok = false; }
+  if (!ok) process.env.HOME = '/tmp/pc-probe-home';
+  fs.mkdirSync(process.env.HOME, { recursive: true });
+  process.env.XDG_CONFIG_HOME = `${process.env.HOME}/.config`;
+  process.env.XDG_CACHE_HOME = `${process.env.HOME}/.cache`;
+  log('HOME', { original: home || null, writable: ok, using: process.env.HOME });
+}
+
+// Xvfb's own errors used to go to stdio:'ignore', so a display that never came up looked like a
+// Chrome crash. Now its stderr is logged and launch waits for the X socket to exist.
 async function startDisplay() {
   if (process.env.DISPLAY) return null;
-  const xvfb = spawn('Xvfb', [':99', '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+  const fs = require('fs');
+  const xvfb = spawn('Xvfb', [':99', '-screen', '0', '1440x900x24', '-nolisten', 'tcp'],
+    { stdio: ['ignore', 'ignore', 'pipe'] });
+  xvfb.stderr.on('data', (d) => log('XVFB', String(d).trim().slice(0, 500)));
+  xvfb.on('exit', (code, sig) => log('XVFB_EXIT', { code, sig }));
   process.env.DISPLAY = ':99';
-  await new Promise((r) => setTimeout(r, 1500));
-  return xvfb;
+  for (let i = 0; i < 40; i += 1) {
+    if (fs.existsSync('/tmp/.X11-unix/X99')) { log('DISPLAY', 'ready :99'); return xvfb; }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('Xvfb did not create /tmp/.X11-unix/X99 within 10s');
 }
 
 async function probe() {
   const proxyUrl = process.env.PROXY_RESIDENTIAL_URL;
   if (!proxyUrl) throw new Error('PROXY_RESIDENTIAL_URL is not set');
   const u = new URL(proxyUrl);
+  ensureWritableHome();
   await startDisplay();
 
   const ctx = await chromium.launchPersistentContext('/tmp/pc-probe-profile', {
