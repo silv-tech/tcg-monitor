@@ -1,0 +1,35 @@
+# Pokemon Center grid probe ONLY. Selected per service with RAILWAY_DOCKERFILE_PATH=Dockerfile.probe.
+#
+# It exists because railway.json's startCommand was ignored on a CLI upload (2026-09-15): the probe
+# service booted src/index.js from the main Dockerfile, crash-looped on missing Redis, and never ran
+# the probe. Baking the command into the image leaves nothing to be overridden. The main Dockerfile
+# and production are untouched.
+FROM node:20-slim
+
+# Same packages as the main image. libcups2 and xvfb are what let headed Chromium render
+# pokemoncenter.com at all; see the main Dockerfile for the measurements.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 \
+    libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    fonts-liberation \
+    libcups2 xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
+
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev
+RUN npx patchright install chromium
+
+COPY . .
+
+RUN groupadd --system app && useradd --system --gid app app && \
+    chown -R app:app /app
+USER app
+
+# The probe idles after one run instead of exiting, so a restart cannot re-hit the site.
+CMD ["node", "scripts/pc-grid-probe.js"]
