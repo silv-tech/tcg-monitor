@@ -72,36 +72,90 @@ function ensureWritableHome() {
 
 // Xvfb's own errors used to go to stdio:'ignore', so a display that never came up looked like a
 // Chrome crash. Now its stderr is logged and launch waits for the X socket to exist.
-// Walk __NEXT_DATA__ for arrays of product-like objects and log where they are, what fields they
-// carry, one full sample, and any paging totals, so the stock field (if any) can be read off.
-function summarizeNextData(text) {
-  if (!text) { log('NEXT_DATA', 'absent'); return; }
+// Find a known SKU anywhere in __NEXT_DATA__ (as a value OR a key) and log the path plus the
+// objects around it. Probe 2's walk only looked for arrays with sku-named keys and saw nothing,
+// which does not rule out products keyed by id or stored as an embedded JSON string.
+function locateSku(text, sku) {
+  if (!text || !sku) { log('SKU_IN_NEXT_DATA', { sku: sku || null, present: false, reason: text ? 'no in-stock sku' : 'no __NEXT_DATA__' }); return; }
+  const rawHits = text.split(sku).length - 1;
   let json;
-  try { json = JSON.parse(text); } catch (e) { log('NEXT_DATA', `unparseable ${text.length}b: ${e.message}`); return; }
-  const arrays = [];
-  const totals = [];
-  const walk = (node, path, depth) => {
-    if (!node || typeof node !== 'object' || depth > 12) return;
-    if (Array.isArray(node)) {
-      const objs = node.filter((x) => x && typeof x === 'object' && !Array.isArray(x));
-      if (objs.length >= 5 && objs.some((o) => Object.keys(o).some((k) => /sku|mpn|productid|slug/i.test(k)))) {
-        arrays.push({ path, length: node.length, keys: [...new Set(objs.flatMap((o) => Object.keys(o)))].slice(0, 60), sample: objs[0] });
-      }
-      node.slice(0, 3).forEach((x, i) => walk(x, `${path}[${i}]`, depth + 1));
-      return;
-    }
+  try { json = JSON.parse(text); } catch (e) { log('SKU_IN_NEXT_DATA', { sku, rawHits, parse: e.message }); return; }
+  const hits = [];
+  const walk = (node, path, parents) => {
+    if (hits.length >= 5) return;
+    if (typeof node === 'string') { if (node.includes(sku)) hits.push({ path, parents, embedded: node.length > 200 }); return; }
+    if (!node || typeof node !== 'object') return;
     for (const [k, v] of Object.entries(node)) {
-      if (/total|count|pagesize|perpage|numresults|page$/i.test(k) && (typeof v === 'number' || typeof v === 'string')) {
-        totals.push({ path: `${path}.${k}`, value: v });
-      }
-      walk(v, `${path}.${k}`, depth + 1);
+      if (k.includes(sku)) hits.push({ path: `${path}.${k}`, parents: [v, node], keyed: true });
+      walk(v, `${path}.${k}`, [node, ...parents].slice(0, 3));
     }
   };
-  walk(json, '$', 0);
-  log('NEXT_DATA', { bytes: text.length, buildId: json.buildId, page: json.page, query: json.query,
-    pagePropsKeys: Object.keys((json.props && json.props.pageProps) || {}).slice(0, 40),
-    productArrays: arrays.map((a) => ({ path: a.path, length: a.length, keys: a.keys })), totals: totals.slice(0, 30) });
-  if (arrays[0]) logBody('nextdata-sample', JSON.stringify(arrays[0].sample));
+  walk(json, '$', []);
+  log('SKU_IN_NEXT_DATA', { sku, rawHits, paths: hits.map((h) => ({ path: h.path, keyed: !!h.keyed, embedded: !!h.embedded })) });
+  if (hits[0]) {
+    const [near, outer] = hits[0].parents;
+    logBody('sku-near', JSON.stringify(near));
+    if (outer && typeof outer === 'object') log('SKU_OUTER_KEYS', Object.keys(outer).slice(0, 60));
+  }
+}
+
+// Find the "Items per page" control, log what it offers, choose the largest option the way a
+// shopper would (no hand-built URL), and count the tiles that result.
+async function probePageSize(page) {
+  const control = await page.evaluate(() => {
+    const label = [...document.querySelectorAll('body *')]
+      .find((el) => el.children.length === 0 && /items per page/i.test(el.textContent || ''));
+    if (!label) return null;
+    let box = label;
+    for (let i = 0; i < 4 && box.parentElement; i += 1) {
+      box = box.parentElement;
+      if (box.querySelector('select, button, [role="listbox"], [role="combobox"]')) break;
+    }
+    const sel = box.querySelector('select');
+    return {
+      html: box.outerHTML.slice(0, 3000),
+      select: sel ? { options: [...sel.options].map((o) => ({ value: o.value, text: (o.textContent || '').trim() })) } : null,
+    };
+  }).catch((e) => ({ error: e.message }));
+  log('PAGESIZE_CONTROL', control || 'not found');
+  if (!control || control.error) return;
+
+  let chosen = null;
+  try {
+    const box = page.locator('xpath=//*[contains(translate(normalize-space(text()),"ITEMSPERPAGE","itemsperpage"),"items per page")]/ancestor::*[.//select or .//button or .//*[@role="combobox"]][1]');
+    if (control.select && control.select.options.length) {
+      const best = control.select.options.filter((o) => /^\d+$/.test(o.text))
+        .sort((a, b) => Number(b.text) - Number(a.text))[0];
+      if (best) { await box.locator('select').first().selectOption(best.value); chosen = `select ${best.text}`; }
+    } else {
+      await box.locator('button, [role="combobox"]').first().click({ timeout: 10000 });
+      await page.waitForTimeout(1500);
+      const opts = await page.locator('[role="option"], [role="listbox"] li, ul li').allInnerTexts();
+      const nums = opts.map((t) => t.trim()).filter((t) => /^\d+$/.test(t)).map(Number);
+      log('PAGESIZE_OPTIONS', { raw: opts.slice(0, 20), numeric: nums });
+      const max = nums.length ? Math.max(...nums) : null;
+      if (max) {
+        await page.locator('[role="option"], [role="listbox"] li, ul li')
+          .filter({ hasText: new RegExp(`^\\s*${max}\\s*$`) }).first().click({ timeout: 10000 });
+        chosen = `option ${max}`;
+      }
+    }
+  } catch (e) {
+    log('PAGESIZE_ACTION_FAILED', e.message.slice(0, 500));
+  }
+  if (!chosen) return;
+
+  await page.waitForTimeout(10000);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+  await page.waitForTimeout(3000);
+  const tiles = await page.evaluate(extractTiles).catch(() => []);
+  const v = tiles.map((t) => ({ sku: t.sku, ...pcVerdict(t.text) }));
+  log('PAGESIZE_RESULT', {
+    chosen, landed: page.url(), tiles: tiles.length,
+    inStock: v.filter((x) => x.inStock === true).length,
+    soldOut: v.filter((x) => x.inStock === false).length,
+    unknown: v.filter((x) => x.inStock == null).length,
+  });
 }
 
 async function startDisplay() {
@@ -185,33 +239,26 @@ async function probe() {
       });
       log('TILES', verdicts.slice(0, 40));
 
-      // Probe 1 (2026-09-15) found NO XHR fills the grid: the products arrive in the document, and
-      // __NEXT_DATA__ is present. So: does that blob carry stock in structured form?
+      // Probe 2 (2026-09-15): __NEXT_DATA__ is 566KB, pageProps empty, no product array the walk
+      // could see, appProps.pageSize 32; window.next.router is not exposed, so client-side paging
+      // could not be tried. The page carries an "Items per page" control. Probe 3, same one visit:
+      //   - where does a known SKU sit in the page's data, if anywhere?
+      //   - what does "Items per page" offer, and does choosing the largest show more tiles?
       if (pageNo === 1) {
+        const sku = (verdicts.find((v) => v.inStock === true) || {}).sku;
+        const scripts = await page.evaluate((needle) => [...document.scripts]
+          .map((s) => ({ id: s.id || '', type: s.type || '', src: (s.src || '').slice(0, 120),
+            bytes: (s.textContent || '').length, hits: needle ? (s.textContent || '').split(needle).length - 1 : 0 }))
+          .filter((s) => s.hits > 0), sku).catch((e) => [{ error: e.message }]);
+        log('SKU_SCRIPTS', { sku, scripts });
         const nd = await page.evaluate(() => {
           const el = document.getElementById('__NEXT_DATA__');
           return el ? el.textContent : null;
         }).catch(() => null);
-        summarizeNextData(nd);
+        locateSku(nd, sku);
 
-        // And does paging INSIDE the app fetch a small JSON payload instead of a whole document?
-        // One client-side route change, no new navigation; the response listener logs what it pulls.
-        pageNo = 2;
-        const pushed = await page.evaluate(async () => {
-          const r = window.next && window.next.router;
-          if (!r || typeof r.push !== 'function') return 'no next.router';
-          await r.push(`${location.pathname}?page=2`);
-          return 'pushed';
-        }).catch((e) => `error ${e.message}`);
-        await page.waitForTimeout(12000);
-        const tiles2 = await page.evaluate(extractTiles).catch(() => []);
-        const v2 = tiles2.map((t) => ({ sku: t.sku, ...pcVerdict(t.text) }));
-        log('CLIENT_NAV', {
-          pushed, landed: page.url(), tiles: tiles2.length,
-          inStock: v2.filter((v) => v.inStock === true).length,
-          soldOut: v2.filter((v) => v.inStock === false).length,
-          firstSkus: v2.slice(0, 5).map((v) => v.sku),
-        });
+        pageNo = 2;   // calls made by the page-size interaction are labelled p2
+        await probePageSize(page);
         break;
       }
       if (pageNo < PAGES) await new Promise((r) => setTimeout(r, SPACING_MS));
