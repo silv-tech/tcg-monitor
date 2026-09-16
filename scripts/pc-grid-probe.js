@@ -28,16 +28,23 @@
  *            URL as its referer. The grid never re-rendered and __NEXT_DATA__ stayed frozen on
  *            the ?page=8 payload. Both plain document navigations rendered cleanly.
  *
- * WHAT PROBE 5 IS FOR, on one more single visit:
+ *   Probe 5  ?ps=96 WORKS as a plain navigation. One load of the category with no page parameter
+ *            returned 95 products in __NEXT_DATA__ -- 95 in stock, 0 unreadable -- against 97 DOM
+ *            anchors, the two extras being the same mega-menu links as every other run. The
+ *            earlier headed sweep needed 5 pages at 32 to cover 129 products; at 96 that is 2.
  *
- *   Does ?ps=96 actually return 96 products when asked for as a REAL navigation? The parameter
- *   is known; its effect is not, because the only time it has been set the request was blocked.
- *   This matters more than anything else left: reading the document instead of the tiles saves
- *   no requests at all, and page loads are the only thing the rate limit counts. At 32 a page a
- *   catalogue sweep is three times longer than it needs to be.
+ *            This, not the JSON, is the answer to the rate limit. Reading the document instead of
+ *            the tiles saves no requests at all -- it is the same page load -- and page loads are
+ *            the only thing the site counts.
  *
  *   The UI-driving code is GONE rather than left switched off. Its question is answered, and
- *   Probe 4 showed that clicking through this store's controls is what draws the captcha.
+ *   Probe 4 showed that clicking through this store's controls is what draws the captcha. Ask for
+ *   ?ps=N in the URL instead.
+ *
+ * WHAT IS STILL UNMEASURED: the tolerable CADENCE. The sweep was rate-limited at 4s page spacing
+ * on 2026-09-13 and recovered after ~90 minutes. Fewer, larger pages makes that easier but does
+ * not answer it, and shipping a sweep at a pace that gets the residential pool flagged is worse
+ * than having no Pokemon Center data.
  *
  * It loads PROBE_PAGES category pages (default 1) starting at PROBE_START_PAGE with
  * PROBE_SPACING_MS between them, using the exact launch shape that rendered on 2026-09-13
@@ -163,7 +170,7 @@ async function summarizeJson(page) {
     }, soldOut[0].sku).catch(() => null);
     if (raw) logBody('soldout-raw', raw);
   } else {
-    log('JSON_SOLDOUT_CONFIRMED', { count: 0, note: 'no sold-out product on this page — outOfStock:true still unobserved' });
+    log('JSON_SOLDOUT_CONFIRMED', { count: 0, note: 'no sold-out product on this page (confirmed on ?page=8, 2026-09-16)' });
   }
   if (unknown.length) {
     log('JSON_UNREADABLE', { skus: unknown.slice(0, 10).map((p) => p.sku) });

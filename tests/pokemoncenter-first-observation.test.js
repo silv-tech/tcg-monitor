@@ -33,6 +33,13 @@ function fakeRedis() {
   if (failMode === 'noredis') return null;
   return {
     smembers: async () => [...seenMembers],
+    exists: async () => (seenMembers.size > 0 ? 1 : 0),
+    sadd: async (key, ...members) => {
+      if (failMode === 'exec') throw new Error('redis sadd failed');
+      members.forEach((m) => seenMembers.add(m));
+      return members.length;
+    },
+    get: async () => null,
     pipeline() {
       const ops = [];
       return {
@@ -233,6 +240,77 @@ describe('the poll path itself — fetchProducts, for real', () => {
 
     assert.strictEqual(products['10-10320-101'], undefined, 'unseeded rows must not be emitted');
     assert.strictEqual(seenMembers.size, 0);
+  });
+});
+
+describe('bootstrap — the cache restored at boot is already observed', () => {
+  /**
+   * availabilityCache only ever holds skus that produced a genuine reading, so everything in it
+   * at boot has been observed and its stored row is already correct. Without this, the first run
+   * would call all of them first observations, overwrite their rows before the diff, and swallow
+   * any restock that happened to land in that one poll.
+   */
+  test('an empty set is established from whatever the cache restored', async () => {
+    adapter.availabilityCache.set('10-10320-101', { inStock: true, price: 1, image: '', checkedAt: 1 });
+    adapter.availabilityCache.set('699-17157', { inStock: false, price: 2, image: '', checkedAt: 1 });
+
+    await silence(() => adapter._bootstrapStockSeen());
+
+    assert.deepStrictEqual([...seenMembers].sort(), ['10-10320-101', '699-17157']);
+    assert.strictEqual(adapter._stockSeenLoaded, true);
+    assert.deepStrictEqual(redisStore, {}, 'bootstrap records, it does not rewrite product rows');
+  });
+
+  test('an unreadable cached entry is not counted as observed', async () => {
+    adapter.availabilityCache.set('10-10320-101', { inStock: null, price: null, image: '', checkedAt: 1 });
+    await silence(() => adapter._bootstrapStockSeen());
+    assert.strictEqual(seenMembers.size, 0);
+  });
+
+  test('an existing set is authoritative and is left alone', async () => {
+    seenMembers.add('old-sku');
+    adapter.availabilityCache.set('10-10320-101', { inStock: true, price: 1, image: '', checkedAt: 1 });
+
+    await silence(() => adapter._bootstrapStockSeen());
+
+    assert.deepStrictEqual([...seenMembers], ['old-sku'], 'must not re-bootstrap over a live set');
+    assert.strictEqual(adapter._stockSeenLoaded, false, 'so the real set still gets loaded');
+  });
+
+  test('an empty cache establishes nothing — there is nothing to vouch for', async () => {
+    await silence(() => adapter._bootstrapStockSeen());
+    assert.strictEqual(seenMembers.size, 0);
+    assert.strictEqual(adapter._stockSeenLoaded, false);
+  });
+
+  test('a failure leaves the set unloaded so the next poll retries, and does not throw', async () => {
+    adapter.availabilityCache.set('10-10320-101', { inStock: true, price: 1, image: '', checkedAt: 1 });
+    failMode = 'exec';
+    await assert.doesNotReject(silence(() => adapter._bootstrapStockSeen()));
+    assert.strictEqual(adapter._stockSeenLoaded, false);
+  });
+
+  // The regression this whole block exists for.
+  test('a restock in the FIRST poll after boot still alerts, instead of being overwritten', async () => {
+    const { diffProducts } = require('../src/core/events');
+    known('699-17157', false);                       // boot: last known reading was sold out
+    await silence(() => adapter._bootstrapStockSeen());
+
+    const stored = adapter._buildRow('699-17157', adapter.sitemapProducts.get('699-17157'),
+      adapter.availabilityCache.get('699-17157'));
+
+    // It comes back in stock during that very first poll.
+    adapter.availabilityCache.set('699-17157', { inStock: true, price: 20.99, image: '', checkedAt: Date.now() });
+    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+
+    assert.strictEqual(withheld.size, 0);
+    assert.strictEqual(redisStore[productKey('699-17157')], undefined,
+      'the row must NOT have been overwritten — that is what swallows the restock');
+
+    const fresh = adapter._buildRow('699-17157', adapter.sitemapProducts.get('699-17157'),
+      adapter.availabilityCache.get('699-17157'));
+    const events = diffProducts({ '699-17157': stored }, { '699-17157': fresh });
+    assert.ok(events.some((e) => e.type === 'RESTOCK'), 'a real restock in the first poll must survive');
   });
 });
 

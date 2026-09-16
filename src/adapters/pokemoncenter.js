@@ -427,6 +427,47 @@ class PokemonCenterAdapter extends BaseAdapter {
     return withhold;
   }
 
+  /**
+   * On the very first run, everything already in the availability cache counts as observed.
+   *
+   * WITHOUT THIS, THE GUARD SWALLOWS A REAL RESTOCK EXACTLY ONCE. availabilityCache only ever
+   * holds skus that produced a genuine reading — entries are written when a check or a sweep
+   * succeeds, never on failure — so every sku restored from Redis at boot has already been
+   * observed and its stored product row is already correct. _seedFirstObservations() cannot tell
+   * that by itself: with an empty seen set it would call all of them first observations and
+   * overwrite their stored rows BEFORE the diff ran. Any sku that genuinely came back in stock
+   * during that one poll would have its restock overwritten and never alerted.
+   *
+   * Boot is the only moment where the distinction is unambiguous, because nothing new has been
+   * observed yet. So the set is established here, from the cache as restored, and from then on a
+   * first observation means precisely what it should: a sku arriving in the cache that was not in
+   * it before.
+   *
+   * Only ever runs when the set does not exist. An existing set is authoritative and is left
+   * alone — re-bootstrapping over it would re-mark skus whose rows have since moved on.
+   */
+  async _bootstrapStockSeen() {
+    try {
+      const redis = state.getRedis();
+      if (!redis) return;
+      if (await redis.exists(PC_STOCK_SEEN_KEY)) return;
+
+      const observed = [...this.availabilityCache.entries()]
+        .filter(([, d]) => d && typeof d.inStock === 'boolean')
+        .map(([sku]) => sku);
+      if (observed.length === 0) return;
+
+      await redis.sadd(PC_STOCK_SEEN_KEY, ...observed);
+      for (const sku of observed) this._stockSeen.add(sku);
+      this._stockSeenLoaded = true;
+      logger.info(`Pokemon Center: first run — ${observed.length} cached readings recorded as `
+        + `already observed; only skus read from here on are treated as first observations`);
+    } catch (err) {
+      // Left unloaded on purpose: _loadStockSeen will try again on the next poll.
+      logger.warn(`Pokemon Center: could not establish the observed-stock set: ${err.message}`);
+    }
+  }
+
   async _loadStockSeen() {
     if (this._stockSeenLoaded) return;
     const redis = state.getRedis();
@@ -514,6 +555,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       }
       if (newest > 0) this._lastGoodReadAt = newest;
       if (restored) logger.info(`Pokemon Center: restored ${restored} cached availability records`);
+      await this._bootstrapStockSeen();
     } catch (err) {
       logger.warn(`Pokemon Center: could not restore availability cache: ${err.message}`);
     }
