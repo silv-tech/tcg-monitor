@@ -32,6 +32,10 @@ describe('adapter smoke: fetchProducts runs without throwing', () => {
     a._saveAvailability = async () => {};
     a._saveUnfetchable = async () => {};
     a._selectCheckTargets = () => [];
+    // Also a Redis edge: it writes first-observation rows through state.getRedis(), which would
+    // open a real connection here and never settle. Exercised for real in
+    // tests/pokemoncenter-first-observation.test.js, against a stubbed client.
+    a._seedFirstObservations = async () => new Set();
     a.sitemapProducts = new Map([
       ['10-10451-115', { url: 'https://www.pokemoncenter.com/en-ca/product/10-10451-115/x', name: 'Pokemon TCG Booster Bundle' }],
       ['10-10425-120', { url: 'https://www.pokemoncenter.com/en-ca/product/10-10425-120/y', name: 'Pokemon TCG Elite Trainer Box' }],
@@ -56,6 +60,7 @@ describe('adapter smoke: fetchProducts runs without throwing', () => {
     a._saveAvailability = async () => {};
     a._saveUnfetchable = async () => {};
     a._selectCheckTargets = () => [];
+    a._seedFirstObservations = async () => new Set();   // Redis edge; see the note above
     a.sitemapProducts = new Map([['sku1', { url: 'https://x/product/sku1/n', name: 'Pokemon TCG Booster Box' }]]);
     a.availabilityCache = new Map([['sku1', { inStock: true, price: 36.99, image: 'img' }]]);
 

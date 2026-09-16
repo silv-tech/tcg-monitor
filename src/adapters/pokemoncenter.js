@@ -1,6 +1,6 @@
 const BaseAdapter = require('./base');
 const logger = require('../monitoring/logger');
-const { normalizePrice, sleep } = require('../utils/helpers');
+const { normalizePrice, sleep, hashSku } = require('../utils/helpers');
 const { FAILURE_REASONS, classifyError } = require('../core/failure-reasons');
 const { stealthGet } = require('../utils/stealth-http');
 const { getProxyUrl } = require('../core/proxy');
@@ -18,6 +18,13 @@ const STOCK_BLIND_MS = Number(process.env.PC_STOCK_BLIND_MS) || 6 * 60 * 60 * 10
 // One Redis key for the whole availability cache — written at most once per poll.
 const PC_AVAILABILITY_KEY = 'tcg:pokemoncenter:availability';
 const PC_UNFETCHABLE_KEY = 'tcg:pokemoncenter:unfetchable';
+
+// Every sku whose stock has ever been GENUINELY read. See _seedFirstObservations().
+//
+// No TTL. The product keys it guards expire after 7 days, but this set must outlive them: if it
+// aged out, every sku would look unobserved again and the next poll would re-seed rows that are
+// already correct, swallowing a real restock. Membership is ~800 short strings.
+const PC_STOCK_SEEN_KEY = 'tcg:pokemoncenter:stockseen';
 
 // Some Pokemon Center pages cannot be fetched at all. Verified directly: three SKUs failed
 // six times out of six from two different networks, each returning HTTP 200 with a ZERO-byte
@@ -200,6 +207,8 @@ class PokemonCenterAdapter extends BaseAdapter {
     this._rotationSpentToday = 0;
     this._rotationDay = null;
     this._seededSkus = false;         // first scan seeds silently — no flood after a restart
+    this._stockSeen = new Set();      // skus whose stock has ever been read — see _seedFirstObservations
+    this._stockSeenLoaded = false;
     this._watchlistCheckedAt = new Map();
     this._stealthBlockedUntil = 0;    // free-path circuit; retried occasionally in case the block lifts
     this._lastPaidCheckAt = 0;        // wall-clock gate on ScraperAPI spend (see _deriveTiming)
@@ -332,6 +341,102 @@ class PokemonCenterAdapter extends BaseAdapter {
   }
 
   /** The one place a Pokemon Center product row is shaped. */
+  /**
+   * Stop the first REAL stock read of a sku from being alerted as a restock.
+   *
+   * THE BUG THIS EXISTS FOR. _buildRow() defaults a sku with no cached availability to
+   * `inStock: false`, so a product nobody has ever managed to read is stored identically to one
+   * confirmed sold out. Nothing downstream can tell them apart: detectEvents fires RESTOCK on
+   * `!old.inStock && new.inStock` (core/events.js), and the poller's own seed gate only arms when
+   * stored state is COMPLETELY empty (core/poll-adapter.js) — this store has ~800 rows, so it
+   * never arms. The day stock becomes readable, every available product flips false->true in one
+   * poll: ~135 in trading-card-game alone, straight into the client's paid channel. Those are
+   * first observations, not restocks.
+   *
+   * The same defaulting has already fired once in the opposite direction. With Bright Data's
+   * account suspended, 188 dead checks marked all 805 products out of stock while /api/health
+   * still reported healthy — a totally blind store was indistinguishable from a fully sold-out one.
+   *
+   * WHAT THIS DOES. Before the poll returns its rows — and therefore before poll-adapter reads
+   * the old state to diff against — any sku being observed for the first time has its row written
+   * to Redis exactly as the poller would write it. The diff then compares that row against itself
+   * and raises nothing. The sku is recorded in PC_STOCK_SEEN_KEY, so the NEXT change to it is a
+   * genuine transition and alerts normally.
+   *
+   * WHY THIS AND NOT A CHANGE TO detectEvents. The restock rule is shared by 37 retailers, and
+   * the knowledge that a stored `false` was never an observation exists only in this adapter.
+   * Pre-writing state is also the established precedent here — EB Games' _seedRedis does the same
+   * thing for its catalogue.
+   *
+   * THE ONE LANE THIS DOES NOT COVER. The watchlist fast-poll (core/scheduler.js) never calls
+   * fetchProducts: it reads adapter.fetchProductPage() and diffs against state.getProduct()
+   * directly. This adapter does not implement fetchProductPage, so that lane cannot run for this
+   * store today — but it has a 57-sku watchlist configured and is the lane with the FEWEST brakes
+   * in the system (limiter-exempt, 45s dedup, queue-bypassed, extra channels). Whoever implements
+   * fetchProductPage here must route its first observation through this same gate, or the wave
+   * this function prevents comes back through the loudest possible door.
+   *
+   * @returns {Set<string>} skus that must NOT be emitted this cycle because seeding them failed.
+   *   Withholding is the safe direction: a row missing from one poll is simply not diffed (the
+   *   stale path needs two consecutive misses before it touches stock, and these rows already
+   *   read false), whereas emitting an unseeded row is the alert wave this function exists to
+   *   prevent. The next poll retries.
+   */
+  async _seedFirstObservations() {
+    const withhold = new Set();
+
+    // Only a real reading counts. A null verdict is the parser refusing to answer, and marking
+    // that sku seen would burn its one free pass on a row that was never observed.
+    const firstTime = [];
+    for (const [sku, avail] of this.availabilityCache) {
+      if (!avail || typeof avail.inStock !== 'boolean') continue;
+      if (this._stockSeen.has(sku)) continue;
+      if (!this.sitemapProducts.has(sku)) continue;   // the poll would not emit it either
+      firstTime.push(sku);
+    }
+    if (firstTime.length === 0) return withhold;
+
+    try {
+      await this._loadStockSeen();
+      // Re-filter: the load may have brought in skus seeded by a previous process.
+      const pending = firstTime.filter((sku) => !this._stockSeen.has(sku));
+      if (pending.length === 0) return withhold;
+
+      const redis = state.getRedis();
+      if (!redis) throw new Error('no redis connection');
+
+      const pipeline = redis.pipeline();
+      for (const sku of pending) {
+        const row = this._buildRow(sku, this.sitemapProducts.get(sku), this.availabilityCache.get(sku));
+        // The same key, shape and TTL poll-adapter uses, so the diff sees no difference at all.
+        pipeline.set(`tcg:product:${hashSku(this.id, sku)}`, JSON.stringify(row), 'EX', 86400 * 7);
+      }
+      pipeline.sadd(PC_STOCK_SEEN_KEY, ...pending);
+      await pipeline.exec();
+
+      for (const sku of pending) this._stockSeen.add(sku);
+      const inStock = pending.filter((s) => this.availabilityCache.get(s).inStock === true).length;
+      logger.info(`Pokemon Center: seeded ${pending.length} first stock observations `
+        + `(${inStock} in stock) — no alerts fired; the next change to each is a real one`);
+    } catch (err) {
+      // Nothing was marked seen, so this retries next poll. Withhold the rows meanwhile.
+      for (const sku of firstTime) withhold.add(sku);
+      logger.warn(`Pokemon Center: first-observation seeding failed (${err.message}) — `
+        + `withholding ${firstTime.length} rows this poll rather than risk a false restock wave`);
+    }
+    return withhold;
+  }
+
+  async _loadStockSeen() {
+    if (this._stockSeenLoaded) return;
+    const redis = state.getRedis();
+    if (!redis) throw new Error('no redis connection');
+    const members = await redis.smembers(PC_STOCK_SEEN_KEY);
+    for (const sku of members || []) this._stockSeen.add(sku);
+    this._stockSeenLoaded = true;
+    logger.info(`Pokemon Center: ${this._stockSeen.size} skus already have an observed stock reading`);
+  }
+
   _buildRow(sku, meta, avail) {
     const a = avail || { inStock: false, price: null, image: '' };
     return this.classify({
@@ -613,7 +718,12 @@ class PokemonCenterAdapter extends BaseAdapter {
     // what was just fetched. Freshness and failure tracking moved into _runChecks with them —
     // leaving them here referenced a batch size that no longer exists and threw
     // "batchSize is not defined" on every poll.
+    // Must run BEFORE these rows are returned: poll-adapter reads the old state to diff against
+    // only after run() resolves, so a row seeded here is already in place when the diff happens.
+    const withheld = await this._seedFirstObservations();
+
     for (const [sku, meta] of this.sitemapProducts) {
+      if (withheld.has(sku)) continue;
       products[sku] = this._buildRow(sku, meta, this.availabilityCache.get(sku));
     }
 
