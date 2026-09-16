@@ -1240,6 +1240,7 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     const rows = new Map();
     let pages = 0;
+    let refused = 0;      // pages the store would not serve — NOT the end of the catalogue
     let ctx;
     try {
       ctx = await chromium.launchPersistentContext(PC_BROWSER_PROFILE, {
@@ -1310,9 +1311,41 @@ class PokemonCenterAdapter extends BaseAdapter {
         const landed = page.url().replace('https://www.pokemoncenter.com/en-ca/category/', '');
         logger.info(`Pokemon Center: SWEEP ${slug} page ${n} — ${found.length} tiles, `
           + `${so} sold out, landed=${landed}`);
-        // Measure the JSON in the same document against the tiles, and trust NOTHING from it yet.
-        // See _crossCheckNextData for why this is a measurement and not a switch.
-        await this._crossCheckNextData(page, slug, n, found);
+        // Measure the JSON in the same document against the tiles, and trust nothing from its
+        // VERDICTS yet. Its presence, however, is trusted -- see below.
+        const parsed = await this._crossCheckNextData(page, slug, n, found);
+
+        // A REFUSED PAGE IS NOT THE END OF A CATEGORY.
+        //
+        // Breaking on `found.length === 0` cannot tell those apart, and the cadence run of
+        // 2026-09-17 produced exactly the case that matters: pages 1 and 2 returned 95 and 96
+        // products, page 3 came back 403 with ZERO bytes of __NEXT_DATA__, two stray requests and
+        // no app at all. The catalogue was not finished -- page 8 at ps=32 carried 34 tiles on
+        // 2026-09-13, so there are at least 258 products and page 3 at ps=96 was owed about 66.
+        // The old logic would have broken there, reported success, and silently dropped a third
+        // of the store, which is the failure already on the record in the note above.
+        //
+        // __NEXT_DATA__ is the discriminator, and it is free: it is server-rendered and present
+        // before hydration, so an ENDED category still ships it with an empty product array while
+        // a refused page ships no app at all. This uses only the COUNT, never a stock verdict, so
+        // it is fully compatible with the observe-only stance on `outOfStock`.
+        if (!parsed) {
+          refused += 1;
+          logger.warn(`Pokemon Center: SWEEP ${slug} page ${n} REFUSED — no product data in the `
+            + `document (tiles=${found.length}). Not treating this as the end of the category.`);
+          break;
+        }
+        if (parsed.products.length === 0) {
+          logger.info(`Pokemon Center: SWEEP ${slug} page ${n} is genuinely empty — category ends`);
+          break;
+        }
+        // A page that renders only some of its tiles is not a complete page. At ps=32 a partial
+        // render mostly showed up as an outright zero; at 96 the window is three times wider and
+        // the render waits were never re-tuned. The JSON says how many there should be.
+        if (found.length < parsed.products.length) {
+          logger.warn(`Pokemon Center: SWEEP ${slug} page ${n} PARTIAL — ${found.length} tiles `
+            + `rendered of ${parsed.products.length} products in the document`);
+        }
         if (found.length === 0) break;
         // The verdict is applied HERE, in Node, where it is testable — see pcVerdict().
         for (const r of found) {
@@ -1334,7 +1367,8 @@ class PokemonCenterAdapter extends BaseAdapter {
     const unknown = all.filter((r) => r.inStock == null);
 
     logger.info(`Pokemon Center: SWEEP ${slug} — ${pages} page(s), ${all.length} products, `
-      + `${inStock.length} in stock, ${outOfStock.length} sold out, ${unknown.length} unreadable`);
+      + `${inStock.length} in stock, ${outOfStock.length} sold out, ${unknown.length} unreadable`
+      + `${refused ? `, INCOMPLETE — stopped on a refused page, coverage is partial` : ''}`);
 
     if (process.env.PC_BROWSER_ALERTS !== '1') {
       // OBSERVE-ONLY, and deliberately the default.
@@ -1347,7 +1381,7 @@ class PokemonCenterAdapter extends BaseAdapter {
       //
       // So the first runs measure. Seeding gets wired against real numbers, then alerts go on.
       logger.info('Pokemon Center: SWEEP observe-only (set PC_BROWSER_ALERTS=1 to write)');
-      return { pages, products: all.length, inStock: inStock.length,
+      return { pages, refused, incomplete: refused > 0, products: all.length, inStock: inStock.length,
         outOfStock: outOfStock.length, unknown: unknown.length };
     }
 
@@ -1364,7 +1398,7 @@ class PokemonCenterAdapter extends BaseAdapter {
     }
     await this._saveAvailability();
 
-    return { pages, products: all.length, inStock: inStock.length,
+    return { pages, refused, incomplete: refused > 0, products: all.length, inStock: inStock.length,
       outOfStock: outOfStock.length, unknown: unknown.length };
   }
 
@@ -1398,7 +1432,7 @@ class PokemonCenterAdapter extends BaseAdapter {
         // Not an empty catalogue -- the shape moved, or this document was never the grid.
         logger.info(`Pokemon Center: JSONCHECK ${slug} page ${n} — no products array `
           + `(nextData=${text ? `${text.length}B` : 'absent'}), tiles=${found.length}`);
-        return;
+        return null;
       }
 
       const json = new Map(parsed.products.map((p) => [p.sku, p]));
@@ -1442,10 +1476,12 @@ class PokemonCenterAdapter extends BaseAdapter {
         + `jsonOnly=${jsonOnly.length}${jsonOnly.length ? ` [${jsonOnly.slice(0, 5).join(',')}]` : ''}, `
         + `first=${first}`
         + `${differ ? ` — DISAGREE: ${examples.join('; ')}` : ''}`);
+      return parsed;
     } catch (err) {
       // `err.message` on its own would throw for a non-Error throwable, inside the one function
       // in this file that promises never to throw — and its call site in the sweep is unguarded.
       logger.warn(`Pokemon Center: JSONCHECK ${slug} page ${n} failed: ${(err && err.message) || err}`);
+      return null;   // a cross-check that cannot read the page must not vouch for it
     }
   }
 
