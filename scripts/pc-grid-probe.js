@@ -1,7 +1,7 @@
 /**
  * Pokemon Center grid probe. OBSERVE-ONLY, runs as its own Railway service, never src/index.js.
  *
- * WHAT THE FIRST THREE RUNS SETTLED (all on the live store, 2026-09-15, residential exit):
+ * WHAT THE RUNS SO FAR SETTLED (all on the live store, residential exit, 2026-09-15 and -16):
  *
  *   Probe 1  NO XHR fills the grid. The only calls are Imperva and DataDome sensors, review
  *            scores, cart and profile. The products arrive in the document. So there is no API
@@ -15,14 +15,29 @@
  *            tiles read as unreadable. Its "Items per page" attempt returned nothing, because it
  *            queried the whole page and matched the mega-menu's nav list.
  *
- * WHAT PROBE 4 IS FOR, on one more single visit:
+ *   Probe 4  Settled the sold-out direction on ?page=8: JSON 32 products, 32 sold out, 0
+ *            unreadable, against 34 DOM anchors with the same 32 verdicts and 2 unreadable.
+ *            `outOfStock: true` confirmed, with the price still present. It also read the
+ *            "Items per page" control properly (button#per-page plus a div[role="menu"], empty
+ *            until clicked): the options are 32, 64 and 96, and choosing 96 moved the URL to
+ *            ?page=1&ps=96.
  *
- *   1. `outOfStock: true` has still NEVER been observed -- page 1 is 31 of 31 in stock. Set
- *      PROBE_START_PAGE=8 (measured 32 of 34 sold out on 2026-09-13) and dump one raw sold-out
- *      object. Until that exists, the JSON path cannot be trusted in the sold-out direction, and
- *      src/adapters/pokemoncenter-nextdata.js stays a cross-check rather than the source.
- *   2. Whether "Items per page" offers more than 32. At 32 the rate limit is the binding
- *      constraint; 96 is a third of the page loads for the same coverage.
+ *            That last step is also where it found the trap. The selection happened CLIENT-SIDE,
+ *            which fired GET /tpci-ecommweb-api/search?...&fl=availability_status,... -- a
+ *            DataDome-protected endpoint that returned 403 and drew a captcha naming that search
+ *            URL as its referer. The grid never re-rendered and __NEXT_DATA__ stayed frozen on
+ *            the ?page=8 payload. Both plain document navigations rendered cleanly.
+ *
+ * WHAT PROBE 5 IS FOR, on one more single visit:
+ *
+ *   Does ?ps=96 actually return 96 products when asked for as a REAL navigation? The parameter
+ *   is known; its effect is not, because the only time it has been set the request was blocked.
+ *   This matters more than anything else left: reading the document instead of the tiles saves
+ *   no requests at all, and page loads are the only thing the rate limit counts. At 32 a page a
+ *   catalogue sweep is three times longer than it needs to be.
+ *
+ *   The UI-driving code is GONE rather than left switched off. Its question is answered, and
+ *   Probe 4 showed that clicking through this store's controls is what draws the captcha.
  *
  * It loads PROBE_PAGES category pages (default 1) starting at PROBE_START_PAGE with
  * PROBE_SPACING_MS between them, using the exact launch shape that rendered on 2026-09-13
@@ -33,7 +48,7 @@
  *
  * Start command:  node scripts/pc-grid-probe.js
  * Env:            PROXY_RESIDENTIAL_URL (required), PROBE_SLUG, PROBE_PAGES, PROBE_START_PAGE,
- *                 PROBE_SPACING_MS
+ *                 PROBE_PAGE_SIZE, PROBE_SPACING_MS
  */
 const { spawn } = require('child_process');
 const { chromium } = require('patchright');
@@ -50,6 +65,11 @@ const PAGES = Math.max(1, Number(process.env.PROBE_PAGES) || 1);
 // `outOfStock: true` has still never been observed. Page 8 measured 32 of 34 sold out on
 // 2026-09-13, so PROBE_START_PAGE=8 is what turns the last assumption into a measurement.
 const START_PAGE = Math.max(1, Number(process.env.PROBE_START_PAGE) || 1);
+// Probe 5: the `ps` URL parameter. Probe 4 read the options straight off the opened control —
+// 32, 64 and 96 — and selecting 96 moved the URL to ?page=1&ps=96. That selection happened
+// client-side and was blocked, so the parameter is KNOWN but its effect is not. Set
+// PROBE_PAGE_SIZE=96 to ask for it on a real navigation. Unset means ask for nothing.
+const PAGE_SIZE = Number(process.env.PROBE_PAGE_SIZE) || 0;
 const SPACING_MS = Math.max(30000, Number(process.env.PROBE_SPACING_MS) || 60000);
 const BODY_LOG_CHARS = 24000;
 const CHUNK = 3000;
@@ -102,88 +122,12 @@ function ensureWritableHome() {
 // carries that path as the one parsed copy, so the __NEXT_DATA__ SKU hunt has been removed.
 
 /**
- * Choose the largest "Items per page" the way a shopper would, and count what comes back.
- *
- * WHY PROBE 3 GOT NOTHING HERE. It searched the whole page for `[role="option"], [role="listbox"]
- * li, ul li`, and the first thing that matches on this site is the mega-menu's navigation list —
- * so it collected "Plush", "Figures", "Pins", found no numbers, and silently gave up
- * (PAGESIZE_OPTIONS numeric: []). The real control, from Probe 3's own PAGESIZE_CONTROL dump, is
- *
- *   <button id="per-page" data-toggle="select" aria-haspopup="true" aria-expanded="false">
- *   <div class="select-menu--..." role="menu" aria-labelledby="per-page">
- *
- * a role="menu", not a listbox, and EMPTY until the button is clicked. So: scope every query to
- * that one container, and dump its markup once it is open rather than guessing the item role.
- *
- * Why it is worth another visit at all: appProps.pageSize is 32, and the rate limit — not the
- * parsing — is what stops this store being swept. A 96-item page is a third of the page loads
- * for the same coverage.
- */
-async function probePageSize(page) {
-  const control = await page.evaluate(() => {
-    const btn = document.getElementById('per-page');
-    if (!btn) return null;
-    const menu = document.querySelector('[role="menu"][aria-labelledby="per-page"]');
-    return {
-      button: btn.outerHTML.slice(0, 600),
-      menuBefore: menu ? menu.outerHTML.slice(0, 1500) : null,
-    };
-  }).catch((e) => ({ error: e.message }));
-  log('PAGESIZE_CONTROL', control || 'not found');
-  if (!control || control.error) return;
-
-  let chosen = null;
-  try {
-    await page.locator('#per-page').click({ timeout: 10000 });
-    await page.waitForTimeout(1500);
-
-    // Whatever the items turn out to be, they are inside THIS container and nowhere else.
-    const opened = await page.evaluate(() => {
-      const menu = document.querySelector('[role="menu"][aria-labelledby="per-page"]');
-      if (!menu) return null;
-      const items = [...menu.querySelectorAll('*')]
-        .filter((el) => el.children.length === 0 && (el.textContent || '').trim())
-        .map((el) => ({ tag: el.tagName, role: el.getAttribute('role') || '', text: (el.textContent || '').trim() }));
-      return { html: menu.outerHTML.slice(0, 3000), items };
-    }).catch(() => null);
-    log('PAGESIZE_MENU_OPEN', opened || 'menu not found after click');
-
-    const nums = (opened ? opened.items : []).map((i) => i.text).filter((t) => /^\d+$/.test(t)).map(Number);
-    log('PAGESIZE_OPTIONS', { numeric: nums, items: (opened ? opened.items : []).slice(0, 20) });
-    const max = nums.length ? Math.max(...nums) : null;
-    if (max) {
-      await page.locator('[role="menu"][aria-labelledby="per-page"]')
-        .getByText(new RegExp(`^\\s*${max}\\s*$`)).first().click({ timeout: 10000 });
-      chosen = `option ${max}`;
-    }
-  } catch (e) {
-    log('PAGESIZE_ACTION_FAILED', e.message.slice(0, 500));
-  }
-  if (!chosen) return;
-
-  await page.waitForTimeout(10000);
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-  await page.waitForTimeout(3000);
-  const tiles = await page.evaluate(extractTiles).catch(() => []);
-  const v = tiles.map((t) => ({ sku: t.sku, ...pcVerdict(t.text) }));
-  // Report the JSON count alongside the tile count: the JSON is the grid, the tiles include the
-  // mega-menu's own product links (33 anchors for 31 products on 2026-09-15).
-  const json = await summarizeJson(page);
-  log('PAGESIZE_RESULT', {
-    chosen, landed: page.url(), tiles: tiles.length, jsonProducts: json ? json.total : null,
-    inStock: v.filter((x) => x.inStock === true).length,
-    soldOut: v.filter((x) => x.inStock === false).length,
-    unknown: v.filter((x) => x.inStock == null).length,
-  });
-}
-
-/**
  * The grid as the document itself reports it, through the same parser the adapter uses.
  *
- * The one question left after Probe 3: `outOfStock: true` has never been observed, because the
- * page it loaded was 31 of 31 in stock. If a sold-out product renders with that field set, the
- * JSON path can replace tile-text parsing outright. If it renders some other way, this is where
- * that shows up — so one sold-out product object is dumped verbatim, not just counted.
+ * Probe 4 confirmed `outOfStock: true` on ?page=8 — 32 of 32 sold out, 0 unreadable — so the raw
+ * dump below is now a REGRESSION check rather than an open question. If that field ever starts
+ * rendering some other way, this is where it shows up, which is why one sold-out product object
+ * is logged verbatim and not merely counted.
  */
 async function summarizeJson(page) {
   const text = await page.evaluate(() => {
@@ -288,7 +232,14 @@ async function probe() {
 
   try {
     for (pageNo = START_PAGE; pageNo < START_PAGE + PAGES; pageNo += 1) {
-      const url = `https://www.pokemoncenter.com/en-ca/category/${SLUG}${pageNo > 1 ? `?page=${pageNo}` : ''}`;
+      // Built as a real navigation, never by driving the pager. Probe 4 established that the
+      // in-app route change is what the site defends: it fires the DataDome-protected
+      // /tpci-ecommweb-api/search endpoint, which 403s and draws a captcha, while a plain
+      // document load renders cleanly every time.
+      const qs = [];
+      if (pageNo > 1) qs.push(`page=${pageNo}`);
+      if (PAGE_SIZE) qs.push(`ps=${PAGE_SIZE}`);
+      const url = `https://www.pokemoncenter.com/en-ca/category/${SLUG}${qs.length ? `?${qs.join('&')}` : ''}`;
       const t0 = Date.now();
       const nav = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await page.waitForSelector('a[href*="/en-ca/product/"]', { timeout: 30000 }).catch(() => {});
@@ -310,32 +261,18 @@ async function probe() {
       });
       log('TILES', verdicts.slice(0, 40));
 
-      // PROBE 4, both questions on the same single visit.
-      //
-      // Probe 3 (2026-09-15) settled where the data lives: the grid's products are in the
-      // document at $.props.initialState.search.results.products, each with a boolean
-      // `outOfStock`, structured prices and a clean SKU — 31 entries against 33 DOM anchors,
-      // the two extras being the mega-menu's own product links. What it did NOT settle:
-      //
-      //   1. `outOfStock: true` has never been observed, because that page was 31 of 31 in
-      //      stock. Land on a page that has sold-out products (PROBE_START_PAGE=8) and dump one
-      //      raw object. Until then the JSON path cannot be trusted in the sold-out direction.
-      //   2. "Items per page" returned no options, because the query matched the mega-menu's
-      //      nav list instead of the role="menu" control. Fixed in probePageSize().
-      if (pageNo === START_PAGE) {
-        const sku = (verdicts.find((v) => v.inStock === true) || {}).sku;
-        const scripts = await page.evaluate((needle) => [...document.scripts]
-          .map((s) => ({ id: s.id || '', type: s.type || '', src: (s.src || '').slice(0, 120),
-            bytes: (s.textContent || '').length, hits: needle ? (s.textContent || '').split(needle).length - 1 : 0 }))
-          .filter((s) => s.hits > 0), sku).catch((e) => [{ error: e.message }]);
-        log('SKU_SCRIPTS', { sku, scripts });
+      // The grid as the document reports it, through the parser the adapter uses. PAGESIZE_CHECK
+      // is the whole point of Probe 5: if ?ps=96 returns 96 products on a plain navigation, a
+      // sweep covers the same catalogue in a third of the page loads, and page loads are the
+      // only thing the rate limit actually counts.
+      const summary = await summarizeJson(page);
+      log('PAGESIZE_CHECK', {
+        requested: PAGE_SIZE || 'default', landed: page.url(),
+        jsonProducts: summary ? summary.total : null, tiles: tiles.length,
+        verdict: !summary ? 'no products array'
+          : (PAGE_SIZE && summary.total > 32 ? `ps=${PAGE_SIZE} WORKS` : 'no more than the default 32'),
+      });
 
-        await summarizeJson(page);
-
-        pageNo = START_PAGE + 1;   // calls made by the page-size interaction get the next label
-        await probePageSize(page);
-        break;
-      }
       if (pageNo < START_PAGE + PAGES - 1) await new Promise((r) => setTimeout(r, SPACING_MS));
     }
   } finally {
