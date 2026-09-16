@@ -91,6 +91,7 @@ function pcExtractTiles() {
 // The stock verdict and its safety rule live in a dependency-free module so the grid probe can
 // share the one copy without loading src/config. See pokemoncenter-verdict.js.
 const { pcVerdict, pcNameFromSlug } = require('./pokemoncenter-verdict');
+const { pcProductsFromNextData } = require('./pokemoncenter-nextdata');
 
 const CATEGORY_URL = 'https://www.pokemoncenter.com/en-ca/category/trading-card-game';
 // 137 in stock at 32 a page is five; the ceiling is a runaway guard, not an expected value.
@@ -1026,6 +1027,9 @@ class PokemonCenterAdapter extends BaseAdapter {
         const landed = page.url().replace('https://www.pokemoncenter.com/en-ca/category/', '');
         logger.info(`Pokemon Center: SWEEP ${slug} page ${n} — ${found.length} tiles, `
           + `${so} sold out, landed=${landed}`);
+        // Measure the JSON in the same document against the tiles, and trust NOTHING from it yet.
+        // See _crossCheckNextData for why this is a measurement and not a switch.
+        await this._crossCheckNextData(page, slug, n, found);
         if (found.length === 0) break;
         // The verdict is applied HERE, in Node, where it is testable — see pcVerdict().
         for (const r of found) {
@@ -1079,6 +1083,72 @@ class PokemonCenterAdapter extends BaseAdapter {
 
     return { pages, products: all.length, inStock: inStock.length,
       outOfStock: outOfStock.length, unknown: unknown.length };
+  }
+
+  /**
+   * Compare the products in the page's __NEXT_DATA__ against the tiles just scraped from it.
+   *
+   * OBSERVE-ONLY, AND DELIBERATELY SO. Probe 3 (2026-09-15) found the grid's products at
+   * $.props.initialState.search.results.products with a boolean `outOfStock`, structured prices
+   * and clean SKUs -- strictly better data than tile text, from a document this sweep already
+   * loads. It is not promoted to the source of truth here for one reason: that page had 31 of 31
+   * products IN STOCK, so `outOfStock: true` has never been observed on this store. The field
+   * name is not ambiguous, but the Amazon seller gate went silently blind on exactly this kind of
+   * reasonable assumption, and a stock parser that is wrong in the sold-out direction marks a
+   * live catalogue dead and then fires a restock for all of it on recovery.
+   *
+   * So: log agreement, change nothing. One paced sweep that reaches a page with sold-out products
+   * (page 8 of trading-card-game measured 32 of 34 sold out) turns the remaining assumption into
+   * a measurement, and then the switch is a one-line change with numbers behind it.
+   *
+   * Never throws: a cross-check that breaks the sweep it is measuring is worse than no data.
+   */
+  async _crossCheckNextData(page, slug, n, found) {
+    try {
+      const text = await page.evaluate(() => {
+        const el = document.getElementById('__NEXT_DATA__');
+        return el ? el.textContent : null;
+      }).catch(() => null);
+
+      const parsed = pcProductsFromNextData(text);
+      if (!parsed) {
+        // Not an empty catalogue -- the shape moved, or this document was never the grid.
+        logger.info(`Pokemon Center: JSONCHECK ${slug} page ${n} — no products array `
+          + `(nextData=${text ? `${text.length}B` : 'absent'}), tiles=${found.length}`);
+        return;
+      }
+
+      const json = new Map(parsed.products.map((p) => [p.sku, p]));
+      const dom = new Map(found.map((r) => [r.sku, pcVerdict(r.text)]));
+
+      let agree = 0;
+      let differ = 0;
+      const examples = [];
+      for (const [sku, v] of dom) {
+        const j = json.get(sku);
+        if (!j || j.inStock == null || v.inStock == null) continue;
+        if (j.inStock === v.inStock) { agree += 1; continue; }
+        differ += 1;
+        if (examples.length < 5) examples.push(`${sku} dom=${v.inStock} json=${j.inStock}`);
+      }
+
+      // domOnly is the number this is really watching: those are the mega-menu's product links,
+      // which the tile selector cannot tell from the grid. Probe 3 measured 33 anchors for 31
+      // products, and the two extras were the two tiles the verdict had to refuse.
+      const domOnly = [...dom.keys()].filter((s) => !json.has(s));
+      const jsonOnly = [...json.keys()].filter((s) => !dom.has(s));
+      const jsonSoldOut = parsed.products.filter((p) => p.inStock === false).length;
+      const jsonUnknown = parsed.products.filter((p) => p.inStock == null).length;
+
+      logger.info(`Pokemon Center: JSONCHECK ${slug} page ${n} — json=${parsed.products.length} `
+        + `tiles=${found.length}, agree=${agree} differ=${differ}, `
+        + `soldOut(json)=${jsonSoldOut} unreadable(json)=${jsonUnknown}, `
+        + `domOnly=${domOnly.length}${domOnly.length ? ` [${domOnly.slice(0, 5).join(',')}]` : ''}, `
+        + `jsonOnly=${jsonOnly.length}${jsonOnly.length ? ` [${jsonOnly.slice(0, 5).join(',')}]` : ''}`
+        + `${differ ? ` — DISAGREE: ${examples.join('; ')}` : ''}`);
+    } catch (err) {
+      logger.warn(`Pokemon Center: JSONCHECK ${slug} page ${n} failed: ${err.message}`);
+    }
   }
 
   /**
