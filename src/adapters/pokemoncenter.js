@@ -51,6 +51,19 @@ const PC_RENDER_WAIT_MS = 8000;
 const PC_PAGE_TIMEOUT_MS = 60000;
 // Browsing pace, not burst pace. This is a store the client buys from.
 const PC_PAGE_SPACING_MS = 4000;
+// Products per page, via the `ps` query parameter.
+//
+// The store's own "Items per page" control offers 32, 64 and 96, and 96 is what it puts in the
+// URL. Probe 5 (2026-09-16) asked for it on a plain navigation and got 95 products back in one
+// load, against the default 32.
+//
+// This is the only lever that touches the rate limit. Reading the products out of __NEXT_DATA__
+// instead of the rendered tiles saves NO requests -- it is the same page load -- and page loads
+// are the only thing this site counts. The measured sweep needed 5 pages to cover 129 products;
+// at 96 that is 2, so the same coverage costs a third of the requests and a third of the spacing
+// waits. Overridable because the tolerable cadence is still unmeasured and this is the first
+// number anyone will want to turn down.
+const PC_PAGE_SIZE = Math.max(0, Number(process.env.PC_PAGE_SIZE) || 96);
 // A persistent profile so the Imperva session looks like a returning visitor rather than a new
 // one on every page.
 const PC_BROWSER_PROFILE = '/tmp/pc-sweep-profile';
@@ -152,6 +165,20 @@ function readOffers(offers) {
   }
 
   return { inStock, price };
+}
+
+/**
+ * A category page URL, built for a full navigation.
+ *
+ * Page 1 carries no `page` parameter, matching what the site itself produces and keeping the
+ * URL identical to the one a shopper lands on. `ps` is omitted entirely when zero, so setting
+ * PC_PAGE_SIZE=0 falls back to the store's default rather than sending `ps=0`.
+ */
+function pcCategoryUrl(base, page, pageSize) {
+  const qs = [];
+  if (page > 1) qs.push(`page=${page}`);
+  if (pageSize > 0) qs.push(`ps=${pageSize}`);
+  return qs.length ? `${base}?${qs.join('&')}` : base;
 }
 
 class PokemonCenterAdapter extends BaseAdapter {
@@ -1132,7 +1159,12 @@ class PokemonCenterAdapter extends BaseAdapter {
       const page = ctx.pages()[0] || await ctx.newPage();
 
       for (let n = 1; n <= maxPages; n += 1) {
-        const url = n === 1 ? base : `${base}?page=${n}`;
+        // Always a real navigation, never the pager or the page-size control. Probe 4 measured
+        // what driving this store's own UI costs: the in-app route change fires the
+        // DataDome-protected /tpci-ecommweb-api/search endpoint, which 403s and draws a captcha,
+        // and __NEXT_DATA__ is left frozen on the previous page's payload because a client-side
+        // transition never rewrites that script tag. Plain document loads render every time.
+        const url = pcCategoryUrl(base, n, PC_PAGE_SIZE);
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PC_PAGE_TIMEOUT_MS });
         await page.waitForTimeout(PC_RENDER_WAIT_MS);
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
@@ -1584,3 +1616,6 @@ module.exports = PokemonCenterAdapter;
 // that reads the DOM around it cannot be tested at all (page.evaluate serialises it).
 module.exports.pcVerdict = pcVerdict;
 module.exports.pcNameFromSlug = pcNameFromSlug;
+// Exported for tests too: which URL the sweep asks for decides how many requests the store sees.
+module.exports.pcCategoryUrl = pcCategoryUrl;
+module.exports.PC_PAGE_SIZE = PC_PAGE_SIZE;
