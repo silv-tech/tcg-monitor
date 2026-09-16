@@ -63,7 +63,16 @@ const PC_PAGE_SPACING_MS = 4000;
 // at 96 that is 2, so the same coverage costs a third of the requests and a third of the spacing
 // waits. Overridable because the tolerable cadence is still unmeasured and this is the first
 // number anyone will want to turn down.
-const PC_PAGE_SIZE = Math.max(0, Number(process.env.PC_PAGE_SIZE) || 96);
+// Resolved, not `Number(x) || 96`: that idiom turns the documented escape hatch PC_PAGE_SIZE=0
+// straight back into 96, because 0 is falsy. The one input intended to restore the store's own
+// default was the one input that could not work, and a test asserting the 0 behaviour passed
+// anyway because it called the builder directly. It also let `96.5` through into the URL.
+function resolvePageSize(raw, fallback = 96) {
+  const n = Number(raw);
+  if (raw === undefined || raw === null || raw === '' || !Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+const PC_PAGE_SIZE = resolvePageSize(process.env.PC_PAGE_SIZE);
 // A persistent profile so the Imperva session looks like a returning visitor rather than a new
 // one on every page.
 const PC_BROWSER_PROFILE = '/tmp/pc-sweep-profile';
@@ -411,47 +420,84 @@ class PokemonCenterAdapter extends BaseAdapter {
    */
   async _seedFirstObservations() {
     const withhold = new Set();
+    const rows = new Map();
 
-    // Only a real reading counts. A null verdict is the parser refusing to answer, and marking
-    // that sku seen would burn its one free pass on a row that was never observed.
-    const firstTime = [];
+    // Every sku with a real reading that this poll would emit. Computed BEFORE the try, because
+    // the failure path needs it even when loading the seen set is what failed -- otherwise a
+    // failed load withholds nothing and emits the very wave this guards against.
+    //
+    // Only a real reading counts here: a null verdict is the parser refusing to answer, and
+    // treating that as an observation would burn the sku's one free pass on a reading that never
+    // happened.
+    const observed = [];
     for (const [sku, avail] of this.availabilityCache) {
       if (!avail || typeof avail.inStock !== 'boolean') continue;
-      if (this._stockSeen.has(sku)) continue;
-      if (!this.sitemapProducts.has(sku)) continue;   // the poll would not emit it either
-      firstTime.push(sku);
+      if (!this.sitemapProducts.has(sku)) continue;     // the poll would not emit it either
+      observed.push(sku);
     }
-    if (firstTime.length === 0) return withhold;
+    if (observed.length === 0) return { withhold, rows };
 
+    let pending = [];
     try {
+      // Load the seen set FIRST. Filtering candidates against an unloaded set made every sku on
+      // the first poll of a process look like a first observation -- the entire catalogue.
       await this._loadStockSeen();
-      // Re-filter: the load may have brought in skus seeded by a previous process.
-      const pending = firstTime.filter((sku) => !this._stockSeen.has(sku));
-      if (pending.length === 0) return withhold;
+      pending = observed.filter((sku) => !this._stockSeen.has(sku));
+      if (pending.length === 0) return { withhold, rows };
 
       const redis = state.getRedis();
       if (!redis) throw new Error('no redis connection');
 
+      // A SKU WITH NO STORED ROW MUST NOT BE SEEDED.
+      //
+      // detectEvents emits NEW_SKU only when there is no old product at all. Seeding writes a row
+      // before the diff runs, so seeding a genuinely new listing makes `oldProduct` exist and the
+      // NEW_SKU never fires -- and _registerWithEarlyScanner has already told the 12-hourly
+      // scanner to stay quiet about that URL on the assumption this adapter would announce it. A
+      // brand-new in-stock product would then be announced by nothing at all, which for this store
+      // is the most valuable alert it can produce.
+      //
+      // The seed only exists to stop a false TRANSITION, and a transition needs something to
+      // transition FROM. No stored row, nothing to suppress: mark it seen and let NEW_SKU fire.
+      const stored = await state.getAllProducts(this.id);
+      const toSeed = pending.filter((sku) => stored[sku]);
+
       const pipeline = redis.pipeline();
-      for (const sku of pending) {
+      for (const sku of toSeed) {
+        // Built ONCE and handed back to the caller. Rebuilding it after the await let a
+        // fire-and-forget sweep write a new reading in between, so the row on disk could say
+        // false while the row emitted said true -- manufacturing the exact restock this guards.
         const row = this._buildRow(sku, this.sitemapProducts.get(sku), this.availabilityCache.get(sku));
+        rows.set(sku, row);
         // The same key, shape and TTL poll-adapter uses, so the diff sees no difference at all.
         pipeline.set(`tcg:product:${hashSku(this.id, sku)}`, JSON.stringify(row), 'EX', 86400 * 7);
       }
       pipeline.sadd(PC_STOCK_SEEN_KEY, ...pending);
-      await pipeline.exec();
+
+      // A PIPELINE RESOLVES ON COMMAND FAILURE. ioredis fills each error into the results array
+      // (Pipeline.js fillResult) and only rejects on a connection or cluster-slot error, which is
+      // why state.js reads `([err, data])` on every other pipeline in this codebase. This was the
+      // one call site that ignored it: an OOM or WRONGTYPE would leave every row unwritten, mark
+      // all ~800 skus seen anyway, and fire the whole wave on the next poll Redis accepted -- the
+      // failure this function exists to prevent, reached through its own success path.
+      const results = await pipeline.exec();
+      if (!Array.isArray(results)) throw new Error('pipeline returned no results');
+      const failed = results.filter(([e]) => e);
+      if (failed.length) throw new Error(`${failed.length}/${results.length} commands failed: ${failed[0][0].message}`);
 
       for (const sku of pending) this._stockSeen.add(sku);
-      const inStock = pending.filter((s) => this.availabilityCache.get(s).inStock === true).length;
-      logger.info(`Pokemon Center: seeded ${pending.length} first stock observations `
-        + `(${inStock} in stock) — no alerts fired; the next change to each is a real one`);
+      const inStock = toSeed.filter((s) => this.availabilityCache.get(s).inStock === true).length;
+      const newListings = pending.length - toSeed.length;
+      logger.info(`Pokemon Center: seeded ${toSeed.length} first stock observations `
+        + `(${inStock} in stock) — no alerts fired; the next change to each is a real one`
+        + `${newListings ? `; ${newListings} had no stored row and keep their NEW_SKU` : ''}`);
     } catch (err) {
-      // Nothing was marked seen, so this retries next poll. Withhold the rows meanwhile.
-      for (const sku of firstTime) withhold.add(sku);
+      rows.clear();
+      for (const sku of await this._rowsThatWouldFalselyRestock(observed)) withhold.add(sku);
       logger.warn(`Pokemon Center: first-observation seeding failed (${err.message}) — `
-        + `withholding ${firstTime.length} rows this poll rather than risk a false restock wave`);
+        + `withholding ${withhold.size} row(s) this poll rather than risk a false restock wave`);
     }
-    return withhold;
+    return { withhold, rows };
   }
 
   /**
@@ -493,6 +539,53 @@ class PokemonCenterAdapter extends BaseAdapter {
       // Left unloaded on purpose: _loadStockSeen will try again on the next poll.
       logger.warn(`Pokemon Center: could not establish the observed-stock set: ${err.message}`);
     }
+  }
+
+  /**
+   * When seeding fails, the skus whose emission would fabricate a restock — and only those.
+   *
+   * Withholding is NOT free. A row missing from two consecutive polls is written inStock:false by
+   * poll-adapter's stale path, so withholding an in-stock product marks it dead and then fires
+   * that wave on recovery. Withholding the whole candidate list would do exactly that, and on the
+   * first poll of a process -- before the seen set has loaded -- the candidate list is the entire
+   * catalogue.
+   *
+   * So the test is not "is this a first observation" but "would emitting this look like a
+   * restock": the stored row says not-in-stock, and the reading says in stock. That rule needs no
+   * seen set at all, which is what makes it usable on the path where loading the seen set is the
+   * thing that failed.
+   *
+   *   first sweep that can finally see    stored false, read true  -> withheld (the disaster set)
+   *   steady-state product still in stock stored true,  read true  -> emitted  (never starved)
+   *   anything reading sold out           read false               -> emitted  (raises nothing)
+   *
+   * If the stored rows cannot be read either, Redis is unavailable and poll-adapter's own
+   * getAllProducts is about to fail too, so the poll is lost regardless; withhold nothing and say
+   * so rather than starve the catalogue on the way down.
+   */
+  async _rowsThatWouldFalselyRestock(candidates) {
+    const risky = [];
+    if (!candidates || candidates.length === 0) return risky;
+    let stored;
+    try {
+      stored = await state.getAllProducts(this.id);
+    } catch (err) {
+      logger.warn(`Pokemon Center: could not read stored rows to scope the withhold (${err.message}) — `
+        + 'emitting normally; the guard is disarmed for this poll');
+      return risky;
+    }
+    for (const sku of candidates) {
+      const avail = this.availabilityCache.get(sku);
+      if (!avail || avail.inStock !== true) continue;      // cannot read as a restock
+      const prev = stored[sku];
+      if (prev && prev.inStock === true) continue;         // already in stock; no transition
+      // A sku already in the seen set is NOT a first observation, so its false->true is a REAL
+      // restock and must go out. Only trust that when the set actually loaded: if loading it is
+      // what failed, an empty set would silently reclassify every genuine restock as safe.
+      if (this._stockSeenLoaded && this._stockSeen.has(sku)) continue;
+      risky.push(sku);
+    }
+    return risky;
   }
 
   async _loadStockSeen() {
@@ -568,7 +661,11 @@ class PokemonCenterAdapter extends BaseAdapter {
     this._availabilityLoaded = true;
     try {
       const raw = await state.getRedis().get(PC_AVAILABILITY_KEY);
-      if (!raw) return;
+      // No stored blob is still a load. Returning here skipped the bootstrap permanently
+      // (_availabilityLoaded is already true), which was harmless only because nothing populates
+      // availabilityCache before this runs -- an ordering accident, not a guarantee, and this
+      // branch is heading towards a sweep that can be invoked outside the poll.
+      if (!raw) { await this._bootstrapStockSeen(); return; }
       const saved = JSON.parse(raw);
       let restored = 0;
       for (const [sku, data] of Object.entries(saved)) {
@@ -789,11 +886,13 @@ class PokemonCenterAdapter extends BaseAdapter {
     // "batchSize is not defined" on every poll.
     // Must run BEFORE these rows are returned: poll-adapter reads the old state to diff against
     // only after run() resolves, so a row seeded here is already in place when the diff happens.
-    const withheld = await this._seedFirstObservations();
+    const { withhold, rows: seededRows } = await this._seedFirstObservations();
 
     for (const [sku, meta] of this.sitemapProducts) {
-      if (withheld.has(sku)) continue;
-      products[sku] = this._buildRow(sku, meta, this.availabilityCache.get(sku));
+      if (withhold.has(sku)) continue;
+      // Reuse the exact object that was written to Redis. Rebuilding it here would re-read
+      // availabilityCache, which the sweeps mutate from outside this poll.
+      products[sku] = seededRows.get(sku) || this._buildRow(sku, meta, this.availabilityCache.get(sku));
     }
 
     // Freshness must describe STOCK DETECTION, not the sitemap.
@@ -1305,12 +1404,19 @@ class PokemonCenterAdapter extends BaseAdapter {
       const json = new Map(parsed.products.map((p) => [p.sku, p]));
       const dom = new Map(found.map((r) => [r.sku, pcVerdict(r.text)]));
 
+      // Every skipped comparison is attributed. Reporting only `unreadable(json)` left a tile
+      // unaccounted for with no way to tell which side refused -- and producing exactly this
+      // evidence is the only reason this function exists.
       let agree = 0;
       let differ = 0;
+      let skippedDom = 0;
+      let skippedJson = 0;
       const examples = [];
       for (const [sku, v] of dom) {
         const j = json.get(sku);
-        if (!j || j.inStock == null || v.inStock == null) continue;
+        if (!j) continue;                                   // counted as domOnly below
+        if (v.inStock == null) { skippedDom += 1; continue; }
+        if (j.inStock == null) { skippedJson += 1; continue; }
         if (j.inStock === v.inStock) { agree += 1; continue; }
         differ += 1;
         if (examples.length < 5) examples.push(`${sku} dom=${v.inStock} json=${j.inStock}`);
@@ -1324,14 +1430,22 @@ class PokemonCenterAdapter extends BaseAdapter {
       const jsonSoldOut = parsed.products.filter((p) => p.inStock === false).length;
       const jsonUnknown = parsed.products.filter((p) => p.inStock == null).length;
 
+      // `first` identifies WHICH page this payload actually is. __NEXT_DATA__ is only valid for
+      // the document as loaded, and a frozen payload from a client-side transition would
+      // otherwise have to be inferred from domOnly and jsonOnly both going to the page size.
+      const first = parsed.products.length ? parsed.products[0].sku : '-';
       logger.info(`Pokemon Center: JSONCHECK ${slug} page ${n} — json=${parsed.products.length} `
         + `tiles=${found.length}, agree=${agree} differ=${differ}, `
-        + `soldOut(json)=${jsonSoldOut} unreadable(json)=${jsonUnknown}, `
+        + `skipped=${skippedDom + skippedJson} (dom ${skippedDom}/json ${skippedJson}), `
+        + `soldOut(json)=${jsonSoldOut} unreadable(json)=${jsonUnknown} dropped(json)=${parsed.dropped || 0}, `
         + `domOnly=${domOnly.length}${domOnly.length ? ` [${domOnly.slice(0, 5).join(',')}]` : ''}, `
-        + `jsonOnly=${jsonOnly.length}${jsonOnly.length ? ` [${jsonOnly.slice(0, 5).join(',')}]` : ''}`
+        + `jsonOnly=${jsonOnly.length}${jsonOnly.length ? ` [${jsonOnly.slice(0, 5).join(',')}]` : ''}, `
+        + `first=${first}`
         + `${differ ? ` — DISAGREE: ${examples.join('; ')}` : ''}`);
     } catch (err) {
-      logger.warn(`Pokemon Center: JSONCHECK ${slug} page ${n} failed: ${err.message}`);
+      // `err.message` on its own would throw for a non-Error throwable, inside the one function
+      // in this file that promises never to throw — and its call site in the sweep is unguarded.
+      logger.warn(`Pokemon Center: JSONCHECK ${slug} page ${n} failed: ${(err && err.message) || err}`);
     }
   }
 
@@ -1619,3 +1733,4 @@ module.exports.pcNameFromSlug = pcNameFromSlug;
 // Exported for tests too: which URL the sweep asks for decides how many requests the store sees.
 module.exports.pcCategoryUrl = pcCategoryUrl;
 module.exports.PC_PAGE_SIZE = PC_PAGE_SIZE;
+module.exports.resolvePageSize = resolvePageSize;

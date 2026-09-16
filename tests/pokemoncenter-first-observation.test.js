@@ -27,7 +27,8 @@ const logger = require('../src/monitoring/logger');
 // adapter calls these exported functions, and leaving them real opens a Redis connection.
 let redisStore;        // key -> value written through the pipeline
 let seenMembers;       // contents of the stockseen set
-let failMode;          // 'none' | 'noredis' | 'exec'
+let storedRows;        // what state.getAllProducts() reports already being in Redis
+let failMode;          // 'none' | 'noredis' | 'exec' | 'exec-reject'
 
 function fakeRedis() {
   if (failMode === 'noredis') return null;
@@ -45,10 +46,24 @@ function fakeRedis() {
       return {
         set(key, value, ...rest) { ops.push(() => { redisStore[key] = value; }); return this; },
         sadd(key, ...members) { ops.push(() => { members.forEach((m) => seenMembers.add(m)); }); return this; },
+        /**
+         * Real ioredis semantics, which the first version of this fake got wrong.
+         *
+         * A non-transactional pipeline RESOLVES with `[[err, result], ...]`; it rejects only on a
+         * connection or cluster-slot error (Pipeline.js: fillResult captures each command error
+         * into the results array). The old fake threw instead, so the production failure mode --
+         * commands failing while exec resolves -- was unreachable in the tests and the code that
+         * ignored the results array passed green.
+         */
         async exec() {
-          if (failMode === 'exec') throw new Error('redis exec failed');
+          if (failMode === 'exec-reject') throw new Error('connection is closed');
+          if (failMode === 'exec') {
+            // Nothing is applied, and every command reports its own error, exactly as a Redis
+            // OOM or a WRONGTYPE key would.
+            return ops.map(() => [new Error('OOM command not allowed when used memory > maxmemory'), null]);
+          }
           ops.forEach((f) => f());
-          return [];
+          return ops.map(() => [null, 'OK']);
         },
       };
     },
@@ -56,6 +71,7 @@ function fakeRedis() {
 }
 
 state.getRedis = () => fakeRedis();
+state.getAllProducts = async () => storedRows;
 
 const PokemonCenter = require('../src/adapters/pokemoncenter');
 const retailers = require('../src/config/retailers.json');
@@ -81,25 +97,39 @@ let adapter;
 beforeEach(() => {
   redisStore = {};
   seenMembers = new Set();
+  storedRows = {};
   failMode = 'none';
   adapter = new PokemonCenter(list.find((r) => r.id === 'pokemoncenter'));
 });
 
-/** Put a sku in the sitemap (so the poll would emit it) and optionally give it an observation. */
+/**
+ * Put a sku in the sitemap (so the poll would emit it) and optionally give it an observation.
+ *
+ * It also gets a STORED row, because that is the situation this guard is for: ~800 products
+ * already sitting in Redis at inStock:false, not because they are sold out but because nothing
+ * could ever read them. Use `brandNew()` for a listing with no stored row at all.
+ */
 function known(sku, avail) {
   adapter.sitemapProducts.set(sku, {
     url: `https://www.pokemoncenter.com/en-ca/product/${sku}/thing`,
     name: `Product ${sku}`, english: true,
   });
+  storedRows[sku] = { sku, name: `Product ${sku}`, price: null, inStock: false, retailerId: 'pokemoncenter' };
   if (avail !== undefined) {
     adapter.availabilityCache.set(sku, { inStock: avail, price: 53.99, image: '', checkedAt: Date.now() });
   }
 }
 
+/** A listing Redis has never stored — the case where NEW_SKU must survive. */
+function brandNew(sku, avail) {
+  known(sku, avail);
+  delete storedRows[sku];
+}
+
 describe('first observation — what gets seeded', () => {
   test('an in-stock first reading is written to Redis and marked seen, not withheld', async () => {
     known('10-10320-101', true);
-    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
 
     assert.strictEqual(withheld.size, 0);
     assert.ok(redisStore[productKey('10-10320-101')], 'row should have been seeded');
@@ -158,7 +188,7 @@ describe('first observation — what is deliberately NOT seeded', () => {
 
   test('nothing observed at all is a no-op that touches neither Redis nor the set', async () => {
     known('10-10320-101');    // in the sitemap, never read
-    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
 
     assert.strictEqual(withheld.size, 0);
     assert.deepStrictEqual(redisStore, {});
@@ -166,29 +196,166 @@ describe('first observation — what is deliberately NOT seeded', () => {
   });
 });
 
+describe('a brand-new listing keeps its NEW_SKU', () => {
+  /**
+   * detectEvents emits NEW_SKU only when there is NO old product. Seeding writes a row before the
+   * diff runs, so seeding a genuinely new listing makes oldProduct exist and the NEW_SKU never
+   * fires -- and _registerWithEarlyScanner has already told the 12-hourly scanner to stay quiet
+   * about that URL, on the assumption this adapter would announce it. The product would then be
+   * announced by nothing at all, which for this store is the most valuable alert it can produce.
+   *
+   * The seed only exists to stop a false TRANSITION, and that needs something to transition from.
+   */
+  test('a sku with no stored row is NOT seeded, but IS marked seen', async () => {
+    brandNew('10-99999-101', true);
+
+    const { value: { withhold } } = await silence(() => adapter._seedFirstObservations());
+
+    assert.strictEqual(withhold.size, 0);
+    assert.strictEqual(redisStore[productKey('10-99999-101')], undefined,
+      'seeding it would destroy the NEW_SKU');
+    assert.ok(seenMembers.has('10-99999-101'),
+      'still marked seen, or its next reading is treated as a first observation again');
+  });
+
+  test('and the diff therefore still produces NEW_SKU for it', async () => {
+    const { diffProducts } = require('../src/core/events');
+    brandNew('10-99999-101', true);
+    await silence(() => adapter._seedFirstObservations());
+
+    const fresh = adapter._buildRow('10-99999-101', adapter.sitemapProducts.get('10-99999-101'),
+      adapter.availabilityCache.get('10-99999-101'));
+    const events = diffProducts({}, { '10-99999-101': fresh });
+    assert.ok(events.some((e) => e.type === 'NEW_SKU'), 'a brand-new listing must still announce');
+  });
+
+  test('a mix seeds only the ones that have a stored row', async () => {
+    known('10-10320-101', true);        // already stored at inStock:false
+    brandNew('10-99999-101', true);     // never stored
+
+    const { value: { withhold }, lines } = await silence(() => adapter._seedFirstObservations());
+
+    assert.strictEqual(withhold.size, 0);
+    assert.ok(redisStore[productKey('10-10320-101')]);
+    assert.strictEqual(redisStore[productKey('10-99999-101')], undefined);
+    assert.deepStrictEqual([...seenMembers].sort(), ['10-10320-101', '10-99999-101']);
+    assert.match(lines.join('\n'), /1 had no stored row and keep their NEW_SKU/);
+  });
+});
+
 describe('first observation — failure is handled in the safe direction', () => {
-  // If the seed write fails, emitting the rows anyway is exactly the alert wave this prevents.
-  // Withholding them costs one poll: the row is simply not diffed, and it already reads false.
-  test('a failed pipeline withholds the rows and marks nothing seen', async () => {
+  /**
+   * THE DEFECT THIS PINS. A non-transactional ioredis pipeline RESOLVES when individual commands
+   * fail -- errors arrive in the results array, and it rejects only on a connection or
+   * cluster-slot error. The first version of this code awaited exec() and ignored the result, so
+   * an OOM or a WRONGTYPE key would leave every row unwritten, mark every sku seen anyway, and
+   * fire the whole restock wave on the next poll Redis accepted: the exact failure the function
+   * exists to prevent, reached through its own success path.
+   */
+  test('commands failing while exec RESOLVES is treated as a failure, not a success', async () => {
     known('10-10320-101', true);
     known('10-99999-101', true);
     failMode = 'exec';
 
-    const { value: withheld, lines } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold }, lines } = await silence(() => adapter._seedFirstObservations());
+
+    assert.strictEqual(seenMembers.size, 0, 'nothing may be marked seen when the writes failed');
+    assert.deepStrictEqual(redisStore, {}, 'and no row was written');
+    assert.strictEqual(withhold.size, 2, 'the candidates are withheld instead of emitted');
+    assert.match(lines.join('\n'), /commands failed/);
+  });
+
+  test('a rejecting exec (connection lost) is handled the same way', async () => {
+    known('10-10320-101', true);
+    failMode = 'exec-reject';
+
+    const { value: { withhold } } = await silence(() => adapter._seedFirstObservations());
+    assert.strictEqual(withhold.size, 1);
+    assert.strictEqual(seenMembers.size, 0);
+  });
+
+  /**
+   * Withholding is NOT free, which the first version's comment got wrong. A row missing from two
+   * consecutive polls is written inStock:false by poll-adapter's stale path. So the withhold list
+   * must be the candidates, never the whole catalogue -- over-withholding marks live products
+   * dead and then fires that wave on recovery.
+   */
+  test('only the candidates are withheld, never the already-seen catalogue', async () => {
+    seenMembers.add('old-1');
+    seenMembers.add('old-2');
+    known('old-1', true);
+    known('old-2', true);
+    known('10-10320-101', true);        // the only genuine candidate
+    failMode = 'exec';
+
+    const { value: { withhold } } = await silence(() => adapter._seedFirstObservations());
+
+    assert.deepStrictEqual([...withhold], ['10-10320-101']);
+  });
+});
+
+describe('first observation — the withhold is scoped to what could actually misfire', () => {
+  test('a failed pipeline withholds the risky rows and marks nothing seen', async () => {
+    known('10-10320-101', true);
+    known('10-99999-101', true);
+    failMode = 'exec';
+
+    const { value: { withhold: withheld }, lines } = await silence(() => adapter._seedFirstObservations());
 
     assert.strictEqual(withheld.size, 2);
     assert.ok(withheld.has('10-10320-101'));
     assert.strictEqual(seenMembers.size, 0, 'nothing may be marked seen if the write failed');
-    assert.match(lines.join('\n'), /withholding 2 rows/);
+    assert.match(lines.join('\n'), /withholding 2 row\(s\)/);
   });
 
   test('no Redis connection is handled the same way, without throwing', async () => {
     known('10-10320-101', true);
     failMode = 'noredis';
 
-    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
     assert.strictEqual(withheld.size, 1);
     assert.strictEqual(seenMembers.size, 0);
+  });
+
+  /**
+   * The rule is "would emitting this look like a restock", not "is this a first observation".
+   * A product already stored in stock cannot produce a RESTOCK, so starving it would be pure
+   * harm: two missed polls and poll-adapter's stale path writes it out of stock, which then
+   * fires the very wave on recovery.
+   */
+  test('a product already stored IN STOCK is never withheld', async () => {
+    known('10-10320-101', true);
+    storedRows['10-10320-101'].inStock = true;
+    failMode = 'exec';
+
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
+    assert.strictEqual(withheld.size, 0, 'no transition is possible, so nothing to protect against');
+  });
+
+  test('a reading of SOLD OUT is never withheld — it cannot fabricate a restock', async () => {
+    known('699-17157', false);
+    failMode = 'exec';
+
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
+    assert.strictEqual(withheld.size, 0);
+  });
+
+  /**
+   * The failure that made this rule necessary: on the first poll of a process the seen set has
+   * not loaded, so if loading it is what fails, the candidate list is the WHOLE catalogue. The
+   * old code withheld all of it — starving ~800 rows into poll-adapter's stale path.
+   */
+  test('a failure to load the seen set withholds only the risky rows, not the catalogue', async () => {
+    for (let i = 0; i < 20; i += 1) {
+      known(`in-stock-${i}`, true);
+      storedRows[`in-stock-${i}`].inStock = true;      // steady state: already in stock
+    }
+    known('10-10320-101', true);                        // stored false, reads true: the risk
+    adapter._loadStockSeen = async () => { throw new Error('WRONGTYPE'); };
+
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
+
+    assert.deepStrictEqual([...withheld], ['10-10320-101']);
   });
 
   test('a later poll retries after a failure and seeds successfully', async () => {
@@ -198,7 +365,7 @@ describe('first observation — failure is handled in the safe direction', () =>
     assert.strictEqual(seenMembers.size, 0);
 
     failMode = 'none';
-    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
     assert.strictEqual(withheld.size, 0);
     assert.ok(seenMembers.has('10-10320-101'));
   });
@@ -301,7 +468,7 @@ describe('bootstrap — the cache restored at boot is already observed', () => {
 
     // It comes back in stock during that very first poll.
     adapter.availabilityCache.set('699-17157', { inStock: true, price: 20.99, image: '', checkedAt: Date.now() });
-    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
 
     assert.strictEqual(withheld.size, 0);
     assert.strictEqual(redisStore[productKey('699-17157')], undefined,
@@ -353,7 +520,7 @@ describe('THE POINT — a seeded first observation produces no event', () => {
 
     // The product actually comes back in stock on a later poll.
     adapter.availabilityCache.set('699-17157', { inStock: true, price: 20.99, image: '', checkedAt: Date.now() });
-    const { value: withheld } = await silence(() => adapter._seedFirstObservations());
+    const { value: { withhold: withheld } } = await silence(() => adapter._seedFirstObservations());
     assert.strictEqual(withheld.size, 0);
 
     const fresh = adapter._buildRow('699-17157', adapter.sitemapProducts.get('699-17157'),

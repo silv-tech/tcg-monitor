@@ -60,10 +60,37 @@ function dig(root, path) {
  * Both were identical across every product in the probe run, but they are separate fields and a
  * sale is exactly when they diverge -- purchasePrice is the one on the button.
  */
+function amountOf(node) {
+  if (!node) return null;
+  const raw = node.amount;
+  // A numeric string is the most likely benign drift in a payload like this, and silently
+  // dropping the price for it would be worse than reading it.
+  const n = typeof raw === 'string' ? Number(raw) : raw;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * The price a shopper would pay.
+ *
+ * purchasePrice beats listPrice: they were identical on every product measured, but they are
+ * separate fields and a sale is exactly when they diverge -- purchasePrice is the one on the
+ * button.
+ *
+ * The *PriceRange fields are the fallback, and they matter more than they look. This store sells
+ * sized product -- readOffers() elsewhere in the adapter exists precisely because a Crocs clog
+ * ships as nine variants under one page -- and for those the flat price can be absent while the
+ * range carries it. `fromPrice` is taken for the same reason readOffers takes lowPrice: it is the
+ * number the grid displays and the one a shopper sees first.
+ */
 function pickPrice(p) {
+  if (!p) return null;
   for (const key of ['purchasePrice', 'listPrice']) {
-    const amount = p && p[key] && p[key].amount;
-    if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) return amount;
+    const amount = amountOf(p[key]);
+    if (amount != null) return amount;
+  }
+  for (const key of ['purchasePriceRange', 'listPriceRange']) {
+    const amount = amountOf(p[key] && p[key].fromPrice);
+    if (amount != null) return amount;
   }
   return null;
 }
@@ -96,8 +123,11 @@ function pcStockFromJson(p) {
  * Every product in a category page's __NEXT_DATA__.
  *
  * @param {string|object} nextData  the __NEXT_DATA__ script contents, raw text or already parsed
- * @returns {{products: Array<{sku,name,price,inStock,image,releaseDate,breadcrumb}>}|null}
- *          null when the products array is not where it was measured -- see below
+ * @returns {{products: Array<{sku,name,price,inStock,image,releaseDate,breadcrumb}>, dropped:number}|null}
+ *          null when the products array is not where it was measured, OR when it had rows and
+ *          none of them survived parsing. `dropped` counts rows discarded for want of a usable
+ *          sku, so a PARTIAL shape change is visible in the caller's log instead of quietly
+ *          shrinking the catalogue.
  *
  * NULL IS NOT AN EMPTY CATALOGUE. A missing array means the page shape changed, the document was
  * a block page, or hydration never ran. Returning [] for that would tell the caller the category
@@ -114,14 +144,15 @@ function pcProductsFromNextData(nextData) {
   const raw = dig(root, PRODUCTS_PATH);
   if (!Array.isArray(raw)) return null;
 
-  const products = [];
+  const bySku = new Map();
+  let dropped = 0;
   for (const p of raw) {
-    if (!p || typeof p !== 'object') continue;
+    if (!p || typeof p !== 'object') { dropped += 1; continue; }
     const sku = typeof p.code === 'string' ? p.code.trim() : '';
-    if (!sku) continue;                      // a row with no SKU cannot be matched to anything
+    if (!sku) { dropped += 1; continue; }     // a row with no SKU cannot be matched to anything
     const image = (Array.isArray(p.images) && p.images[0] && typeof p.images[0].original === 'string')
       ? p.images[0].original : '';
-    products.push({
+    const row = {
       sku,
       name: typeof p.name === 'string' ? p.name : '',
       price: pickPrice(p),
@@ -129,9 +160,32 @@ function pcProductsFromNextData(nextData) {
       image,
       releaseDate: typeof p.releaseDate === 'string' ? p.releaseDate : null,
       breadcrumb: typeof p.reportingCrumb === 'string' ? p.reportingCrumb : '',
-    });
+    };
+
+    // The same sku twice is the array's problem, not a verdict. Keeping the last silently picked
+    // a winner and made the cross-check report a disagreement between the JSON and the tile that
+    // did not exist. Collapse instead, and when the copies CONTRADICT each other on stock, refuse
+    // -- the same rule the rest of this module applies to anything it cannot read cleanly.
+    const seen = bySku.get(sku);
+    if (!seen) { bySku.set(sku, row); continue; }
+    if (seen.inStock !== row.inStock) seen.inStock = null;
+    if (seen.price == null && row.price != null) seen.price = row.price;
+    if (!seen.image && row.image) seen.image = row.image;
+    if (!seen.name && row.name) seen.name = row.name;
   }
-  return { products };
+
+  const products = [...bySku.values()];
+
+  // A ROW-SHAPE CHANGE MUST NOT READ AS AN EMPTY CATALOGUE.
+  //
+  // The null-vs-[] contract above guards the CONTAINER moving. It said nothing about the rows,
+  // and the per-row drop defeated it silently: rename `code`, or ship it as a number, and 96
+  // products became `{products: []}` -- the exact value this file promises never to produce for
+  // "could not look", and the one that marks a live catalogue dead and then fires the whole
+  // restock wave on recovery. An array that had rows and yielded none is a parse failure.
+  if (raw.length > 0 && products.length === 0) return null;
+
+  return { products, dropped };
 }
 
 module.exports = { pcProductsFromNextData, pcStockFromJson, PRODUCTS_PATH };

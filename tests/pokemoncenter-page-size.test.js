@@ -49,16 +49,43 @@ describe('pcCategoryUrl', () => {
   });
 });
 
-describe('the size the sweep actually ships with', () => {
-  // This is the number that decides the store's request count. Asserting it directly means a
-  // change to the default has to be deliberate, rather than silently tripling the page loads.
-  const { PC_PAGE_SIZE } = require('../src/adapters/pokemoncenter');
+describe('resolvePageSize — the lever that could not be pulled', () => {
+  /**
+   * `Math.max(0, Number(env) || 96)` turned the documented escape hatch PC_PAGE_SIZE=0 straight
+   * back into 96, because 0 is falsy: the one input meant to restore the store's own default was
+   * the one input that could not work. It also let `96.5` through into the URL.
+   *
+   * These test the RESOLVER, not the resolved constant. The previous version read the module-level
+   * constant, so it depended on the ambient environment — `PC_PAGE_SIZE=32 npm test` failed CI,
+   * meaning an operator using the documented tuning lever broke the build, while `PC_PAGE_SIZE=0`
+   * passed precisely BECAUSE of the bug.
+   */
+  const { resolvePageSize } = require('../src/adapters/pokemoncenter');
 
-  test('defaults to 96, the largest the store offers', () => {
-    assert.strictEqual(PC_PAGE_SIZE, 96);
+  test('0 is honoured — it is the documented way back to the store default', () => {
+    assert.strictEqual(resolvePageSize('0'), 0);
   });
 
-  test('and that is what a swept page 1 asks for', () => {
-    assert.strictEqual(pcCategoryUrl(BASE, 1, PC_PAGE_SIZE), `${BASE}?ps=96`);
+  test('unset or empty falls back to 96, the largest the store offers', () => {
+    assert.strictEqual(resolvePageSize(undefined), 96);
+    assert.strictEqual(resolvePageSize(''), 96);
+  });
+
+  test('a real value is taken', () => {
+    assert.strictEqual(resolvePageSize('32'), 32);
+    assert.strictEqual(resolvePageSize('64'), 64);
+  });
+
+  test('nonsense and negatives fall back rather than reaching the URL', () => {
+    assert.strictEqual(resolvePageSize('abc'), 96);
+    assert.strictEqual(resolvePageSize('-1'), 96);
+  });
+
+  test('a fraction is floored — ps=96.5 is not a page size', () => {
+    assert.strictEqual(resolvePageSize('96.5'), 96);
+  });
+
+  test('0 resolved end to end drops the parameter from the URL', () => {
+    assert.strictEqual(pcCategoryUrl(BASE, 1, resolvePageSize('0')), BASE);
   });
 });

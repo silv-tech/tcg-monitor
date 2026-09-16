@@ -145,20 +145,96 @@ describe('pcProductsFromNextData — rows that cannot be identified are dropped'
   });
 });
 
-describe('pcProductsFromNextData — the grid, and only the grid', () => {
+describe('a ROW-shape change must not read as an empty catalogue', () => {
   /**
-   * The reason this module exists. On the same load, the DOM extractor returned 33 anchors for
-   * 31 products, because `a[href*="/en-ca/product/"]` also matches the mega-menu's own product
-   * links. Those two — 716E11935 and 715E10557 — do not share the grid's SKU format and were
-   * exactly the two tiles pcVerdict() had to refuse. The JSON array cannot contain them.
+   * The null-vs-[] contract guards the CONTAINER moving. It said nothing about the rows, and the
+   * per-row drop defeated it silently: rename `code`, or ship it as a number, and 96 products
+   * became `{products: []}` — the exact value this module promises never to produce for "could
+   * not look", and the one that marks a live catalogue dead and then fires the whole restock wave
+   * on recovery.
    */
-  test('carries the grid count, with no mega-menu links mixed in', () => {
-    const grid = Array.from({ length: 31 }, (_, i) => ({
-      ...REAL_PRODUCT, code: `10-1${String(i).padStart(4, '0')}-101`,
-    }));
-    const out = pcProductsFromNextData(wrap(grid));
-    assert.strictEqual(out.products.length, 31);
-    assert.ok(out.products.every((p) => /^10-\d{5}-101$/.test(p.sku)));
-    assert.ok(out.products.every((p) => p.inStock === true));
+  test('every row dropped returns null, NOT an empty catalogue', () => {
+    const renamed = Array.from({ length: 96 }, (_, i) => ({ productCode: `10-1000${i}-101`, outOfStock: false }));
+    assert.strictEqual(pcProductsFromNextData(wrap(renamed)), null);
+  });
+
+  test('a sku arriving as a number is a shape change, not 96 missing products', () => {
+    const numeric = Array.from({ length: 96 }, (_, i) => ({ code: 1000 + i, outOfStock: false }));
+    assert.strictEqual(pcProductsFromNextData(wrap(numeric)), null);
+  });
+
+  // A PARTIAL drop must stay visible rather than quietly shrinking the catalogue.
+  test('a partial drop still parses, and reports how many rows it lost', () => {
+    const out = pcProductsFromNextData(wrap([REAL_PRODUCT, { name: 'no code' }, { code: 42 }]));
+    assert.strictEqual(out.products.length, 1);
+    assert.strictEqual(out.dropped, 2);
+  });
+
+  test('a clean payload reports zero dropped', () => {
+    assert.strictEqual(pcProductsFromNextData(wrap([REAL_PRODUCT])).dropped, 0);
+  });
+});
+
+describe('duplicate skus are collapsed, and a contradiction refuses', () => {
+  /**
+   * The array is not guaranteed unique. Keeping the last silently picked a winner and made the
+   * cross-check report a disagreement between the JSON and the tile that did not exist — feeding
+   * a fabricated disagreement straight into the promotion decision.
+   */
+  test('the same sku twice yields one row', () => {
+    const out = pcProductsFromNextData(wrap([
+      { ...REAL_PRODUCT, code: 'A' }, { ...REAL_PRODUCT, code: 'A' }, { ...REAL_PRODUCT, code: 'B' },
+    ]));
+    assert.deepStrictEqual(out.products.map((p) => p.sku), ['A', 'B']);
+  });
+
+  test('copies that CONTRADICT each other on stock refuse rather than pick one', () => {
+    const out = pcProductsFromNextData(wrap([
+      { ...REAL_PRODUCT, code: 'A', outOfStock: false },
+      { ...REAL_PRODUCT, code: 'A', outOfStock: true },
+    ]));
+    assert.strictEqual(out.products.length, 1);
+    assert.strictEqual(out.products[0].inStock, null, 'an unresolvable sku must not be guessed');
+  });
+
+  test('copies that AGREE keep the verdict', () => {
+    const out = pcProductsFromNextData(wrap([
+      { ...REAL_PRODUCT, code: 'A', outOfStock: true }, { ...REAL_PRODUCT, code: 'A', outOfStock: true },
+    ]));
+    assert.strictEqual(out.products[0].inStock, false);
+  });
+});
+
+describe('price — the shapes this store actually ships', () => {
+  /**
+   * Pokemon Center sells sized product; readOffers() elsewhere in the adapter exists precisely
+   * because a Crocs clog ships as nine variants under one page. For those the flat price can be
+   * absent while the range carries it, and ignoring the range wrote every sized product with a
+   * null price.
+   */
+  test('falls back to purchasePriceRange.fromPrice when no flat price is present', () => {
+    const ranged = {
+      code: '70-11607', name: 'Crocs', outOfStock: false,
+      purchasePriceRange: { fromPrice: { amount: 10.99 }, toPrice: { amount: 24.99 } },
+    };
+    assert.strictEqual(pcProductsFromNextData(wrap([ranged])).products[0].price, 10.99);
+  });
+
+  test('a flat price still wins over the range', () => {
+    const both = {
+      ...REAL_PRODUCT,
+      purchasePriceRange: { fromPrice: { amount: 1.99 }, toPrice: { amount: 9.99 } },
+    };
+    assert.strictEqual(pcProductsFromNextData(wrap([both])).products[0].price, 53.99);
+  });
+
+  test('a numeric STRING amount is read rather than silently dropped', () => {
+    const str = { code: 'A', outOfStock: false, purchasePrice: { amount: '53.99' } };
+    assert.strictEqual(pcProductsFromNextData(wrap([str])).products[0].price, 53.99);
+  });
+
+  test('a junk amount yields no price rather than a wrong one', () => {
+    const junk = { code: 'A', outOfStock: false, purchasePrice: { amount: 'free' } };
+    assert.strictEqual(pcProductsFromNextData(wrap([junk])).products[0].price, null);
   });
 });
