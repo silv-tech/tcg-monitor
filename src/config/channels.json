@@ -68,7 +68,7 @@
   "enabledEvents": {
     "RESTOCK": true,
     "NEW_SKU": true,
-    "PRICE_CHANGE": true,
+    "PRICE_CHANGE": false,
     "PREORDER_LIVE": true,
     "CART_AVAILABLE": true,
     "SHIPPING_CHANGE": true
