@@ -69,10 +69,31 @@ describe('dedup: genuinely new price news still gets through', () => {
 });
 
 describe('dedup: existing behaviour is unchanged', () => {
-  test('a price event still carries the original short-window sku gate', () => {
+  test('the sku gate now holds a price move for 12h, not 10 minutes', () => {
+    // This asserted 600 (10 min). Raised deliberately, on measurement.
+    //
+    // The transition gate beside it only catches an IDENTICAL old>new pair — the case it was
+    // built on (B0GX7S11S3 repeating "$24.97 -> $17.45" exactly). A marketplace reprices to a
+    // slightly DIFFERENT number each swing, so every repeat minted a new transition key while
+    // the sku key had already expired after 10 minutes, and neither gate held.
+    //
+    // MEASURED on the 156 real PRICE_CHANGE alerts of 2026-09-15 — 72 distinct products, so 54%
+    // of the volume was pure repetition, one $30 tin alerting NINE times in a day. Replaying
+    // those timestamps: 10min -> 156/day, 1h -> 140, 6h -> 114, 12h -> 84, 24h -> 72 (the floor,
+    // one per product). 12h caps any product at two alerts a day.
     const [primary] = eventKeys(priceEvent('B0GX7S11S3', 24.97, 17.45));
     assert.strictEqual(primary[0], 'tcg:dedup:PRICE_CHANGE:Amazon Canada:B0GX7S11S3');
-    assert.strictEqual(primary[1], 600);
+    assert.strictEqual(primary[1], 12 * 60 * 60);
+  });
+
+  test('RESTOCK is untouched — a drop wave minutes apart must still get through', () => {
+    // The whole point of scoping the change to the PRICE_CHANGE branch: restock dedup still runs
+    // on DEDUP_TTL (600s), and a watchlist restock still on 45s.
+    const [primary] = eventKeys({
+      type: 'RESTOCK', newValue: true,
+      product: { retailer: 'Amazon Canada', sku: 'B0X', inStock: true },
+    });
+    assert.strictEqual(primary[1], 600, 'restock window must not have moved');
   });
 
   test('restock still keys on stock state so OOS -> in -> OOS -> in all fire', () => {

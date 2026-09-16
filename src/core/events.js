@@ -12,7 +12,15 @@ const EVENT_TYPES = {
 };
 
 // Only price DROPS alert, and only past this swing — small wobbles and increases aren't worth a ping
-const MIN_PRICE_CHANGE_PCT = 9;
+//
+// Env-tunable (default UNCHANGED at 9) so the floor can be raised from Railway without a deploy.
+// Deliberately not raised here: 9% is the wrong shape to fix by itself, because it is a pure
+// percentage. 9% off a $400 booster box is $36 and is real news; 9% off a $30 tin is $2.70 and is
+// not — so a single global number cannot separate them, and raising it would silence the expensive
+// drops that matter most alongside the cheap noise. The measured cause of the 2026-09-15 flood was
+// REPETITION, not sensitivity (156 alerts across 72 products), and that is fixed in dedup.js by
+// PRICE_SKU_TTL. Raise this only if a day of data with that window in place still reads spammy.
+const MIN_PRICE_CHANGE_PCT = Number(process.env.MIN_PRICE_CHANGE_PCT) || 9;
 
 // ...and NOT past this one. A drop steeper than this is not a discount, it is bad data.
 //

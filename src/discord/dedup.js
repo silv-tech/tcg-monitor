@@ -19,6 +19,33 @@ const WATCHLIST_RESTOCK_TTL = 45;
  */
 const REPEAT_PRICE_TTL = 6 * 60 * 60; // 6 hours
 
+/**
+ * How long ANY price move on one SKU stays suppressed, whatever the numbers are.
+ *
+ * REPEAT_PRICE_TTL above only catches an IDENTICAL transition, and that is the case it was
+ * measured on (B0GX7S11S3 repeating "$24.97 -> $17.45" exactly). A marketplace reprices to a
+ * slightly different number each swing, so every repeat is a NEW key and neither gate holds —
+ * the SKU-level gate expires after DEDUP_TTL's 10 minutes, and the transition gate never matches.
+ *
+ * MEASURED on the 156 real PRICE_CHANGE alerts of 2026-09-15 (72 distinct products, so 54% of the
+ * volume was repetition). Replaying those exact timestamps through this window:
+ *
+ *     10 min (what shipped) -> 156/day    4h  -> 121/day
+ *     1h                    -> 140/day    6h  -> 114/day
+ *     2h                    -> 134/day   12h  ->  84/day  <- chosen
+ *                                        24h  ->  72/day  (the floor: one per product)
+ *
+ * The worst offender alerted NINE times in a day (a $30 tin, "Triple Whammy Tin (Slaking)",
+ * every swing a genuine >=9% drop because the buy box kept bouncing). 12h caps any one product at
+ * two alerts a day, which is the point: a second genuine drop on the same item hours later is news,
+ * a fourth one inside an hour is a reprice loop.
+ *
+ * This suppresses REPETITION on one SKU, never a first sighting, and it does not touch RESTOCK —
+ * DEDUP_TTL still governs that, because a restock wave minutes apart is exactly what must get
+ * through. Tune without a deploy: PRICE_SKU_TTL_HOURS.
+ */
+const PRICE_SKU_TTL = (Number(process.env.PRICE_SKU_TTL_HOURS) || 12) * 60 * 60;
+
 // In-memory fallback dedup when Redis is unavailable
 const memoryDedup = new Map();
 const MEMORY_MAX_SIZE = 5000;
@@ -51,8 +78,9 @@ function eventKeys(event) {
 
   if (type === 'PRICE_CHANGE' && event.oldValue != null && event.newValue != null) {
     return [
-      // Unchanged short window: any second price move for this SKU right after the first.
-      [base, DEDUP_TTL],
+      // ANY second price move for this SKU, whatever the numbers — the gate that actually
+      // stops a repricing loop, because the numbers differ on every swing.
+      [base, PRICE_SKU_TTL],
       // Long window on the exact transition, which is what a flapping buy box repeats.
       [`${base}:${event.oldValue}>${event.newValue}`, REPEAT_PRICE_TTL],
     ];
@@ -125,4 +153,4 @@ async function filterDuplicates(events) {
   return unique;
 }
 
-module.exports = { isDuplicate, markSent, filterDuplicates, eventKey, eventKeys, REPEAT_PRICE_TTL };
+module.exports = { isDuplicate, markSent, filterDuplicates, eventKey, eventKeys, REPEAT_PRICE_TTL, PRICE_SKU_TTL };
