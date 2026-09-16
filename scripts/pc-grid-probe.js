@@ -154,6 +154,19 @@ function ensureWritableHome() {
  * with no clicking, it is a same-origin fetch so the browser sends the session's own cookies and
  * headers, and the wider `rows` call is only attempted if the first is allowed through. Nothing
  * is retried -- a 403 is an answer, and hammering it is how the exit gets scored.
+ *
+ * ANSWERED, AND THE ANSWER IS NO (2026-09-16). From a clean page, no clicking, session cookies
+ * attached, it still returned 403 -- and the body is a DataDome envelope,
+ *
+ *   {"url":"https://geo.captcha-delivery.com/captcha/?...&t=bv..."}
+ *
+ * so this is a deliberate challenge on this endpoint and not an auth or parameter mistake. The
+ * "poisoned session" theory was wrong; the sibling endpoints answer because nobody bothers to
+ * scrape review scores, cart or profile. /search is the one worth defending, and it is defended.
+ *
+ * The document remains the only way in: the same page load rendered 95 products through
+ * __NEXT_DATA__ while this call was refused. Kept, off by default, so the question is not
+ * reopened from scratch -- if the store ever changes, this is the one-line way to re-ask.
  */
 async function probeSearchApi(page, slug) {
   const FL = ['availability_status', 'best_seller', 'brand', 'currency', 'description',
@@ -184,6 +197,11 @@ async function probeSearchApi(page, slug) {
     rows: 95, start: 0, status: first.status, bytes: first.bytes, type: first.type,
     error: first.error, verdict: first.status === 200 ? 'ALLOWED' : 'blocked',
   });
+  // Log the body on FAILURE too. The first run of this probe only logged it on success, and the
+  // refusal turned out to be the informative part -- it is a JSON envelope carrying a
+  // captcha-delivery URL, which is what proves DataDome and not an auth or parameter mistake.
+  // It survived only because the response listener happens to dump JSON bodies over 1000 bytes.
+  if (first.body && first.status !== 200) logBody('search-refused', first.body);
   if (!first || first.status !== 200 || !first.body) return;
 
   // Only now, and only once: does it hand over more than a page's worth in a single call?
