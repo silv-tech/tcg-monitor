@@ -25,9 +25,48 @@ const assert = require('node:assert');
 const { isSoldByAmazon, isThirdPartySeller } = require('../src/utils/amazon-seller');
 
 describe('isSoldByAmazon', () => {
-  test('Amazon storefronts pass', () => {
-    for (const s of ['Amazon.ca', 'Amazon', 'Amazon.com', 'amazon.ca', '  Amazon.ca  ']) {
+  test('THIS marketplace\'s Amazon storefronts pass', () => {
+    // 'Amazon.com' used to be in this list and is now asserted FALSE below. That was a deliberate
+    // decision being reversed, not an oversight being corrected — see the foreign-marketplace
+    // suite, which carries the production evidence that reversed it.
+    for (const s of ['Amazon.ca', 'Amazon', 'amazon.ca', '  Amazon.ca  ', 'Amazon Canada']) {
       assert.strictEqual(isSoldByAmazon(s), true, s);
+    }
+  });
+
+  test('a DIFFERENT Amazon marketplace does not pass', () => {
+    // MEASURED in production 2026-09-15/16, 8 times:
+    //   Seller changed for B0B59WJQCS: cached "GENESIS BRANDS CA" -> live "Amazon US"
+    //   — alert NOT suppressed
+    //
+    // The original anchor was written against IMPOSTORS ("Amazonia Trading"), and it handles those
+    // correctly. It did not consider that Amazon runs one storefront per COUNTRY and that the
+    // marketplace is part of the name, so "Amazon US" and "Amazon.com" cleared it for exactly the
+    // same reason "Amazon.ca" does. This monitor is amazon.CA quoting CAD — scraper-api.js calls
+    // `tld=ca` "LOAD-BEARING" for this same reason — so a US listing is Amazon Global Store:
+    // different price, cross-border shipping and duties, different stock.
+    //
+    // This DOES cost a suppressed alert, against this project's "never trade a drop for a maybe"
+    // rule. The judgement is that a foreign marketplace is not a maybe — it is a KNOWN wrong
+    // marketplace, the same class of certainty as a wrong identity.
+    for (const s of ['Amazon US', 'amazon us', 'Amazon USA', 'Amazon.com', 'Amazon.co.uk',
+      'Amazon UK', 'Amazon.de', 'Amazon Global Store']) {
+      assert.strictEqual(isSoldByAmazon(s), false, `${s} is not the Canadian marketplace`);
+    }
+  });
+
+  test('the foreign-marketplace rule is revertable without a code change', () => {
+    // Same REVERT: convention the adapter uses for every lane that could need switching off fast.
+    const path = require.resolve('../src/utils/amazon-seller');
+    const before = process.env.AMAZON_ALLOW_FOREIGN_MARKETPLACE;
+    try {
+      process.env.AMAZON_ALLOW_FOREIGN_MARKETPLACE = '1';
+      delete require.cache[path];
+      assert.strictEqual(require('../src/utils/amazon-seller').isSoldByAmazon('Amazon US'), true);
+    } finally {
+      if (before === undefined) delete process.env.AMAZON_ALLOW_FOREIGN_MARKETPLACE;
+      else process.env.AMAZON_ALLOW_FOREIGN_MARKETPLACE = before;
+      delete require.cache[path];
     }
   });
 
