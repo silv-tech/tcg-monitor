@@ -77,6 +77,10 @@ const START_PAGE = Math.max(1, Number(process.env.PROBE_START_PAGE) || 1);
 // client-side and was blocked, so the parameter is KNOWN but its effect is not. Set
 // PROBE_PAGE_SIZE=96 to ask for it on a real navigation. Unset means ask for nothing.
 const PAGE_SIZE = Number(process.env.PROBE_PAGE_SIZE) || 0;
+// Probe 6: ask the search endpoint the page itself uses. PROBE_SEARCH_API=1 to enable.
+const SEARCH_API = process.env.PROBE_SEARCH_API === '1';
+// How many rows to ask for on the SECOND call, only if the first one is allowed through.
+const SEARCH_ROWS = Math.max(1, Number(process.env.PROBE_SEARCH_ROWS) || 200);
 const SPACING_MS = Math.max(30000, Number(process.env.PROBE_SPACING_MS) || 60000);
 const BODY_LOG_CHARS = 24000;
 const CHUNK = 3000;
@@ -127,6 +131,70 @@ function ensureWritableHome() {
 
 // Probe 3 answered where the products live, and src/adapters/pokemoncenter-nextdata.js now
 // carries that path as the one parsed copy, so the __NEXT_DATA__ SKU hunt has been removed.
+
+/**
+ * Ask the Bloomreach search endpoint the page itself calls.
+ *
+ * WHY THIS IS WORTH ASKING AGAIN. Probe 4 saw
+ *
+ *   GET /tpci-ecommweb-api/search?...&fl=availability_status,...&rows=95&start=0
+ *
+ * return 403, with DataDome serving a captcha that named it as the referer. That looked like a
+ * closed door. But it happened DURING the in-app page-size transition, after the click had
+ * already provoked DataDome -- and in the very same session three sibling endpoints answered
+ * normally: review/get-product-scores (200), cart/data (200), profile/data (200). So the API
+ * family is not blocked; one request in a poisoned state was.
+ *
+ * If it answers from a cleanly rendered page, this changes everything about cadence. `rows` is
+ * the page size and `start` the offset -- rows=95 is exactly what ?ps=96 produced -- so the whole
+ * catalogue could come back in one or two calls instead of a page load per 96 products, and the
+ * spacing problem stops being the binding constraint.
+ *
+ * Deliberately conservative: it is called from a page that rendered through a plain navigation
+ * with no clicking, it is a same-origin fetch so the browser sends the session's own cookies and
+ * headers, and the wider `rows` call is only attempted if the first is allowed through. Nothing
+ * is retried -- a 403 is an answer, and hammering it is how the exit gets scored.
+ */
+async function probeSearchApi(page, slug) {
+  const FL = ['availability_status', 'best_seller', 'brand', 'currency', 'description',
+    'display_price', 'display_sale_price', 'launch_date', 'pid', 'PRF', 'price_range', 'price',
+    'primary_image', 'primary_image_full_size', 'promotions', 'reporting_crumb',
+    'reporting_product_name', 'sale_price_range', 'sale_price', 'thumb_image', 'title', 'url'].join(',');
+
+  const build = (rows, start) => {
+    const p = new URLSearchParams({
+      _br_uid_2: '', fl: FL, q: slug, ref_url: '', rows: String(rows),
+      search_type: 'category', sort: '', start: String(start),
+      url: `https://www.pokemoncenter.com/en-ca/category/${slug}`, view_id: 'pokemon-ca',
+    });
+    return `/tpci-ecommweb-api/search?${p.toString()}`;
+  };
+
+  // Same-origin fetch from inside the rendered page: the session's cookies and headers go with it.
+  const ask = (url) => page.evaluate(async (u) => {
+    try {
+      const res = await fetch(u, { credentials: 'include', headers: { accept: 'application/json' } });
+      const body = await res.text();
+      return { status: res.status, type: res.headers.get('content-type') || '', bytes: body.length, body };
+    } catch (e) { return { error: String(e && e.message) }; }
+  }, url).catch((e) => ({ error: e.message }));
+
+  const first = await ask(build(95, 0));
+  log('SEARCH_API', {
+    rows: 95, start: 0, status: first.status, bytes: first.bytes, type: first.type,
+    error: first.error, verdict: first.status === 200 ? 'ALLOWED' : 'blocked',
+  });
+  if (!first || first.status !== 200 || !first.body) return;
+
+  // Only now, and only once: does it hand over more than a page's worth in a single call?
+  logBody('search-95', first.body);
+  const wide = await ask(build(SEARCH_ROWS, 0));
+  log('SEARCH_API_WIDE', {
+    rows: SEARCH_ROWS, status: wide.status, bytes: wide.bytes, error: wide.error,
+    verdict: wide.status === 200 ? `rows=${SEARCH_ROWS} ALLOWED` : 'blocked',
+  });
+  if (wide.status === 200 && wide.body) logBody('search-wide', wide.body);
+}
 
 /**
  * The grid as the document itself reports it, through the same parser the adapter uses.
@@ -273,6 +341,7 @@ async function probe() {
       // sweep covers the same catalogue in a third of the page loads, and page loads are the
       // only thing the rate limit actually counts.
       const summary = await summarizeJson(page);
+      if (SEARCH_API && pageNo === START_PAGE) await probeSearchApi(page, SLUG);
       log('PAGESIZE_CHECK', {
         requested: PAGE_SIZE || 'default', landed: page.url(),
         jsonProducts: summary ? summary.total : null, tiles: tiles.length,
