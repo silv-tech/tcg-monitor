@@ -31,13 +31,11 @@ function hasGameScope(lowerText) {
   return GAME_NAMES.some(g => lowerText.includes(g)) || SET_NAMES.some(k => lowerText.includes(k));
 }
 
-// If more than this share of the stored catalogue looks out of scope, the scope test is the
-// thing that is wrong. Amazon's real run removed 159 of 371 (43%); Walmart's first run has
-// 190 of 360 (53%), which is genuine — a filter applied for the first time to a catalogue
-// that never had one. So this guards against a total regression, not a large cleanup: it
-// aborts only when nearly everything fails, or when too little would be left standing.
-const PURGE_MAX_SHARE = 0.9;
-const PURGE_MIN_KEPT = 25;
+// NOTE: the purge safety rails that used to be declared here (PURGE_MAX_SHARE / PURGE_MIN_KEPT)
+// were never referenced. `_purgeOutOfScopeState` is inherited from base.js, which applies its own
+// identical defaults (`maxShare = 0.9, minKept = 25`, base.js:406) and is never passed overrides
+// from here — so the constants documented a guard they did not configure. Removed rather than
+// wired up: base.js is shared by every retailer and its defaults are already the intended values.
 
 function decodeEntities(str) {
   return str
@@ -145,7 +143,14 @@ const OFFERS_LANE_ENABLED = process.env.AMAZON_OFFERS_LANE !== '0';
 // after that stopped being true, and nobody re-read the code.
 const OFFERS_INTERVAL_MS = Number(process.env.AMAZON_OFFERS_INTERVAL_MS) || 60000;
 const OFFERS_STALE_MS = Number(process.env.AMAZON_OFFERS_STALE_MS) || 10 * 60 * 1000; // sweep-missed
-const OFFERS_DAILY_CAP = Number(process.env.AMAZON_OFFERS_DAILY_CAP) || 4000; // ScraperAPI credits/day
+// Counted in CALLS, not credits — the same convention as the burst cap below ("All caps count
+// CALLS; real credits = calls × 5"). It was labelled "credits/day", and `_offersToday += 1` per
+// call made that off by the measured 5 credits/call (scraper-api.js: `const cost = 5`, which the
+// dashboard billed at ~337k against a local count of ~53k). So 4000 here is 20,000 credits/day,
+// not 4,000. The cap is INERT at the shipped cadence — OFFERS_INTERVAL_MS of 60s allows at most
+// 1,440 calls/day, well under it — so this is a relabel, not a behaviour change. It matters the
+// moment anyone tightens that interval expecting 4000 to be the ceiling it claims to be.
+const OFFERS_DAILY_CAP = Number(process.env.AMAZON_OFFERS_DAILY_CAP) || 4000; // paid offers CALLS/day
 
 // PRIORITY offers lane — a dedicated, round-robin offers check over the hand-picked priorityAsins
 // (the 10 OOS 30th Celebration items), separate from the stalest-first general lane above. These
@@ -257,7 +262,9 @@ class AmazonAdapter extends BaseAdapter {
                                      // at 0 and starving late ASINs (that is why a tracked ASIN's
                                      // restock — B0H78BB9TY — was never AOD-checked and missed)
     this._lastFetchThrottled = false;
-    this._searchWindow = [];         // rolling free-search success
+    // (the rolling `_searchWindow` success buffer was removed — see the note on reportFreshness
+    // in _runDiscovery: its only reader, _searchSuccessRate, had no callers, so it was written
+    // every poll and never read, and base.js reportFreshness already carries the same signal.)
     this._searchSkip = 0;
     this._queryCursor = 0;
     this._newestCursor = 0;   // independent walk for the newest-first probe
@@ -1078,7 +1085,6 @@ class AmazonAdapter extends BaseAdapter {
       if (!(asin in products)) products[asin] = cached;
     }
 
-    this._recordSearchResult(hits, batch.length);
     this.reportFreshness(hits, batch.length);
 
     // Every query in this batch failed — Amazon is refusing us. Climb the quiet ladder so the
@@ -1310,7 +1316,8 @@ class AmazonAdapter extends BaseAdapter {
     if (data.inStock) this._lastInStockAt.set(target, now);
 
     logger.info(`Amazon: offers-lane — ${target} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`
-      + ` (${this._offersToday}/${OFFERS_DAILY_CAP} credits today, oldest ${Math.round((now - oldest) / 60000)}min)`);
+      + ` (${this._offersToday}/${OFFERS_DAILY_CAP} calls today = ${this._offersToday * 5} credits,`
+      + ` oldest ${Math.round((now - oldest) / 60000)}min)`);
   }
 
   /**
@@ -1872,17 +1879,6 @@ class AmazonAdapter extends BaseAdapter {
     return product;
   }
 
-  _recordSearchResult(hits, total) {
-    if (!total) return;
-    this._searchWindow.push(hits / total);
-    if (this._searchWindow.length > 10) this._searchWindow.shift();
-  }
-
-  _searchSuccessRate() {
-    if (this._searchWindow.length < 3) return null;
-    return this._searchWindow.reduce((a, b) => a + b, 0) / this._searchWindow.length;
-  }
-
   /**
    * Monitor: check known ASINs via the AOD offer endpoint (FREE).
    * Returns cached data for ASINs where the fetch fails (prevents false OOS).
@@ -2175,13 +2171,6 @@ class AmazonAdapter extends BaseAdapter {
       // confirmation advancing on real evidence — freezing it for that ASIN — which is exactly
       // the sticky-flag class removed in 333fbb8. Every builder that observes stock must clear it.
       _stockUnobserved: undefined,
-      // Price is CONDITIONAL, exactly like `_pricePinned` directly above — and for the same reason.
-      // `_offersToData` returns `inStock: price != null`, so `data.price === null` means there was
-      // no buy box and NO price was parsed at all; `price: data.price || cached.price` is then a
-      // pure replay out of the catalogue. Clearing the flag unconditionally there declared a replay
-      // to be an observation, which let a steep drop confirm off one real read — the same
-      // self-confirmation this flag was added to prevent, at ~18s instead of 6s.
-      _priceUnobserved: data.price ? undefined : true,
       shipsToHome: true,
       // Every other adapter stamps this (bestbuy, ebgames, costco, walmart); Amazon — the one
       // with the client's hand-given list — did not. Without it a restock detected FIRST by the
@@ -2198,6 +2187,18 @@ class AmazonAdapter extends BaseAdapter {
       // tracked instead of being dropped, and the dedup window would shrink 600s -> 45s on exactly
       // the rows most likely to flap.
       _watchlist: this.watchlist.has(String(asin)),
+      // Price is CONDITIONAL, exactly like `price` and `_pricePinned` above — and on the SAME
+      // test, `!= null`, because it is answering a question about the same value: the row replays
+      // `cached.price` precisely when `data.price == null`, and a replay is not an observation.
+      // Clearing it unconditionally would declare a replay to be a real read, which is what let a
+      // steep drop confirm off one observation — the self-confirmation this flag exists to stop.
+      //
+      // This key appeared TWICE in this literal. The dead first copy tested `data.price ?` rather
+      // than `!= null`, so the two disagreed on a $0.00 read — the truthiness form called an
+      // observed zero "unobserved". The later key won, so removing the first changes no behaviour
+      // today; it is removed because the next reader deleting the "duplicate" could just as easily
+      // have kept the wrong one. Its comment block was also copied from `_applyOffersData` and
+      // described `_offersToData`, which this function never calls.
       _priceUnobserved: data.price != null ? undefined : true,
     });
     // Reconcile _knownProducts with what the fast loop just read. The sweep SKIPS hot ASINs, so
@@ -2206,70 +2207,6 @@ class AmazonAdapter extends BaseAdapter {
     // that then arms a false RESTOCK. Keeping both writers on the same value makes them agree.
     this._knownProducts.set(asin, product);
     return product;
-  }
-
-  /**
-   * Process search result items into classified products.
-   * Used by discovery (ScraperAPI JSON results).
-   * Applies all 5 filter layers: game name, TCG product, accessory, seller, price.
-   */
-  _processSearchItems(items, products) {
-    for (const item of items) {
-      try {
-        const asin = item.asin || item.ASIN;
-        if (!asin) continue;
-
-        const name = item.name || item.title;
-        if (!name) continue;
-
-        const lowerName = name.toLowerCase();
-
-        // Layer 1: Must mention a game we actually track
-        const hasGameName = hasGameScope(lowerName);
-        if (!hasGameName) continue;
-
-        // Layer 2: Must pass shared TCG product filter (sealed products, not figures/toys)
-        if (!isTCGProduct(name)) continue;
-
-        // Layer 3: Exclude accessories (deck boxes, binders, sleeves, etc.)
-        const isAccessory = ACCESSORY_KEYWORDS.some(kw => lowerName.includes(kw));
-        if (isAccessory) continue;
-
-        // Layer 4: emi= URL filter restricts to "sold by Amazon.ca" at search level.
-        // Double-check if seller data is present.
-        const seller = (item.sold_by || item.seller || '').toLowerCase();
-        if (seller && !seller.includes('amazon')) continue;
-
-        const price = typeof item.price === 'number' ? item.price :
-          normalizePrice(item.price_string || item.price || item.current_price);
-
-        // Layer 5: Must have a real price
-        if (price == null || price <= 0) continue;
-
-        const url = item.url || item.product_url || item.link ||
-          `https://www.amazon.ca/dp/${asin}`;
-        const fullUrl = url.startsWith('http') ? url : `https://www.amazon.ca${url}`;
-
-        const image = item.image || item.thumbnail || '';
-        const inStock = true;
-
-        const product = this.classify({
-          sku: asin,
-          name,
-          price,
-          currency: 'CAD',
-          url: fullUrl,
-          image,
-          inStock,
-          canAddToCart: inStock,
-          shipsToHome: true,
-        });
-
-        products[product.sku] = product;
-      } catch (err) {
-        logger.debug(`Amazon: failed to parse item: ${err.message}`);
-      }
-    }
   }
 }
 

@@ -39,7 +39,7 @@ describe('every poll probes newest-first as well as relevance', () => {
   function adapter() {
     const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
     a.searchQueries = ['pokemon tcg', 'pokemon tin', 'one piece booster box'];
-    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._logSearchRate = () => {}; a.reportFreshness = () => {};
     a._monitorKnownAsins = async () => {};
     a._purgeOutOfScopeState = async () => {};
     a._guessScanDone = true;

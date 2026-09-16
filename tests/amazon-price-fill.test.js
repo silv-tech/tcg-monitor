@@ -36,7 +36,6 @@ function adapter() {
   const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon Canada', url: 'https://www.amazon.ca', intervalMs: 6000, proxyTier: 'none' });
   a.searchQueries = ['pokemon'];
   a._logSearchRate = () => {};
-  a._recordSearchResult = () => {};
   a.reportFreshness = () => {};
   return a;
 }
@@ -251,7 +250,7 @@ describe('amazon: an unresolved item is withheld, not guessed as out of stock', 
   function adapter() {
     const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
     a.searchQueries = ['pokemon'];
-    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._logSearchRate = () => {}; a.reportFreshness = () => {};
     a._monitorKnownAsins = async () => {};
     a._purgeOutOfScopeState = async () => {};
     a._lastAodSweepAt = Date.now();
@@ -310,7 +309,7 @@ describe('amazon: an unresolved item is withheld, not guessed as out of stock', 
 describe('amazon: no return path can publish an unresolved guess', () => {
   function adapter() {
     const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
-    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._logSearchRate = () => {}; a.reportFreshness = () => {};
     a._monitorKnownAsins = async () => {};
     a._purgeOutOfScopeState = async () => {};
     a._lastAodSweepAt = Date.now();
@@ -364,7 +363,7 @@ describe('amazon: a guessed row is re-baselined silently, not alerted', () => {
 
   function adapter(stored) {
     const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
-    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._logSearchRate = () => {}; a.reportFreshness = () => {};
     a._monitorKnownAsins = async () => {};
     a._purgeOutOfScopeState = async () => {};
     a._lastAodSweepAt = Date.now();
@@ -431,7 +430,7 @@ describe('amazon: a withheld item that resolves is seeded, not announced', () =>
 
   function adapter() {
     const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon', url: 'https://www.amazon.ca', intervalMs: 6000 });
-    a._logSearchRate = () => {}; a._recordSearchResult = () => {}; a.reportFreshness = () => {};
+    a._logSearchRate = () => {}; a.reportFreshness = () => {};
     a._monitorKnownAsins = async () => {};
     a._purgeOutOfScopeState = async () => {};
     a._guessScanDone = true;

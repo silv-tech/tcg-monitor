@@ -35,9 +35,7 @@ function adapter() {
   const a = new AmazonAdapter({ id: 'amazon', name: 'Amazon Canada', url: 'https://www.amazon.ca', intervalMs: 6000, proxyTier: 'none' });
   a.searchQueries = ['q0', 'q1', 'q2']; // small list so page cycling is easy to reason about
   a._logSearchRate = () => {};
-  a._recordSearchResult = () => {};
   a.reportFreshness = () => {};
-  a._searchSuccessRate = () => 1;
   return a;
 }
 
