@@ -1,27 +1,55 @@
 /**
  * Pokemon Center grid probe. OBSERVE-ONLY, runs as its own Railway service, never src/index.js.
  *
- * Question it answers: when the category grid renders, what JSON call fills it, and does that
- * call carry stock? If it does, one API request can replace a page of DOM tiles, which is the
- * difference between a sweep the site rate-limits and one it tolerates.
+ * WHAT THE FIRST THREE RUNS SETTLED (all on the live store, 2026-09-15, residential exit):
  *
- * It loads PROBE_PAGES category pages (default 1) with PROBE_SPACING_MS between them, using the
- * exact launch shape that rendered on 2026-09-13 (headed Chromium, Xvfb, residential exit), logs
- * every XHR/fetch the page makes plus the DOM tile verdicts for comparison, then IDLES FOREVER.
- * Idling is deliberate: exiting would let Railway restart the service and re-hit the site in a
- * loop, which is exactly how an exit gets flagged. Nothing is written to Redis or Discord.
+ *   Probe 1  NO XHR fills the grid. The only calls are Imperva and DataDome sensors, review
+ *            scores, cart and profile. The products arrive in the document. So there is no API
+ *            to call instead of a page load, and the rate limit cannot be fixed that way.
+ *   Probe 2  __NEXT_DATA__ is 566KB, pageProps empty, appProps.pageSize 32, and its array walk
+ *            found no product list. window.next.router is not exposed.
+ *   Probe 3  The products were there all along, at
+ *            $.props.initialState.search.results.products -- 31 entries against 33 DOM anchors,
+ *            each with a boolean `outOfStock`, purchasePrice/listPrice, images and releaseDate.
+ *            The two extra anchors are the mega-menu's own product links, which is also why two
+ *            tiles read as unreadable. Its "Items per page" attempt returned nothing, because it
+ *            queried the whole page and matched the mega-menu's nav list.
+ *
+ * WHAT PROBE 4 IS FOR, on one more single visit:
+ *
+ *   1. `outOfStock: true` has still NEVER been observed -- page 1 is 31 of 31 in stock. Set
+ *      PROBE_START_PAGE=8 (measured 32 of 34 sold out on 2026-09-13) and dump one raw sold-out
+ *      object. Until that exists, the JSON path cannot be trusted in the sold-out direction, and
+ *      src/adapters/pokemoncenter-nextdata.js stays a cross-check rather than the source.
+ *   2. Whether "Items per page" offers more than 32. At 32 the rate limit is the binding
+ *      constraint; 96 is a third of the page loads for the same coverage.
+ *
+ * It loads PROBE_PAGES category pages (default 1) starting at PROBE_START_PAGE with
+ * PROBE_SPACING_MS between them, using the exact launch shape that rendered on 2026-09-13
+ * (headed Chromium, Xvfb, residential exit), logs every XHR/fetch the page makes plus the DOM
+ * tile verdicts and the JSON products for comparison, then IDLES FOREVER. Idling is deliberate:
+ * exiting would let Railway restart the service and re-hit the site in a loop, which is exactly
+ * how an exit gets flagged. Nothing is written to Redis or Discord.
  *
  * Start command:  node scripts/pc-grid-probe.js
- * Env:            PROXY_RESIDENTIAL_URL (required), PROBE_SLUG, PROBE_PAGES, PROBE_SPACING_MS
+ * Env:            PROXY_RESIDENTIAL_URL (required), PROBE_SLUG, PROBE_PAGES, PROBE_START_PAGE,
+ *                 PROBE_SPACING_MS
  */
 const { spawn } = require('child_process');
 const { chromium } = require('patchright');
 // The verdict module, NOT the adapter: the adapter loads src/config, which exits in production
 // without admin auth, and an exiting probe gets restarted into a loop against the site.
 const { pcVerdict } = require('../src/adapters/pokemoncenter-verdict');
+// Also dependency-free, and for the same reason. Probe 3 found the grid's products in the
+// document at $.props.initialState.search.results.products; this is the one parsed copy of that.
+const { pcProductsFromNextData } = require('../src/adapters/pokemoncenter-nextdata');
 
 const SLUG = process.env.PROBE_SLUG || 'trading-card-game';
 const PAGES = Math.max(1, Number(process.env.PROBE_PAGES) || 1);
+// Probe 4: the page to land on. Page 1 of trading-card-game is 31 of 31 IN STOCK, which is why
+// `outOfStock: true` has still never been observed. Page 8 measured 32 of 34 sold out on
+// 2026-09-13, so PROBE_START_PAGE=8 is what turns the last assumption into a measurement.
+const START_PAGE = Math.max(1, Number(process.env.PROBE_START_PAGE) || 1);
 const SPACING_MS = Math.max(30000, Number(process.env.PROBE_SPACING_MS) || 60000);
 const BODY_LOG_CHARS = 24000;
 const CHUNK = 3000;
@@ -70,51 +98,35 @@ function ensureWritableHome() {
   log('HOME', { original: home || null, writable: ok, using: process.env.HOME });
 }
 
-// Xvfb's own errors used to go to stdio:'ignore', so a display that never came up looked like a
-// Chrome crash. Now its stderr is logged and launch waits for the X socket to exist.
-// Find a known SKU anywhere in __NEXT_DATA__ (as a value OR a key) and log the path plus the
-// objects around it. Probe 2's walk only looked for arrays with sku-named keys and saw nothing,
-// which does not rule out products keyed by id or stored as an embedded JSON string.
-function locateSku(text, sku) {
-  if (!text || !sku) { log('SKU_IN_NEXT_DATA', { sku: sku || null, present: false, reason: text ? 'no in-stock sku' : 'no __NEXT_DATA__' }); return; }
-  const rawHits = text.split(sku).length - 1;
-  let json;
-  try { json = JSON.parse(text); } catch (e) { log('SKU_IN_NEXT_DATA', { sku, rawHits, parse: e.message }); return; }
-  const hits = [];
-  const walk = (node, path, parents) => {
-    if (hits.length >= 5) return;
-    if (typeof node === 'string') { if (node.includes(sku)) hits.push({ path, parents, embedded: node.length > 200 }); return; }
-    if (!node || typeof node !== 'object') return;
-    for (const [k, v] of Object.entries(node)) {
-      if (k.includes(sku)) hits.push({ path: `${path}.${k}`, parents: [v, node], keyed: true });
-      walk(v, `${path}.${k}`, [node, ...parents].slice(0, 3));
-    }
-  };
-  walk(json, '$', []);
-  log('SKU_IN_NEXT_DATA', { sku, rawHits, paths: hits.map((h) => ({ path: h.path, keyed: !!h.keyed, embedded: !!h.embedded })) });
-  if (hits[0]) {
-    const [near, outer] = hits[0].parents;
-    logBody('sku-near', JSON.stringify(near));
-    if (outer && typeof outer === 'object') log('SKU_OUTER_KEYS', Object.keys(outer).slice(0, 60));
-  }
-}
+// Probe 3 answered where the products live, and src/adapters/pokemoncenter-nextdata.js now
+// carries that path as the one parsed copy, so the __NEXT_DATA__ SKU hunt has been removed.
 
-// Find the "Items per page" control, log what it offers, choose the largest option the way a
-// shopper would (no hand-built URL), and count the tiles that result.
+/**
+ * Choose the largest "Items per page" the way a shopper would, and count what comes back.
+ *
+ * WHY PROBE 3 GOT NOTHING HERE. It searched the whole page for `[role="option"], [role="listbox"]
+ * li, ul li`, and the first thing that matches on this site is the mega-menu's navigation list —
+ * so it collected "Plush", "Figures", "Pins", found no numbers, and silently gave up
+ * (PAGESIZE_OPTIONS numeric: []). The real control, from Probe 3's own PAGESIZE_CONTROL dump, is
+ *
+ *   <button id="per-page" data-toggle="select" aria-haspopup="true" aria-expanded="false">
+ *   <div class="select-menu--..." role="menu" aria-labelledby="per-page">
+ *
+ * a role="menu", not a listbox, and EMPTY until the button is clicked. So: scope every query to
+ * that one container, and dump its markup once it is open rather than guessing the item role.
+ *
+ * Why it is worth another visit at all: appProps.pageSize is 32, and the rate limit — not the
+ * parsing — is what stops this store being swept. A 96-item page is a third of the page loads
+ * for the same coverage.
+ */
 async function probePageSize(page) {
   const control = await page.evaluate(() => {
-    const label = [...document.querySelectorAll('body *')]
-      .find((el) => el.children.length === 0 && /items per page/i.test(el.textContent || ''));
-    if (!label) return null;
-    let box = label;
-    for (let i = 0; i < 4 && box.parentElement; i += 1) {
-      box = box.parentElement;
-      if (box.querySelector('select, button, [role="listbox"], [role="combobox"]')) break;
-    }
-    const sel = box.querySelector('select');
+    const btn = document.getElementById('per-page');
+    if (!btn) return null;
+    const menu = document.querySelector('[role="menu"][aria-labelledby="per-page"]');
     return {
-      html: box.outerHTML.slice(0, 3000),
-      select: sel ? { options: [...sel.options].map((o) => ({ value: o.value, text: (o.textContent || '').trim() })) } : null,
+      button: btn.outerHTML.slice(0, 600),
+      menuBefore: menu ? menu.outerHTML.slice(0, 1500) : null,
     };
   }).catch((e) => ({ error: e.message }));
   log('PAGESIZE_CONTROL', control || 'not found');
@@ -122,23 +134,27 @@ async function probePageSize(page) {
 
   let chosen = null;
   try {
-    const box = page.locator('xpath=//*[contains(translate(normalize-space(text()),"ITEMSPERPAGE","itemsperpage"),"items per page")]/ancestor::*[.//select or .//button or .//*[@role="combobox"]][1]');
-    if (control.select && control.select.options.length) {
-      const best = control.select.options.filter((o) => /^\d+$/.test(o.text))
-        .sort((a, b) => Number(b.text) - Number(a.text))[0];
-      if (best) { await box.locator('select').first().selectOption(best.value); chosen = `select ${best.text}`; }
-    } else {
-      await box.locator('button, [role="combobox"]').first().click({ timeout: 10000 });
-      await page.waitForTimeout(1500);
-      const opts = await page.locator('[role="option"], [role="listbox"] li, ul li').allInnerTexts();
-      const nums = opts.map((t) => t.trim()).filter((t) => /^\d+$/.test(t)).map(Number);
-      log('PAGESIZE_OPTIONS', { raw: opts.slice(0, 20), numeric: nums });
-      const max = nums.length ? Math.max(...nums) : null;
-      if (max) {
-        await page.locator('[role="option"], [role="listbox"] li, ul li')
-          .filter({ hasText: new RegExp(`^\\s*${max}\\s*$`) }).first().click({ timeout: 10000 });
-        chosen = `option ${max}`;
-      }
+    await page.locator('#per-page').click({ timeout: 10000 });
+    await page.waitForTimeout(1500);
+
+    // Whatever the items turn out to be, they are inside THIS container and nowhere else.
+    const opened = await page.evaluate(() => {
+      const menu = document.querySelector('[role="menu"][aria-labelledby="per-page"]');
+      if (!menu) return null;
+      const items = [...menu.querySelectorAll('*')]
+        .filter((el) => el.children.length === 0 && (el.textContent || '').trim())
+        .map((el) => ({ tag: el.tagName, role: el.getAttribute('role') || '', text: (el.textContent || '').trim() }));
+      return { html: menu.outerHTML.slice(0, 3000), items };
+    }).catch(() => null);
+    log('PAGESIZE_MENU_OPEN', opened || 'menu not found after click');
+
+    const nums = (opened ? opened.items : []).map((i) => i.text).filter((t) => /^\d+$/.test(t)).map(Number);
+    log('PAGESIZE_OPTIONS', { numeric: nums, items: (opened ? opened.items : []).slice(0, 20) });
+    const max = nums.length ? Math.max(...nums) : null;
+    if (max) {
+      await page.locator('[role="menu"][aria-labelledby="per-page"]')
+        .getByText(new RegExp(`^\\s*${max}\\s*$`)).first().click({ timeout: 10000 });
+      chosen = `option ${max}`;
     }
   } catch (e) {
     log('PAGESIZE_ACTION_FAILED', e.message.slice(0, 500));
@@ -150,14 +166,69 @@ async function probePageSize(page) {
   await page.waitForTimeout(3000);
   const tiles = await page.evaluate(extractTiles).catch(() => []);
   const v = tiles.map((t) => ({ sku: t.sku, ...pcVerdict(t.text) }));
+  // Report the JSON count alongside the tile count: the JSON is the grid, the tiles include the
+  // mega-menu's own product links (33 anchors for 31 products on 2026-09-15).
+  const json = await summarizeJson(page);
   log('PAGESIZE_RESULT', {
-    chosen, landed: page.url(), tiles: tiles.length,
+    chosen, landed: page.url(), tiles: tiles.length, jsonProducts: json ? json.total : null,
     inStock: v.filter((x) => x.inStock === true).length,
     soldOut: v.filter((x) => x.inStock === false).length,
     unknown: v.filter((x) => x.inStock == null).length,
   });
 }
 
+/**
+ * The grid as the document itself reports it, through the same parser the adapter uses.
+ *
+ * The one question left after Probe 3: `outOfStock: true` has never been observed, because the
+ * page it loaded was 31 of 31 in stock. If a sold-out product renders with that field set, the
+ * JSON path can replace tile-text parsing outright. If it renders some other way, this is where
+ * that shows up — so one sold-out product object is dumped verbatim, not just counted.
+ */
+async function summarizeJson(page) {
+  const text = await page.evaluate(() => {
+    const el = document.getElementById('__NEXT_DATA__');
+    return el ? el.textContent : null;
+  }).catch(() => null);
+
+  const parsed = pcProductsFromNextData(text);
+  if (!parsed) {
+    log('JSON_PRODUCTS', { present: false, nextDataBytes: text ? text.length : 0 });
+    return null;
+  }
+  const inStock = parsed.products.filter((p) => p.inStock === true);
+  const soldOut = parsed.products.filter((p) => p.inStock === false);
+  const unknown = parsed.products.filter((p) => p.inStock == null);
+  log('JSON_PRODUCTS', {
+    present: true, total: parsed.products.length,
+    inStock: inStock.length, soldOut: soldOut.length, unknown: unknown.length,
+    sample: parsed.products.slice(0, 3),
+  });
+
+  // The whole reason for this run. Dump the raw object so the field shape is on the record.
+  if (soldOut.length) {
+    log('JSON_SOLDOUT_CONFIRMED', { count: soldOut.length, skus: soldOut.slice(0, 10).map((p) => p.sku) });
+    const raw = await page.evaluate((sku) => {
+      const el = document.getElementById('__NEXT_DATA__');
+      if (!el) return null;
+      try {
+        const d = JSON.parse(el.textContent);
+        const list = d.props.initialState.search.results.products;
+        return JSON.stringify(list.find((p) => p && p.code === sku) || null);
+      } catch { return null; }
+    }, soldOut[0].sku).catch(() => null);
+    if (raw) logBody('soldout-raw', raw);
+  } else {
+    log('JSON_SOLDOUT_CONFIRMED', { count: 0, note: 'no sold-out product on this page — outOfStock:true still unobserved' });
+  }
+  if (unknown.length) {
+    log('JSON_UNREADABLE', { skus: unknown.slice(0, 10).map((p) => p.sku) });
+  }
+  return { total: parsed.products.length, soldOut: soldOut.length };
+}
+
+// Xvfb's own errors used to go to stdio:'ignore', so a display that never came up looked like a
+// Chrome crash. Now its stderr is logged and launch waits for the X socket to exist.
 async function startDisplay() {
   if (process.env.DISPLAY) return null;
   const fs = require('fs');
@@ -216,7 +287,7 @@ async function probe() {
   });
 
   try {
-    for (pageNo = 1; pageNo <= PAGES; pageNo += 1) {
+    for (pageNo = START_PAGE; pageNo < START_PAGE + PAGES; pageNo += 1) {
       const url = `https://www.pokemoncenter.com/en-ca/category/${SLUG}${pageNo > 1 ? `?page=${pageNo}` : ''}`;
       const t0 = Date.now();
       const nav = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -239,29 +310,33 @@ async function probe() {
       });
       log('TILES', verdicts.slice(0, 40));
 
-      // Probe 2 (2026-09-15): __NEXT_DATA__ is 566KB, pageProps empty, no product array the walk
-      // could see, appProps.pageSize 32; window.next.router is not exposed, so client-side paging
-      // could not be tried. The page carries an "Items per page" control. Probe 3, same one visit:
-      //   - where does a known SKU sit in the page's data, if anywhere?
-      //   - what does "Items per page" offer, and does choosing the largest show more tiles?
-      if (pageNo === 1) {
+      // PROBE 4, both questions on the same single visit.
+      //
+      // Probe 3 (2026-09-15) settled where the data lives: the grid's products are in the
+      // document at $.props.initialState.search.results.products, each with a boolean
+      // `outOfStock`, structured prices and a clean SKU — 31 entries against 33 DOM anchors,
+      // the two extras being the mega-menu's own product links. What it did NOT settle:
+      //
+      //   1. `outOfStock: true` has never been observed, because that page was 31 of 31 in
+      //      stock. Land on a page that has sold-out products (PROBE_START_PAGE=8) and dump one
+      //      raw object. Until then the JSON path cannot be trusted in the sold-out direction.
+      //   2. "Items per page" returned no options, because the query matched the mega-menu's
+      //      nav list instead of the role="menu" control. Fixed in probePageSize().
+      if (pageNo === START_PAGE) {
         const sku = (verdicts.find((v) => v.inStock === true) || {}).sku;
         const scripts = await page.evaluate((needle) => [...document.scripts]
           .map((s) => ({ id: s.id || '', type: s.type || '', src: (s.src || '').slice(0, 120),
             bytes: (s.textContent || '').length, hits: needle ? (s.textContent || '').split(needle).length - 1 : 0 }))
           .filter((s) => s.hits > 0), sku).catch((e) => [{ error: e.message }]);
         log('SKU_SCRIPTS', { sku, scripts });
-        const nd = await page.evaluate(() => {
-          const el = document.getElementById('__NEXT_DATA__');
-          return el ? el.textContent : null;
-        }).catch(() => null);
-        locateSku(nd, sku);
 
-        pageNo = 2;   // calls made by the page-size interaction are labelled p2
+        await summarizeJson(page);
+
+        pageNo = START_PAGE + 1;   // calls made by the page-size interaction get the next label
         await probePageSize(page);
         break;
       }
-      if (pageNo < PAGES) await new Promise((r) => setTimeout(r, SPACING_MS));
+      if (pageNo < START_PAGE + PAGES - 1) await new Promise((r) => setTimeout(r, SPACING_MS));
     }
   } finally {
     await ctx.close().catch(() => {});
