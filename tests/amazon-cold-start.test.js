@@ -112,7 +112,52 @@ describe('hydration can fail without taking the poll down', () => {
     const a = adapter();
     await a._hydrateFromRedis();
     assert.strictEqual(a._knownProducts.size, 0, 'degraded, not broken — the cursor rebuilds it');
-    assert.strictEqual(a._hydrated, true, 'and it must not retry forever on every poll');
+    assert.strictEqual(a._hydrated, false, 'a failed load is NOT a completed one');
+  });
+
+  /**
+   * This assertion used to read `_hydrated === true`, justified as "it must not retry forever on
+   * every poll". The concern was right and the mechanism was wrong: the flag was set BEFORE the
+   * try, so ONE transient failure disabled hydration for the life of the process — and a process
+   * that never re-reads Redis is exactly the cold start this whole file exists to prevent. The
+   * three tests below keep the original concern (bounded work) while fixing the hole.
+   */
+  test('a transient failure is retried — one bad poll must not strand the process', async () => {
+    let calls = 0;
+    state.getAllProducts = async () => {
+      if (++calls === 1) throw new Error('ECONNREFUSED');
+      return { B0A: stored({ sku: 'B0A' }), B0B: stored({ sku: 'B0B' }) };
+    };
+    const a = adapter();
+    await a._hydrateFromRedis();
+    assert.strictEqual(a._knownProducts.size, 0, 'poll 1: Redis was down');
+    await a._hydrateFromRedis();
+    assert.strictEqual(a._knownProducts.size, 2, 'poll 2: Redis recovered, so the catalogue loads');
+    assert.strictEqual(a._hydrated, true);
+  });
+
+  test('retries are bounded — a dead Redis is not re-read on every poll forever', async () => {
+    let calls = 0;
+    state.getAllProducts = async () => { calls++; throw new Error('ECONNREFUSED'); };
+    const a = adapter();
+    for (let i = 0; i < 20; i++) await a._hydrateFromRedis();
+    assert.ok(calls <= 5, `at most 5 attempts, got ${calls}`);
+    assert.strictEqual(a._hydrated, false, 'and it stays cold rather than pretending it loaded');
+  });
+
+  test('overlapping polls share ONE hydration rather than racing the map', async () => {
+    let calls = 0;
+    state.getAllProducts = async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 20));
+      return { B0A: stored({ sku: 'B0A' }), B0B: stored({ sku: 'B0B' }) };
+    };
+    const a = adapter();
+    // Setting the flag before the await used to provide single-flight for free; now that it is
+    // only set on success, the in-flight promise is what stops two polls hydrating concurrently.
+    await Promise.all([a._hydrateFromRedis(), a._hydrateFromRedis(), a._hydrateFromRedis()]);
+    assert.strictEqual(calls, 1, 'one Redis read, not three');
+    assert.strictEqual(a._knownProducts.size, 2);
   });
 
   test('a hanging Redis does not hang the poll', async () => {

@@ -213,12 +213,21 @@ const AOD_ACQUIRE_WAIT_MS = 6000; // small, so a 120s-timeout-orphaned poll cann
 const HOT_WINDOW_MS = 48 * 60 * 60 * 1000;
 const HOT_MAX = 10;
 
+// How many times a cold start may re-try Redis before giving up for the life of the process.
+// Bounded on purpose: each attempt can cost the 5s Promise.race timeout inside a 6s poll, and a
+// poll body that outruns its interval is what caused the two total Amazon blackouts recorded on
+// _monitorKnownAsins. Five attempts covers a Redis restart or a failover without ever letting a
+// permanently-dead Redis stall every poll forever. See _hydrateFromRedis.
+const HYDRATE_MAX_ATTEMPTS = Number(process.env.AMAZON_HYDRATE_MAX_ATTEMPTS) || 5;
+
 class AmazonAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
     this.domain = 'www.amazon.ca';
     this._knownProducts = new Map(); // ASIN → classified product (persists between polls)
     this._hydrated = false;          // catalogue reloaded from Redis once per process
+    this._hydrateAttempts = 0;       // cold-start retries spent (bounded by HYDRATE_MAX_ATTEMPTS)
+    this._hydrating = null;          // in-flight hydration, so overlapping polls share one attempt
     this._denied = new Set();        // ASINs proven to serve a different product now
     this._lastDiscoveryAt = 0;       // timestamp of last ScraperAPI discovery
     this._monitorSuccessRate = 0;    // track product page stealth success %
@@ -507,55 +516,99 @@ class AmazonAdapter extends BaseAdapter {
       logger.warn(`Amazon: could not persist identity denial for ${sku}: ${err.message}`));
   }
 
+  /**
+   * Hydrate, and RETRY if Redis was not there the first time.
+   *
+   * `this._hydrated = true` used to be set BEFORE the try, so a single transient Redis failure —
+   * one 5s timeout on the very first poll — left that process permanently cold. Nothing ever
+   * re-read Redis: measured by stubbing a timeout on poll 1 and a healthy 300-row catalogue from
+   * poll 2 onward, `getAllProducts` was called exactly ONCE and `_knownProducts` stayed at 0 for
+   * the life of the process. The warning below even said "this cycle", which implied a retry that
+   * did not exist.
+   *
+   * That is the precise input that produces the restart flood this function exists to prevent.
+   * A cold catalogue reports ~40 products while Redis holds ~650; poll-adapter's stale cleanup is
+   * skipped only while `newCount < oldCount * 0.3` (poll-adapter.js:588), so as carry-forward warms
+   * the cache past that line the cleanup fires, writes inStock:false across the rows still missing,
+   * and the next poll rediscovers them as RESTOCK. poll-adapter.js:609 records the shape ("30+
+   * RESTOCKs in 20 minutes, the same SKUs recurring"); the 2026-09-09 occurrence is documented on
+   * _collectProducts above (322 rows out of stock, 37 events in seven seconds, retailer muted for
+   * the limiter's full ten minutes).
+   *
+   * BOUNDED, deliberately. Retrying forever would add a 5s stall to every 6s poll while Redis is
+   * down, and a poll body that outruns its interval is what produced the two total Amazon blackouts
+   * described on _monitorKnownAsins. After HYDRATE_MAX_ATTEMPTS we stop and stay cold — the same
+   * end state as before, reached only after Redis has genuinely failed five times rather than once.
+   *
+   * SINGLE-FLIGHT, because setting the flag before the await used to provide that for free. With
+   * the flag only set on success, two overlapping polls could otherwise both hydrate and race over
+   * `_knownProducts`, so callers share one in-flight promise instead.
+   */
   async _hydrateFromRedis() {
     if (this._hydrated) return;
-    this._hydrated = true;
-    try {
-      // Bounded: a slow Redis must delay the first poll, never hang it.
-      // The timer is cleared explicitly. An uncleared 5s timer is a live handle, and in a test
-      // runner a live handle keeps the whole process alive after the assertions pass.
-      let timer;
-      const cached = await Promise.race([
-        state.getAllProducts(this.id),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('redis timeout')), 5000); }),
-      ]).finally(() => clearTimeout(timer));
-
-      // Load the proven-wrong set FIRST, so a denied ASIN is never hydrated back in. Its stored
-      // name is the stale in-scope one, so isInScopeName below cannot recognise it.
+    if (this._hydrating) return this._hydrating;
+    if (this._hydrateAttempts >= HYDRATE_MAX_ATTEMPTS) return;
+    this._hydrateAttempts += 1;
+    this._hydrating = (async () => {
       try {
-        const denied = await state.getDeniedIdentities(this.id);
-        for (const sku of denied.keys()) this._denied.add(sku);
-        if (this._denied.size) logger.info(`${this.name}: ${this._denied.size} ASIN(s) on the identity denylist`);
+        await this._hydrateOnce();
+        this._hydrated = true;
       } catch (err) {
-        logger.warn(`${this.name}: could not load the identity denylist: ${err.message}`);
+        // Degraded, not broken: the catalogue rebuilds as the query cursor rotates. Say it loudly,
+        // because this is precisely the condition that produces the restart flood.
+        const left = HYDRATE_MAX_ATTEMPTS - this._hydrateAttempts;
+        logger.warn(`${this.name}: catalogue hydration failed (${err.message}) — cold start, `
+          + 'stale cleanup may fire spuriously'
+          + (left > 0
+            ? ` — retrying on the next poll (${left} attempt(s) left)`
+            : ` — GIVING UP after ${HYDRATE_MAX_ATTEMPTS} attempts; this process stays cold`));
+      } finally {
+        this._hydrating = null;
       }
+    })();
+    return this._hydrating;
+  }
 
-      let loaded = 0;
-      let outOfScope = 0;
-      let denied = 0;
-      for (const [asin, product] of Object.entries(cached || {})) {
-        if (!product || !product.name) continue;
-        // A watchlist ASIN is the user's explicit pick and must ALWAYS hydrate back — otherwise a
-        // priority item whose stored name reads as merch/accessory (or that a divergence once
-        // denylisted) would silently vanish on the next redeploy (37 deploys in 28h observed), and
-        // its restock would be missed. The identity denylist and scope filter apply to discovered
-        // products, never to hand-picked ones.
-        const isWatched = this.watchlist.has(asin);
-        if (!isWatched && this._denied.has(asin)) { denied++; continue; }
-        if (!isWatched && !isInScopeName(product.name)) { outOfScope++; continue; }
-        if (this._knownProducts.has(asin)) continue;
-        this._knownProducts.set(asin, product);
-        loaded++;
-      }
-      logger.info(`${this.name}: hydrated ${loaded} products from Redis`
-        + `${outOfScope ? ` (${outOfScope} out of scope, skipped)` : ''}`
-        + `${denied ? ` (${denied} on the identity denylist, skipped)` : ''}`);
+  async _hydrateOnce() {
+    // Bounded: a slow Redis must delay the first poll, never hang it.
+    // The timer is cleared explicitly. An uncleared 5s timer is a live handle, and in a test
+    // runner a live handle keeps the whole process alive after the assertions pass.
+    let timer;
+    const cached = await Promise.race([
+      state.getAllProducts(this.id),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('redis timeout')), 5000); }),
+    ]).finally(() => clearTimeout(timer));
+
+    // Load the proven-wrong set FIRST, so a denied ASIN is never hydrated back in. Its stored
+    // name is the stale in-scope one, so isInScopeName below cannot recognise it.
+    try {
+      const denied = await state.getDeniedIdentities(this.id);
+      for (const sku of denied.keys()) this._denied.add(sku);
+      if (this._denied.size) logger.info(`${this.name}: ${this._denied.size} ASIN(s) on the identity denylist`);
     } catch (err) {
-      // Degraded, not broken: the catalogue rebuilds as the query cursor rotates. Say it loudly,
-      // because this is precisely the condition that produces the restart flood.
-      logger.warn(`${this.name}: catalogue hydration failed (${err.message}) — cold start, `
-        + 'stale cleanup may fire spuriously this cycle');
+      logger.warn(`${this.name}: could not load the identity denylist: ${err.message}`);
     }
+
+    let loaded = 0;
+    let outOfScope = 0;
+    let denied = 0;
+    for (const [asin, product] of Object.entries(cached || {})) {
+      if (!product || !product.name) continue;
+      // A watchlist ASIN is the user's explicit pick and must ALWAYS hydrate back — otherwise a
+      // priority item whose stored name reads as merch/accessory (or that a divergence once
+      // denylisted) would silently vanish on the next redeploy (37 deploys in 28h observed), and
+      // its restock would be missed. The identity denylist and scope filter apply to discovered
+      // products, never to hand-picked ones.
+      const isWatched = this.watchlist.has(asin);
+      if (!isWatched && this._denied.has(asin)) { denied++; continue; }
+      if (!isWatched && !isInScopeName(product.name)) { outOfScope++; continue; }
+      if (this._knownProducts.has(asin)) continue;
+      this._knownProducts.set(asin, product);
+      loaded++;
+    }
+    logger.info(`${this.name}: hydrated ${loaded} products from Redis`
+      + `${outOfScope ? ` (${outOfScope} out of scope, skipped)` : ''}`
+      + `${denied ? ` (${denied} on the identity denylist, skipped)` : ''}`);
   }
 
   async _collectProducts() {
