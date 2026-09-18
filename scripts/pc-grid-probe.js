@@ -99,6 +99,12 @@ const PAGE_SIZE = Number(process.env.PROBE_PAGE_SIZE) || 0;
 const SEARCH_API = process.env.PROBE_SEARCH_API === '1';
 // Probe 7: load the SAME page this many times instead of walking forward. See the header.
 const REPEAT = Math.max(1, Math.floor(Number(process.env.PROBE_REPEAT)) || 1);
+// Probe 8: how long does the lockout last? A comma list of MINUTES to wait before each retry,
+// e.g. "20,40,60,90". Same page, same browser, same cookies throughout -- the point is to find
+// when the STORE lets this identity back in, not to become someone else. Stops at the first
+// load served after a refusal. Overrides PROBE_REPEAT and PROBE_SPACING_MS when set.
+const WAITS_MIN = String(process.env.PROBE_WAITS_MIN || '')
+  .split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
 // How many rows to ask for on the SECOND call, only if the first one is allowed through.
 const SEARCH_ROWS = Math.max(1, Number(process.env.PROBE_SEARCH_ROWS) || 200);
 const SPACING_MS = Math.max(30000, Number(process.env.PROBE_SPACING_MS) || 60000);
@@ -346,9 +352,14 @@ async function probe() {
 
   try {
     // Walk forward through PAGES pages, or -- in repeat mode -- load START_PAGE REPEAT times.
-    const plan = REPEAT > 1
-      ? Array.from({ length: REPEAT }, () => START_PAGE)
-      : Array.from({ length: PAGES }, (_, i) => START_PAGE + i);
+    // In lockout mode there is one more load than there are waits: load, wait, load, wait, ...
+    const plan = WAITS_MIN.length
+      ? Array.from({ length: WAITS_MIN.length + 1 }, () => START_PAGE)
+      : REPEAT > 1
+        ? Array.from({ length: REPEAT }, () => START_PAGE)
+        : Array.from({ length: PAGES }, (_, i) => START_PAGE + i);
+    const t0Run = Date.now();
+    let refusedOnce = false;
     const outcomes = [];
     for (attempt = 1; attempt <= plan.length; attempt += 1) {
       pageNo = plan[attempt - 1];
@@ -404,14 +415,43 @@ async function probe() {
       });
       log('ATTEMPT', outcomes[outcomes.length - 1]);
 
-      if (attempt < plan.length) await new Promise((r) => setTimeout(r, SPACING_MS));
+      if (WAITS_MIN.length) {
+        const last = outcomes[outcomes.length - 1];
+        if (!last.served) refusedOnce = true;
+        // The answer this mode exists for: served again, AFTER having been locked out, by the
+        // same browser with the same cookies. Stop immediately -- every further load is a
+        // request we do not need to make.
+        if (last.served && refusedOnce) {
+          log('LOCKOUT_LIFTED', {
+            afterMinutes: Math.round((Date.now() - t0Run) / 60000),
+            waitedBeforeThisLoadMin: WAITS_MIN[attempt - 2],
+            sequence: outcomes.map((o) => (o.served ? 'S' : 'R')).join(''),
+          });
+          break;
+        }
+        if (attempt < plan.length) {
+          const mins = WAITS_MIN[attempt - 1];
+          log('BACKING_OFF', { minutes: mins, nextAttempt: attempt + 1 });
+          await new Promise((r) => setTimeout(r, mins * 60000));
+        }
+      } else if (attempt < plan.length) {
+        await new Promise((r) => setTimeout(r, SPACING_MS));
+      }
     }
 
     // The one line this run is for. With the SAME page and long gaps, pacing is held constant, so
     // a steady fraction of refusals points at the challenge itself rather than at how fast we go.
     const served = outcomes.filter((o) => o.served).length;
+    const lifted = WAITS_MIN.length && refusedOnce && outcomes[outcomes.length - 1].served;
     log('REPEAT_SUMMARY', {
-      mode: REPEAT > 1 ? `same page x${REPEAT}` : `${PAGES} consecutive pages`,
+      mode: WAITS_MIN.length ? `lockout backoff, waits ${WAITS_MIN.join('/')} min`
+        : REPEAT > 1 ? `same page x${REPEAT}` : `${PAGES} consecutive pages`,
+      ...(WAITS_MIN.length ? {
+        lockoutLifted: !!lifted,
+        totalMinutes: Math.round((Date.now() - t0Run) / 60000),
+        note: lifted ? 'the store let the SAME identity back in on its own'
+          : refusedOnce ? 'still locked out after the longest wait tried' : 'never locked out',
+      } : {}),
       spacingMs: SPACING_MS, attempts: outcomes.length, served, refused: outcomes.length - served,
       sequence: outcomes.map((o) => (o.served ? 'S' : 'R')).join(''),
     });
