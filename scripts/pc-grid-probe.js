@@ -41,7 +41,25 @@
  *   Probe 4 showed that clicking through this store's controls is what draws the captcha. Ask for
  *   ?ps=N in the URL instead.
  *
- * WHAT IS STILL UNMEASURED: the tolerable CADENCE. The sweep was rate-limited at 4s page spacing
+ *   Probe 7  ANSWERED THE CADENCE QUESTION, AND THE ANSWER IS THAT THERE ISN'T ONE (2026-09-18).
+ *            The same page, loaded 5 times at ~225s between requests -- more than twice as
+ *            gentle as the consecutive walk whose third page was refused:
+ *
+ *              S R R R R      1 served (95 products), 4 refused, the last 15 min after the first
+ *
+ *            Not a rate limit: slowing down did not help. Not a flaky challenge: the refusals are
+ *            not scattered, they are permanent. The store lets a NEW session through once, then
+ *            recognises it and keeps it out. That also explains every earlier result -- each probe
+ *            was a fresh container, which is why each one's first page or two always rendered.
+ *
+ *            So a sustained sweep from one identity cannot work at ANY pace. The only way past it
+ *            is to keep presenting as a new visitor, which is defeating the store's bot controls,
+ *            and that was ruled out deliberately rather than overlooked. The recommended path is
+ *            to stop pursuing the catalogue sweep and lean on the two signals that do work: the
+ *            unguarded sitemap for new listings, and the existing targeted checks for watchlist
+ *            skus.
+ *
+ * (Superseded by Probe 7) WHAT WAS STILL UNMEASURED: the tolerable CADENCE. The sweep was rate-limited at 4s page spacing
  * on 2026-09-13 and recovered after ~90 minutes. Fewer, larger pages makes that easier but does
  * not answer it, and shipping a sweep at a pace that gets the residential pool flagged is worse
  * than having no Pokemon Center data.
