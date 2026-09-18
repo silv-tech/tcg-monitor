@@ -79,6 +79,8 @@ const START_PAGE = Math.max(1, Number(process.env.PROBE_START_PAGE) || 1);
 const PAGE_SIZE = Number(process.env.PROBE_PAGE_SIZE) || 0;
 // Probe 6: ask the search endpoint the page itself uses. PROBE_SEARCH_API=1 to enable.
 const SEARCH_API = process.env.PROBE_SEARCH_API === '1';
+// Probe 7: load the SAME page this many times instead of walking forward. See the header.
+const REPEAT = Math.max(1, Math.floor(Number(process.env.PROBE_REPEAT)) || 1);
 // How many rows to ask for on the SECOND call, only if the first one is allowed through.
 const SEARCH_ROWS = Math.max(1, Number(process.env.PROBE_SEARCH_ROWS) || 200);
 const SPACING_MS = Math.max(30000, Number(process.env.PROBE_SPACING_MS) || 60000);
@@ -304,6 +306,7 @@ async function probe() {
 
   let callId = 0;
   let pageNo = 0;
+  let attempt = 0;      // labels calls by LOAD, so repeats of one page do not collide
   const page = ctx.pages()[0] || await ctx.newPage();
   page.on('response', async (res) => {
     const req = res.request();
@@ -312,7 +315,7 @@ async function probe() {
     if (!['xhr', 'fetch'].includes(req.resourceType()) && !/tpci-ecommweb-api/.test(url)) return;
     let body = '';
     try { body = await res.text(); } catch { body = ''; }
-    const id = `p${pageNo}c${++callId}`;
+    const id = `a${attempt}p${pageNo}c${++callId}`;
     const stockKeys = [...new Set(body.match(/"[A-Za-z_]*(?:availab|inventory|stock|purchas|sold)[A-Za-z_]*"/gi) || [])];
     log('CALL', {
       id, method: req.method(), status: res.status(), bytes: body.length, url,
@@ -324,7 +327,13 @@ async function probe() {
   });
 
   try {
-    for (pageNo = START_PAGE; pageNo < START_PAGE + PAGES; pageNo += 1) {
+    // Walk forward through PAGES pages, or -- in repeat mode -- load START_PAGE REPEAT times.
+    const plan = REPEAT > 1
+      ? Array.from({ length: REPEAT }, () => START_PAGE)
+      : Array.from({ length: PAGES }, (_, i) => START_PAGE + i);
+    const outcomes = [];
+    for (attempt = 1; attempt <= plan.length; attempt += 1) {
+      pageNo = plan[attempt - 1];
       // Built as a real navigation, never by driving the pager. Probe 4 established that the
       // in-app route change is what the site defends: it fires the DataDome-protected
       // /tpci-ecommweb-api/search endpoint, which 403s and draws a captcha, while a plain
@@ -367,8 +376,27 @@ async function probe() {
           : (PAGE_SIZE && summary.total > 32 ? `ps=${PAGE_SIZE} WORKS` : 'no more than the default 32'),
       });
 
-      if (pageNo < START_PAGE + PAGES - 1) await new Promise((r) => setTimeout(r, SPACING_MS));
+      // SERVED means the document carried the app's product data; REFUSED means it did not.
+      // That is the same discriminator the sweep now uses, so this measures the thing the sweep
+      // will actually experience rather than a proxy for it.
+      outcomes.push({
+        attempt, page: pageNo, navStatus: nav && nav.status(),
+        served: !!summary, products: summary ? summary.total : 0,
+        at: new Date().toISOString(),
+      });
+      log('ATTEMPT', outcomes[outcomes.length - 1]);
+
+      if (attempt < plan.length) await new Promise((r) => setTimeout(r, SPACING_MS));
     }
+
+    // The one line this run is for. With the SAME page and long gaps, pacing is held constant, so
+    // a steady fraction of refusals points at the challenge itself rather than at how fast we go.
+    const served = outcomes.filter((o) => o.served).length;
+    log('REPEAT_SUMMARY', {
+      mode: REPEAT > 1 ? `same page x${REPEAT}` : `${PAGES} consecutive pages`,
+      spacingMs: SPACING_MS, attempts: outcomes.length, served, refused: outcomes.length - served,
+      sequence: outcomes.map((o) => (o.served ? 'S' : 'R')).join(''),
+    });
   } finally {
     await ctx.close().catch(() => {});
   }
