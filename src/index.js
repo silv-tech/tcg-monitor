@@ -19,6 +19,7 @@ const BestBuyAdapter = require('./adapters/bestbuy');
 const LondonDrugsAdapter = require('./adapters/londondrugs');
 const { scanSitemaps, SCAN_INTERVAL_MS } = require('./core/sitemap-scanner');
 const { loadComposition } = require('./monitoring/health');
+const { startMemoryWatchdog, RESTART_EXIT_CODE } = require('./monitoring/memory-watchdog');
 let closeBrowser;
 try { closeBrowser = require('./utils/browser').closeBrowser; } catch { closeBrowser = null; }
 
@@ -360,9 +361,27 @@ async function main() {
   }, 2 * 60 * 1000);
 
   // Graceful shutdown
-  async function shutdown(signal) {
+  //
+  // `exitCode` exists for the memory watchdog, which MUST exit non-zero: this service runs Railway's
+  // `ON_FAILURE` restart policy, which treats a clean exit(0) as "finished" and leaves it off. The
+  // signal paths keep exit(0) — Railway sends those itself when it stops or replaces the container.
+  let shuttingDown = false;
+  let memoryWatchdog = null; // assigned below, once shutdown() exists; clearInterval(null) is a no-op
+  async function shutdown(signal, exitCode = 0) {
+    // Re-entrancy guard. A watchdog restart that is mid-drain when Railway's SIGTERM lands would
+    // otherwise run every step below twice, closing the Discord client under its own drain.
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // A safety net that can hang is not one. The drain below is bounded, but shutdownBot,
+    // closeBrowser and shutdownState are not; if any of them stalls, exit anyway with the same
+    // code rather than sit at the memory ceiling until the container kills us after all.
+    setTimeout(() => {
+      logger.error(`Shutdown (${signal}) did not finish in 30s — forcing exit ${exitCode}`);
+      process.exit(exitCode);
+    }, 30000).unref();
     logger.info(`Received ${signal}, shutting down...`);
     clearInterval(healthInterval);
+    clearInterval(memoryWatchdog);
     if (sitemapStartup) clearTimeout(sitemapStartup);
     if (sitemapTimer) clearInterval(sitemapTimer);
     scheduler.stop();
@@ -381,11 +400,18 @@ async function main() {
     if (closeBrowser) await closeBrowser();
     await shutdownState();
     logger.info('Shutdown complete');
-    process.exit(0);
+    process.exit(exitCode);
   }
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Restart gracefully before the container runs out of memory. See memory-watchdog.js — without
+  // this, every ~5h the container SIGKILLs the process, the drain above never runs, and any queued
+  // alert is lost. Declared after shutdown() so it can call it; shutdown() clears it.
+  memoryWatchdog = startMemoryWatchdog(
+    (rssMb, limitMb) => shutdown(`MEMORY (rss ${rssMb}MB >= ${limitMb}MB)`, RESTART_EXIT_CODE),
+  );
 
   logger.info('Nocturne Monitors running');
 }

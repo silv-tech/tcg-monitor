@@ -24,6 +24,24 @@ WORKDIR /app
 # Store browser binaries inside /app so the non-root user can access them
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
 
+# Cap glibc's malloc arenas. MEASURED 2026-09-18: this service's memory climbs in a straight line
+# (~1.4 GB/h) to ~7.7 GB of its 8 GB limit and is SIGKILLed every ~5h — yet in 48h and ~9 kills
+# there was not ONE "JavaScript heap out of memory". V8's heap is capped near ~4 GB here (no
+# --max-old-space-size is set), so the growth is OUTSIDE the JS heap, in native memory.
+#
+# The only native code that runs every poll is impit: Rust on tokio (one worker per core — this
+# container has 8), hyper and BoringSSL, linked as the `linux-x64-gnu` build against glibc with NO
+# custom allocator (no mimalloc/jemalloc in the binary). glibc gives each allocating thread its own
+# arena, up to 8 x cores = 64 here, and an arena keeps freed memory instead of returning it. That
+# is the textbook shape of this graph, and capping arenas is the standard remedy.
+#
+# NOT PROVEN — this is the test as well as the attempted fix. If memory stays flat after deploy,
+# it was arena fragmentation and this is the fix. If it still climbs, the leak is inside impit
+# itself and this line is harmless. Either way src/monitoring/memory-watchdog.js restarts the
+# process gracefully before the kill. Cost: threads may briefly contend for 2 shared arenas, which
+# only matters under heavy parallel allocation — this service uses 0.01-0.15 of one core out of 8.
+ENV MALLOC_ARENA_MAX=2
+
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
