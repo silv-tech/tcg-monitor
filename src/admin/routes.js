@@ -69,6 +69,61 @@ router.post('/ingest/ebgames', express.text({ limit: '8mb', type: '*/*' }), asyn
 });
 
 /**
+ * Amazon browser bridge — the work queue.
+ *
+ * amazon-extension/ reads /dp/ buy boxes in the client's own Canadian Chrome and posts them
+ * back, so the server never fetches amazon.ca for these. That buys three things the paid paths
+ * cannot: the buy box is the pinned offer by construction (authoritative price), the seller
+ * comes free, and there is no marketplace to get wrong — the `tld=ca` trap that silently returns
+ * the US listing in USD cannot exist in a Canadian browser's own session.
+ *
+ * A GET on purpose: the bridge asks for work continuously, and the write limiter is 30 requests
+ * per minute per IP (server.js). Polling for work must not eat the budget the pushes need.
+ */
+router.get('/ingest/amazon/next', (req, res) => {
+  const adapter = scheduler.getAdapter('amazon');
+  if (!adapter) return res.status(503).json({ error: 'Amazon adapter not running' });
+  if (typeof adapter.getBridgeBatch !== 'function') {
+    return res.status(503).json({ error: 'Amazon adapter has no work queue' });
+  }
+  const items = adapter.getBridgeBatch(req.query.n);
+  return res.json({ ok: true, count: items.length, items });
+});
+
+/**
+ * Amazon browser bridge — the results.
+ *
+ * Body is `{ records: [{ asin, slice }] }`, where `slice` is the concatenated outerHTML of the
+ * buy-box elements — a few KB, against a /dp/ page of 400KB-1.5MB. Parsing stays server-side in
+ * src/utils/amazon-buybox.js so the stock rule lives next to the verdict contract it has to obey.
+ *
+ * Mounted under /api, so it inherits the x-api-key check and the write rate limiter that guard
+ * every other write endpoint. That matters more here than almost anywhere: an unauthenticated
+ * version of this route would let anyone write stock straight into a paid alert channel.
+ */
+router.post('/ingest/amazon', express.json({ limit: '8mb' }), async (req, res) => {
+  const adapter = scheduler.getAdapter('amazon');
+  if (!adapter) return res.status(503).json({ error: 'Amazon adapter not running' });
+  if (typeof adapter.ingestBrowserReads !== 'function') {
+    return res.status(503).json({ error: 'Amazon adapter does not accept pushes' });
+  }
+  try {
+    const result = await adapter.ingestBrowserReads((req.body && req.body.records) || []);
+    // The bridge version is stamped by the extension because Chrome runs it from wherever it was
+    // loaded — a `git push` never reaches the operator's copy, so the log has to say which build
+    // is talking rather than leaving us to infer it from behaviour.
+    const version = req.get('x-bridge-version') || '?';
+    logger.info(`Amazon: BRIDGE PUSH v${version} — ${result.accepted} read, ${result.changed} changed`
+      + `${result.rejected ? `, ${result.rejected} rejected` : ''}`);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    // The extension surfaces this to the user, so say what actually went wrong.
+    logger.warn(`Amazon: bridge push rejected: ${err.message}`);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
  * Product images captured by the same browser that supplies the listings.
  *
  * Discord cannot fetch ebgames.ca images — the same Cloudflare that refuses every datacenter

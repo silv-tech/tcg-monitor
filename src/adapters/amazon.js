@@ -7,6 +7,7 @@ const { stealthGet, _clearCache } = require('../utils/stealth-http');
 const state = require('../core/state');
 const rateBudget = require('../utils/rate-budget');
 const { fetchAmazonOffers } = require('../utils/scraper-api');
+const { parseBuyboxSlice } = require('../utils/amazon-buybox');
 const { searchQueries: BASE_QUERIES, setQueries: SET_QUERIES } = require('../config/products.json');
 const SEARCH_QUERIES = [...BASE_QUERIES, ...(SET_QUERIES || [])];
 
@@ -279,6 +280,11 @@ class AmazonAdapter extends BaseAdapter {
                                      // cancel) a long sweep, so a fresh poll could start a second
                                      // one that races the first over _aodCursor/_knownProducts
     this._lastInStockAt = new Map(); // ASIN → last time seen in stock, drives the auto-hot fast lane
+    // The browser bridge's OWN staleness clock (amazon-extension/). Deliberately separate from
+    // lastSeen, which every lane writes: sharing it would let a search tile mark an ASIN fresh
+    // for the bridge, so its buy box would then never be read.
+    this._bridgeCheckedAt = new Map(); // ASIN → last time the browser bridge read this buy box
+    this._lastBridgePushAt = 0;
     // SKUs whose stored row is a GUESS written before the withhold fix — see _findGuessedRows.
     this._seedSkus = new Set();
     // ASINs we have WITHHELD at least once. A withheld item has no stored row, so its first
@@ -2127,6 +2133,172 @@ class AmazonAdapter extends BaseAdapter {
   /**
    * Fetch a single product page — used by watchlist fast-polling.
    */
+  /**
+   * BROWSER BRIDGE — the work queue.
+   *
+   * amazon-extension/ reads /dp/ buy boxes in the client's own Canadian Chrome and posts them
+   * back. This picks what it reads next: every in-scope tracked ASIN, stalest first, with the
+   * hand-picked priority set jumped to the front of each batch.
+   *
+   * Stalest-first is self-balancing and cannot starve an ASIN — the same property the paid
+   * offers lane relies on.
+   *
+   * THE PRIORITY SET TAKES AT MOST HALF A BATCH, and that cap is the whole point of this
+   * function rather than a detail. Sorting priority-first with no cap looks obviously right and
+   * quietly starves the catalogue: with 10 priority ASINs and a batch of 12, every single batch
+   * is 10 priority + 2 others, so the priority set is re-read each cycle (~54s, which is the
+   * cadence the client wants) while the remaining ~770 ASINs advance two at a time — a full pass
+   * of nearly six hours. Halving it costs the priority set about 90s instead of 54s, still well
+   * inside the 60-180s the paid lane was bought to deliver, and roughly halves the tail.
+   */
+  getBridgeBatch(limit = 12) {
+    const n = Math.max(1, Math.min(60, Number(limit) || 12));
+    const priority = new Set(this._priorityAsins);
+    const hot = [];
+    const rest = [];
+    for (const [asin, product] of this._knownProducts) {
+      // Only ASINs whose stored name is in scope. The bridge exists to read Pokemon and One
+      // Piece stock; spending the client's own browsing footprint on anything else is exactly
+      // the drift src/utils/scope.js was created to stop. A row with no name yet is a seeded
+      // watchlist ASIN — kept, because reading it is how it gets one.
+      if (product && product.name && !isInScopeName(product.name)) continue;
+      const item = {
+        asin,
+        url: `https://www.amazon.ca/dp/${asin}`,
+        checkedAt: this._bridgeCheckedAt.get(asin) || 0,
+      };
+      (priority.has(asin) ? hot : rest).push(item);
+    }
+
+    const byStaleness = (a, b) => a.checkedAt - b.checkedAt;
+    hot.sort(byStaleness);
+    rest.sort(byStaleness);
+
+    // Half, rounded up, so a batch of 1 still reaches the priority set at all.
+    const take = hot.slice(0, Math.min(hot.length, Math.ceil(n / 2)));
+    // Backfill from whichever side has spare rows, so a short list on either side never returns
+    // an under-full batch and waste a cycle.
+    return take.concat(rest.slice(0, n - take.length))
+      .concat(hot.slice(take.length))
+      .slice(0, n);
+  }
+
+  /**
+   * BROWSER BRIDGE — apply one buy-box read.
+   *
+   * Mirrors _applyOffersData's value semantics exactly, because both describe the same thing: a
+   * read of the PINNED offer. Two things must NOT be copied from the priority lane — `_watchlist`
+   * is whatever this ASIN actually is rather than an unconditional true (stamping it on every
+   * ASIN would hand ~780 products the 45s dedup window, the mute exemption and the priority
+   * channel), and the seller is recorded, which is what this path gets free and the paid one bills.
+   */
+  _applyBridgeData(asin, data, now) {
+    const cached = this._knownProducts.get(asin) || {};
+    const wasInStock = !!cached.inStock;
+
+    // An out-of-scope live title is KEPT and logged here, never adopted and never denylisted.
+    // The delivery-time identity gate is the proven layer for that call (it caught B0G8ZLSYWW
+    // seven minutes after deploy), and it can only see a divergence if the stored name stays put.
+    if (!isInScopeName(data.name)) {
+      logger.warn(`Amazon: bridge — ${asin} live title reads out of scope `
+        + `("${data.name.slice(0, 60)}") — KEEPING, delivery gate will judge it`);
+    }
+
+    let name = cached.name;
+    let category = cached.category;
+    if (data.name && isInScopeName(data.name) && cached.name && !sameProductName(cached.name, data.name)) {
+      name = data.name;
+      const reclassified = this.classify({ name: data.name }).category;
+      if (reclassified !== 'other') category = reclassified;
+    } else if (data.name && isInScopeName(data.name) && !cached.name) {
+      name = data.name;
+    }
+
+    const product = {
+      ...cached,
+      sku: asin,
+      name: name || cached.name || data.name,
+      category: category || cached.category || 'pokemon',
+      price: data.price || cached.price || 0,
+      // On a /dp/ page the buy box IS the pinned offer, so a price parsed here is authoritative.
+      // A carried-forward cached price keeps whatever provenance it already had.
+      _pricePinned: data.price ? !!data.pricePinned : !!cached._pricePinned,
+      inStock: data.inStock,
+      canAddToCart: data.inStock,
+      // This read DID observe stock, so clear any blindness inherited via `...cached`.
+      _stockUnobserved: undefined,
+      // Conditional for the same reason as `_pricePinned`: no price parsed means the row is
+      // replaying the catalogue, and a replay is not an observation.
+      _priceUnobserved: data.price ? undefined : true,
+      url: cached.url || `https://www.amazon.ca/dp/${asin}`,
+      lastSeen: now,
+      _watchlist: this.watchlist.has(String(asin)),
+      // The pinned offer's merchant, read for free. The "sold by Amazon only" gate currently buys
+      // this with a paid offers call; stored verbatim so the gate keeps owning the rule about
+      // what counts as Amazon.
+      _buyboxSeller: data.seller || cached._buyboxSeller || null,
+    };
+
+    this._knownProducts.set(asin, product);
+    this._bridgeCheckedAt.set(asin, now);
+    if (data.inStock) this._lastInStockAt.set(asin, now);
+    if (data.inStock !== wasInStock) {
+      logger.info(`Amazon: bridge — ${asin} ${data.inStock ? `IN STOCK $${data.price}` : 'OOS'}`
+        + `${data.seller ? ` (${data.seller})` : ''}`);
+      if (data.inStock) this._enterBurst(now, asin); // flip -> catch the rest of the wave fast
+    }
+    return product;
+  }
+
+  /**
+   * BROWSER BRIDGE — accept what the browser read.
+   *
+   * Records are `{ asin, slice }`, where `slice` is the concatenated outerHTML of the buy-box
+   * elements. Parsing happens HERE, in src/utils/amazon-buybox.js, so the value semantics sit
+   * server-side next to the verdict contract and its tests rather than in a Chrome extension
+   * that no fixture can be run against.
+   *
+   * The rows land in _knownProducts, and the NEXT poll diffs them against Redis and alerts
+   * exactly as it does for every other lane. The bridge deliberately dispatches nothing itself:
+   * one alerting path is why a browser read and a paid read cannot come to disagree.
+   *
+   * @returns {{accepted:number, rejected:number, changed:number}}
+   */
+  async ingestBrowserReads(records) {
+    if (!Array.isArray(records) || records.length === 0) throw new Error('no records');
+    if (records.length > 200) throw new Error(`too many records (${records.length} > 200)`);
+
+    const now = Date.now();
+    let accepted = 0;
+    let rejected = 0;
+    let changed = 0;
+
+    for (const rec of records) {
+      const asin = rec && typeof rec.asin === 'string' ? rec.asin.trim() : '';
+      const slice = rec && typeof rec.slice === 'string' ? rec.slice : '';
+      if (!asin || !slice) { rejected++; continue; }
+
+      // Only ever write stock for an ASIN we ALREADY track. The bridge is a reader, not a
+      // discovery lane: a mis-targeted tab would otherwise write one product's buy box under
+      // another product's ASIN, straight into a paid alert source. It also means this endpoint
+      // cannot inject a product no scope rule has ever seen.
+      if (!this._knownProducts.has(asin)) { rejected++; continue; }
+
+      const data = parseBuyboxSlice(slice);
+      // A slice with no title is INCONCLUSIVE — we did not really read the page. That must never
+      // become an out-of-stock write; the row is left exactly as it was.
+      if (!data) { rejected++; continue; }
+
+      const before = this._knownProducts.get(asin) || {};
+      if (before.inStock !== data.inStock || (data.price && before.price !== data.price)) changed++;
+      this._applyBridgeData(asin, data, now);
+      accepted++;
+    }
+
+    if (accepted > 0) this._lastBridgePushAt = now;
+    return { accepted, rejected, changed };
+  }
+
   async fetchProductPage(asin) {
     // Priority 0: the watchlist/hot lane is what restock latency is measured on, so it wins the
     // shared AOD budget over the background sweep.
