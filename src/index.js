@@ -96,6 +96,8 @@ const ADAPTER_MAP = {
 // main() on load and therefore cannot be required from a test, which is why the rule went
 // weeks silently reverting deliberate per-shop slowdowns with nothing covering it.
 const { clampShopInterval, shopTiers } = require('./core/shop-tiers');
+const { applyRetailerAllowlist } = require('./core/retailer-allowlist');
+
 
 async function main() {
   logger.info('Nocturne Monitors starting...');
@@ -188,8 +190,9 @@ async function main() {
   // 3. Register adapters from config (merge Redis overrides so enabled/interval state persists)
   const baseRetailers = require('./config/retailers.json');
   const overrides = await stateModule.getRetailerOverrides();
-  const retailers = baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) }))
-    .map(clampShopInterval);
+  const retailers = applyRetailerAllowlist(
+    baseRetailers.map(r => ({ ...r, ...(overrides[r.id] || {}) })).map(clampShopInterval),
+  );
 
   // Redis overrides silently win over retailers.json, so the file on disk can disagree with
   // what is actually running. Say so at boot rather than letting the next reader be misled.
