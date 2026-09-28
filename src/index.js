@@ -294,7 +294,10 @@ async function main() {
   let sitemapTimer = null;
   async function runSitemapScan() {
     try {
-      const events = await scanSitemaps();
+      // The Early SKU lane does not go through the scheduler, so it has to be told separately
+      // which retailers are live — otherwise a deployment narrowed to one store still publishes
+      // another store's new listings. See the note on scanSitemaps.
+      const events = await scanSitemaps(new Set(retailers.filter(r => r.enabled).map(r => r.id)));
       if (events.length > 0) {
         logger.info(`Early SKU: Sending ${events.length} events to #early-detection`);
         await delivery.deliver(events, { skipDedup: true });

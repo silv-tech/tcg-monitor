@@ -376,24 +376,52 @@ async function scanPokemonCenter() {
 
 // ─── Main scan (runs both retailers) ─────────────────────────────
 
-async function scanSitemaps() {
+/**
+ * @param {Set<string>|null} enabledRetailerIds  which retailers may run. null = all (the old
+ *        behaviour, kept so every existing caller and test is unaffected).
+ *
+ * THIS LANE USED TO IGNORE THE RETAILER CONFIG COMPLETELY. It is not driven by the scheduler, so
+ * neither `enabled:false` in retailers.json nor RETAILERS_ONLY reached it — measured live on
+ * 2026-09-28, minutes after the monitor was brought back up for Amazon alone:
+ *
+ *     Effective config: 1/19 retailers enabled — amazon@6s
+ *     Early SKU alert sent: Sean Wotherspoon Pokemon Center Charizard Plush
+ *     Early SKU alert sent: Ditto As Zorua Plush 7 In
+ *     ... 8 more
+ *
+ * A deployment the operator had deliberately narrowed to one store was publishing another
+ * store's plush toys into the client's channel. "Disabled" has to mean disabled everywhere, or
+ * the word is worthless — and this is the lane nobody thinks of, precisely because it is the one
+ * that does not go through the scheduler.
+ */
+async function scanSitemaps(enabledRetailerIds = null) {
+  const runs = (id) => !enabledRetailerIds || enabledRetailerIds.has(id);
+
+  // Say nothing and do nothing when no lane is enabled. Logging the banner for a scan that then
+  // scans nothing is how this went unnoticed in the first place.
+  if (!runs('walmart') && !runs('pokemoncenter')) return [];
+
   logger.info('=== Early SKU Detection: starting multi-retailer scan ===');
   const allEvents = [];
 
   // Scan Walmart
-  try {
-    const walmartEvents = await scanWalmart();
-    allEvents.push(...walmartEvents);
-  } catch (err) {
-    logger.error(`Early SKU [Walmart]: scan failed: ${err.message}`);
+  if (runs('walmart')) {
+    try {
+      const walmartEvents = await scanWalmart();
+      allEvents.push(...walmartEvents);
+    } catch (err) {
+      logger.error(`Early SKU [Walmart]: scan failed: ${err.message}`);
+    }
   }
 
   // Scan Pokemon Center
-  try {
-    const pcEvents = await scanPokemonCenter();
-    allEvents.push(...pcEvents);
-  } catch (err) {
-    logger.error(`Early SKU [Pokemon Center]: scan failed: ${err.message}`);
+  if (runs('pokemoncenter')) {
+    try {
+      const pcEvents = await scanPokemonCenter();
+      allEvents.push(...pcEvents);
+    } catch (err) {
+      logger.error(`Early SKU [Pokemon Center]: scan failed: ${err.message}`);
+    }
   }
 
   // Tag events that match early detection keywords
