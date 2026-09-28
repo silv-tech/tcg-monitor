@@ -171,6 +171,25 @@ const PRIORITY_OFFERS_ENABLED = process.env.AMAZON_PRIORITY_OFFERS !== '0';
 // 7500 leaves comfortable headroom over the shipped 18s cadence (~4,800/day) so a retry storm or a
 // clock-skew day boundary can't quietly push it into the cap and stop the lane. Raise to ~15000 at
 // the same time PRIORITY_OFFERS_INTERVAL_MS is flipped to 6000 (~14,400/day) post plan-upgrade.
+// THE HOT LANE — the ASINs that actually restock, polled fast enough to catch them.
+//
+// Measured 2026-09-28: B0H77VZBX4 restocked at 14:25:09, 15:29:47 and 15:37:39 and every window
+// was UNDER 65 SECONDS. Every other lane is too slow by construction — the paid round-robin is
+// ~192s, the browser bridge ~119s, and the free search-tile lane cannot see these ASINs at all
+// because Amazon drops an offerless ASIN from /s and its index lags the offer besides. A window
+// that short is missed by anything slower than about a third of it.
+//
+// 3 ASINs at 20s is 12,960 requests/day. amazon.ca bills 5 credits each (measured against the
+// account counter, and it matches ScraperAPI's published Amazon rate), so ~1.94M credits/month on
+// top of the ~714K the rest of the system uses — which is why this needs the 3M plan and is
+// capped rather than merely paced.
+const HOT_COUNT = Number(process.env.AMAZON_HOT_COUNT) || 3;
+const HOT_INTERVAL_MS = Number(process.env.AMAZON_HOT_INTERVAL_MS) || 20000;
+// A ceiling, not a target: at the interval above the lane draws ~12,960/day, so this only bites
+// if the interval is cut without the budget being checked. Running out of credits silences EVERY
+// lane, which is far worse than this one being slow.
+const HOT_DAILY_CAP = Number(process.env.AMAZON_HOT_DAILY_CAP) || 16000;
+
 const PRIORITY_OFFERS_DAILY_CAP = Number(process.env.AMAZON_PRIORITY_OFFERS_DAILY_CAP) || 7500;
 
 // BURST-ON-FLIP — the primary speed lever. When any priority ASIN flips OOS→in-stock, a drop wave
@@ -250,6 +269,9 @@ class AmazonAdapter extends BaseAdapter {
     this._priorityOffersIntervalMs = (config.timing && config.timing.priorityOffersIntervalMs) || 18000;
     this._priorityCursor = 0;   // round-robin position over _priorityAsins (PAID offers lane)
     this._priorityTick = 0;     // ticks of the paid lane, for the blind/sighted weighting
+    this._hotCheckedAt = new Map();  // per-ASIN last HOT-lane check
+    this._hotDay = null;             // UTC day for the hot lane's own cap
+    this._hotToday = 0;
     this._blindCursor = 0;      // rotation over the ASINs the free tile lane cannot see
     this._sightedCursor = 0;    // rotation over the ones it can
     this._priorityFreeCursor = 0; // chunk position for the FREE /s lane; one chunk unless >40 ASINs
@@ -1083,6 +1105,9 @@ class AmazonAdapter extends BaseAdapter {
     // — and it arms the burst at zero credits. Runs before the paid lanes so a free hit refreshes
     // lastSeen and the general lane skips that ASIN.
     await this._runPriorityFreeCheck(products);
+    // Before the ordinary lane: the hot ASINs are the ones with a deadline, and a shared tick
+    // spent on the slow rotation is one they do not get back.
+    await this._runHotLane(products);
 
     // Offers lane: after the free sweep has refreshed everything it can, spend ONE paid
     // structured/offers call on the stalest search-invisible ASIN — the ones with no search tile,
@@ -2352,6 +2377,61 @@ class AmazonAdapter extends BaseAdapter {
     const t = blind[this._blindCursor % blind.length];
     this._blindCursor = ((this._blindCursor || 0) + 1) % blind.length;
     return t;
+  }
+
+  /**
+   * Poll the hottest blind ASINs on their own fast clock.
+   *
+   * Separate from `_runPriorityOffersLane` on purpose. That lane shares one tick across the whole
+   * priority set, so making it fast enough for these ASINs would make it fast for all 24 and cost
+   * five times what the budget allows. This one targets a handful and leaves the rest alone.
+   *
+   * Only BLIND ASINs qualify. A sighted one is already read every ~6s by the free tile lane, so
+   * spending 5 credits on it buys nothing — and "hot" without "blind" would quietly aim the most
+   * expensive lane at the best-covered ASINs.
+   */
+  async _runHotLane(products) {
+    if (HOT_COUNT < 1 || !this._priorityAsins || this._priorityAsins.length === 0) return;
+
+    const now = Date.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (this._hotDay !== day) { this._hotDay = day; this._hotToday = 0; }
+    if (this._hotToday >= HOT_DAILY_CAP) {
+      if (this._hotToday === HOT_DAILY_CAP) {
+        this._hotToday += 1; // log once, not every poll
+        logger.warn(`Amazon: HOT lane hit its daily cap (${HOT_DAILY_CAP}). Restock latency on the `
+          + 'hot ASINs falls back to the ordinary priority lane until the UTC day rolls over. '
+          + 'Raise AMAZON_HOT_DAILY_CAP only if the ScraperAPI plan has room.');
+      }
+      return;
+    }
+
+    // Hottest BLIND ASINs, by when each was last actually seen in stock. Evidence, not config:
+    // the set re-ranks itself as restock patterns move, and a brand-new watchlist ASIN sorts last
+    // rather than displacing one with a proven history.
+    const hot = this._priorityAsins
+      .filter((asin) => {
+        const p = this._knownProducts.get(asin);
+        return !p || p._stockUnobserved;
+      })
+      .sort((a, b) => (this._lastInStockAt.get(b) || 0) - (this._lastInStockAt.get(a) || 0))
+      .slice(0, HOT_COUNT);
+    if (hot.length === 0) return;
+
+    // The most overdue one, and only if it is actually due. Checking "is anything due" rather
+    // than firing every poll is what holds the spend to HOT_COUNT/HOT_INTERVAL_MS regardless of
+    // how often the poll loop runs.
+    let target = null;
+    let oldest = -1;
+    for (const asin of hot) {
+      const age = now - (this._hotCheckedAt.get(asin) || 0);
+      if (age >= HOT_INTERVAL_MS && age > oldest) { oldest = age; target = asin; }
+    }
+    if (!target) return;
+
+    this._hotCheckedAt.set(target, now);
+    const spent = await this._checkOnePriority(target, products, now, 'hot');
+    if (spent) this._hotToday += 1;
   }
 
   /**
