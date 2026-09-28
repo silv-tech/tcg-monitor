@@ -43,6 +43,10 @@ const VERIFY_TYPES = new Set(['RESTOCK', 'NEW_SKU', 'PRICE_CHANGE', 'PREORDER_LI
 // Sized against a measured ~1.2-1.7s for the offers endpoint, inside the sub-5s alert goal.
 // A slower response is not worth delaying a drop for — it fails open.
 const VERIFY_TIMEOUT_MS = Number(process.env.AMAZON_VERIFY_TIMEOUT_MS || 4000);
+// How long a seller read taken at detection time stays good enough to act on. The buy box can
+// change hands, so this is deliberately short — but it is far better evidence than a scrape of a
+// different offer, which is what it replaces.
+const SELLER_DETECTION_MAX_AGE_MS = Number(process.env.SELLER_DETECTION_MAX_AGE_MS || 120000);
 
 const { sleep } = require('../utils/helpers');
 
@@ -486,7 +490,21 @@ class DeliveryQueue {
         // from the offer that is actually being sold — so a stale third-party verdict can no
         // longer suppress a genuine Amazon restock (how B0H7FDBNSB was lost), and a blind cheap
         // path can no longer fail open on a marketplace listing (how B0FP9ZZ68C was published).
-        let seller = liveSeller || (sellerMustBeFresh ? null : cachedSeller);
+        // THE DETECTION-TIME BUY BOX outranks everything except a live read.
+        //
+        // The offers payload that DETECTED the restock already named the pinned offer's seller,
+        // and the adapter now carries it through (`_buyBoxSeller`). It is better evidence than the
+        // cache and it costs nothing, because it is the answer from the exact moment stock
+        // flipped rather than one re-read a second later against a moving buy box.
+        //
+        // This is what stops B0H77VZBX4 recurring: on 2026-09-28 the live read here produced
+        // nothing and the AOD scrape then named a different offer's seller, suppressing a real
+        // Amazon restock on a priority ASIN. With this, the answer never had to be re-fetched.
+        const detectionSeller = (product._buyBoxSeller && (!product._buyBoxSellerAt
+          || Date.now() - product._buyBoxSellerAt < SELLER_DETECTION_MAX_AGE_MS))
+          ? product._buyBoxSeller : null;
+
+        let seller = liveSeller || detectionSeller || (sellerMustBeFresh ? null : cachedSeller);
         const staleSeller = sellerMustBeFresh ? cachedSeller : null;
         // Recorded before `seller` is overwritten, so the disagreement can be logged below.
         const overruledCached = !!(liveSeller && isSoldByAmazon(liveSeller)
@@ -530,9 +548,15 @@ class DeliveryQueue {
 
         // Seller verification: suppress third-party seller alerts
         if (seller) {
+          // Recorded for EVERY verdict, not only the suppressing one. It used to be assigned
+          // solely inside the third-party branch, which meant a confirmed "Amazon.ca" left no
+          // trace at all — nothing downstream could tell "verified Amazon" from "never checked".
+          event._seller = seller;
+          event._sellerSource = liveSeller ? 'buy box'
+            : (seller === detectionSeller ? 'detection' : 'scrape/cache');
+
           if (isThirdPartySeller(seller)) {
             event._thirdPartySeller = true;
-            event._seller = seller;
             // True whenever the verdict came off the wire this run — either the cache was empty, or
             // it was deliberately bypassed, or the buy box supplied it. Only a cached verdict can
             // be stale.
@@ -687,7 +711,31 @@ class DeliveryQueue {
     // Skip Amazon third-party seller products (client wants "sold by Amazon" only)
     // Scan/test events bypass this filter — admin needs to see all alerts
     if (event._thirdPartySeller && !event._scanTier) {
-      logger.info(`Suppressed third-party alert: ${event.product?.name} (seller: ${event._seller})`);
+      const p = event.product || {};
+      const src = event._sellerSource || 'unknown';
+
+      // A SUPPRESSED PRIORITY ASIN IS NEVER SILENT.
+      //
+      // The identity gate already refuses to quietly drop a hand-picked ASIN — it escalates to
+      // admin instead — and this gate had no equivalent, which is exactly how a real Amazon
+      // restock of B0H77VZBX4 disappeared on 2026-09-28 leaving one info line in a log buffer that
+      // rolls every ten minutes. The whole point of the priority list is that nothing on it
+      // disappears without someone being told.
+      if (p._watchlist) {
+        logger.warn(`WATCHLIST SUPPRESSED (third-party): ${p.name} | sku=${p.sku} `
+          + `| seller="${event._seller}" | source=${src} | price=${p.price ?? '?'}`);
+        this._escalateSellerSuppression(event).catch(() => {});
+      } else {
+        logger.info(`Suppressed third-party alert: ${p.name} (seller: ${event._seller}, ${src})`);
+      }
+
+      // Durable record. Without it a suppression exists only as a log line, and the logs keep
+      // ~10 minutes — so neither we nor the client can audit what was withheld or measure how
+      // often the gate fires. Fire-and-forget: never let bookkeeping break delivery.
+      state.recordSuppression({
+        retailerId: p.retailerId, sku: p.sku, name: p.name, price: p.price,
+        seller: event._seller, source: src, type: event.type, watchlist: !!p._watchlist,
+      }).catch(() => {});
       return;
     }
 
@@ -986,6 +1034,49 @@ class DeliveryQueue {
    * and retries forever) — and is wrapped so it never throws back to the caller. Divergence goes in
    * the embed only; nothing here touches product.retailer or product.sku (the dedup base key).
    */
+  /**
+   * Tell a human when the seller gate suppresses a PRIORITY ASIN.
+   *
+   * Mirrors _escalateWatchlistDivergence deliberately: the identity gate has refused to silently
+   * drop a hand-picked ASIN since B0G8ZLSYWW, and the seller gate had no equivalent. That gap is
+   * how a genuine Amazon restock of B0H77VZBX4 disappeared on 2026-09-28, attributed to a
+   * marketplace seller from a different offer, leaving one info line in a log that keeps ten
+   * minutes.
+   *
+   * Self-contained try/catch. It is bookkeeping on the delivery path, and an exception here would
+   * skip markSent and retry the alert for ever.
+   */
+  async _escalateSellerSuppression(event) {
+    try {
+      const p = event.product || {};
+      const adminCh = channelsConfig?.adminChannel || config.discord.adminChannelId;
+      if (!adminCh) {
+        logger.warn(`Seller suppression on watchlist ${p.sku}: no admin channel to escalate to`);
+        return;
+      }
+      const s = (v, n) => String(v == null ? '' : v).slice(0, n) || '—';
+      const embed = new EmbedBuilder()
+        .setColor(0xff6600)
+        .setTitle('⚠️ WATCHLIST ALERT SUPPRESSED — third-party seller')
+        .setDescription('A priority ASIN restocked and was NOT sent to customers, because the '
+          + 'seller did not read as Amazon. If the seller below looks wrong, the read was wrong — '
+          + 'check the listing, because this is the shape that silently loses real restocks.')
+        .addFields(
+          { name: 'SKU', value: s(p.sku, 100), inline: true },
+          { name: 'Price', value: s(p.price, 40), inline: true },
+          { name: 'Event', value: s(event.type, 40), inline: true },
+          { name: 'Product', value: s(p.name, 1000) },
+          { name: 'Seller read', value: s(event._seller, 200), inline: true },
+          { name: 'Read from', value: s(event._sellerSource, 60), inline: true },
+          { name: 'Link', value: s(p.url || (p.sku ? `https://www.amazon.ca/dp/${p.sku}` : ''), 500) },
+        )
+        .setTimestamp();
+      await this.sendToChannel(adminCh, embed);
+    } catch (err) {
+      logger.warn(`Could not escalate seller suppression for ${event.product?.sku}: ${err.message}`);
+    }
+  }
+
   async _escalateWatchlistDivergence(event) {
     try {
       const p = event.product || {};

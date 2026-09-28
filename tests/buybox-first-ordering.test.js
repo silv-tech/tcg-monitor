@@ -85,7 +85,16 @@ describe('a throwing offers read cannot disarm the gate', () => {
 
 describe('precedence', () => {
   test('the buy box outranks the cached verdict', () => {
-    assert.match(SRC, /let seller = liveSeller \|\| \(sellerMustBeFresh \? null : cachedSeller\);/,
+    // Pinned as an ORDERING, not a literal expression. A third source was added — the
+    // detection-time buy-box seller carried off the payload that detected the restock — and the
+    // literal form failed on a change that preserves this guarantee entirely. A tripwire that
+    // fires on a correct change just teaches people to edit the tripwire.
+    const m = SRC.match(/let seller = ([^;]+);/);
+    assert.ok(m, 'the seller resolution expression must exist');
+    const iLive = m[1].indexOf('liveSeller');
+    const iCached = m[1].indexOf('cachedSeller');
+    assert.ok(iLive > -1 && iCached > -1, 'both sources must be consulted');
+    assert.ok(iLive < iCached,
       'reversing this lets a 30-day-old third-party verdict suppress a real Amazon restock');
   });
 

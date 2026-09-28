@@ -716,6 +716,55 @@ async function shutdown() {
   }
 }
 
+// ─── Suppression ledger ─────────────────────────────────────────
+/**
+ * A durable record of every alert the seller gate withheld.
+ *
+ * Until now a suppression was one `logger.info` and a `return`. The Railway log buffer keeps
+ * roughly ten minutes, so there was no way to answer "what did we withhold today?" or "how often
+ * does this fire?" — not for us, and not for the client paying for the alerts. That blind spot is
+ * why a real Amazon restock (B0H77VZBX4, 2026-09-28) went unnoticed until a competitor's channel
+ * was compared by hand.
+ *
+ * Capped and TTL'd: this is an audit trail, not a queue. Never throws — its callers are on the
+ * delivery path, where an exception skips markSent() and the alert retries for ever.
+ */
+const SUPPRESSION_KEY = 'tcg:suppressions';
+const SUPPRESSION_MAX = 500;
+const SUPPRESSION_TTL = 86400 * 14;
+
+async function recordSuppression(entry) {
+  try {
+    // NEVER call getRedis() here. It CREATES a client on first use, with an infinite retry
+    // strategy and enableOfflineQueue — so where no Redis exists the write queues for ever and
+    // the open socket keeps the process alive. That hung the whole test suite. An audit write is
+    // the last thing that should be able to do that, so it uses a connection that already exists
+    // and otherwise does nothing. In production everything else opens it within seconds of boot.
+    if (!redis) return false;
+    const row = JSON.stringify({ at: Date.now(), ...entry });
+    await redis.lpush(SUPPRESSION_KEY, row);
+    await redis.ltrim(SUPPRESSION_KEY, 0, SUPPRESSION_MAX - 1);
+    await redis.expire(SUPPRESSION_KEY, SUPPRESSION_TTL);
+    return true;
+  } catch (err) {
+    logger.debug(`recordSuppression failed: ${err.message}`);
+    return false;
+  }
+}
+
+/** Most recent first. Used by the admin endpoint so a human can audit what was withheld. */
+async function getSuppressions(limit = 100) {
+  try {
+    if (!redis) return [];   // same reason as recordSuppression above
+    const n = Math.max(1, Math.min(SUPPRESSION_MAX, Number(limit) || 100));
+    const rows = await redis.lrange(SUPPRESSION_KEY, 0, n - 1);
+    return rows.map(r => { try { return JSON.parse(r); } catch { return null; } }).filter(Boolean);
+  } catch (err) {
+    logger.debug(`getSuppressions failed: ${err.message}`);
+    return [];
+  }
+}
+
 module.exports = {
   getRedis,
   startCrossRetailerIndexRefresh,
@@ -751,6 +800,8 @@ module.exports = {
   getSellerCache,
   getSellerCacheAgeMs,
   cacheSellerInfo,
+  recordSuppression,
+  getSuppressions,
   getActiveCategories,
   setActiveCategories,
   getAllCategories,

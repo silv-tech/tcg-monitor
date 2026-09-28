@@ -31,7 +31,10 @@ const OLD = Date.now() - 60 * 60 * 1000; // 1h ago — beyond OFFERS_STALE_MS (1
 describe('pinned-offer stock rule', () => {
   test('buyable: pinned offer with a numeric price => in stock', () => {
     const d = adapter()._offersToData({ item: { name: 'ETB' }, listings: [{ price: 89.99, pinned_offer: true }] });
-    assert.deepStrictEqual(d, { name: 'ETB', price: 89.99, inStock: true, pricePinned: true });
+    // `seller` joined this shape when the lane stopped discarding the pinned offer's seller_name
+    // (B0H77VZBX4, 2026-09-28 — a real Amazon restock suppressed because delivery had to re-read
+    // it and lost). Null here because this fixture's listing carries no seller_name.
+    assert.deepStrictEqual(d, { name: 'ETB', price: 89.99, inStock: true, pricePinned: true, seller: null });
   });
   test('the marketplace trap: unpriced pinned + priced marketplace listings => OOS', () => {
     const d = adapter()._offersToData({ item: { name: 'ETB' }, listings: [{ price: undefined, pinned_offer: true }, { price: 128.98 }, { price: 119.89 }] });

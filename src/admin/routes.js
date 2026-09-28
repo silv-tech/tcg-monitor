@@ -93,6 +93,19 @@ router.post('/ingest/ebgames/image', express.raw({ limit: '8mb', type: '*/*' }),
   return res.json({ ok: true, bytes: req.body.length });
 });
 
+/**
+ * What the seller gate withheld.
+ *
+ * The client pays for Amazon-sold restocks, and this gate is the only thing that decides an alert
+ * never reaches them. Until this existed the decision left one log line in a buffer that keeps
+ * ~10 minutes, so "did we miss one?" was unanswerable by anyone. Now it is a list.
+ */
+router.get('/suppressions', async (req, res) => {
+  const rows = await state.getSuppressions(req.query.limit);
+  const watchlist = rows.filter(r => r.watchlist).length;
+  res.json({ ok: true, count: rows.length, watchlist, suppressions: rows });
+});
+
 // Health check
 router.get('/health', async (req, res) => {
   const health = await checkHealth();

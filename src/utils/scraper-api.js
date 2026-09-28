@@ -418,13 +418,24 @@ async function fetchAmazonOlidAndSeller(asin) {
       }
     }
 
-    // 3) If no pinned seller, grab first seller from offer list
-    if (!seller) {
-      const sellerMatches = [...html.matchAll(/aod-offer-soldBy[\s\S]*?<a[^>]*role="link"[^>]*>([^<]+)<\/a>/g)];
-      if (sellerMatches.length > 0) {
-        seller = sellerMatches[0][1].trim();
-      }
-    }
+    // 3) NO FALLBACK TO "THE FIRST SELLER ANYWHERE". Deleted deliberately; do not reinstate.
+    //
+    // This used to take the first matching seller out of the whole offer list when the pinned
+    // block gave nothing, turning a silence into a confident wrong answer about a DIFFERENT offer.
+    //
+    // It is unrecoverable, not merely inaccurate, because the regex above needs an
+    // `<a role="link">` seller-profile anchor — which only MARKETPLACE sellers render. Amazon's
+    // own offer is plain text. So "Amazon holds the buy box" and "no seller found" are the same
+    // input here, and this fallback resolved both to the name of some marketplace seller further
+    // down the list.
+    //
+    // Measured on B0H77VZBX4, 2026-09-28 01:59 UTC: a real Amazon restock of a PRIORITY watchlist
+    // ASIN at $27.99 was suppressed and attributed to "Eternal Emporium" — one of six offers, and
+    // not the one being sold. Logged as `(live read)`, so it read like the gate working.
+    //
+    // Returning null instead restores fail-open: isThirdPartySeller(null) is false, so an unknown
+    // seller now SENDS, which is the client's chosen policy for unknowns. A wrong send is visible
+    // and correctable; a wrong suppression is invisible and permanent.
 
     // Count total offers for logging
     const totalOlids = (html.match(/offerListingId\]\s*"\s*value="[^"]+"/g) || []).length;

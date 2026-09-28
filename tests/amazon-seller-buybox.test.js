@@ -207,9 +207,29 @@ describe('the gate uses the shared rule, not its own copy', () => {
     // the fact: the buy-box seller is chosen FIRST, so a stale third-party verdict never reaches
     // the decision at all. `liveSeller ||` is the whole guarantee — if that precedence is
     // reversed, a 30-day-old "ONE AT A TIME CANADA" starts suppressing real restocks again.
+    //
+    // Asserted as an ORDERING rather than as a literal expression. The literal form broke when a
+    // third source was added — the detection-time buy-box seller carried off the offers payload
+    // that detected the restock (see B0H77VZBX4, 2026-09-28) — even though that change preserves
+    // this guarantee completely. A tripwire that fires on a correct change teaches people to edit
+    // the tripwire, so it now pins what actually matters: live first, cache last.
     const src = require('fs').readFileSync(require.resolve('../src/discord/delivery'), 'utf8');
-    assert.match(src, /let seller = liveSeller \|\| \(sellerMustBeFresh \? null : cachedSeller\);/,
-      'the buy box must take precedence over the cached verdict');
+    const m = src.match(/let seller = ([^;]+);/);
+    assert.ok(m, 'the seller resolution expression must exist');
+    const expr = m[1];
+    const iLive = expr.indexOf('liveSeller');
+    const iCached = expr.indexOf('cachedSeller');
+    assert.ok(iLive > -1, 'liveSeller must be consulted');
+    assert.ok(iCached > -1, 'cachedSeller must still be the last resort');
+    assert.ok(iLive < iCached, 'the buy box must take precedence over the cached verdict');
+
+    // Any additional source must also outrank the cache — a detection-time read is evidence from
+    // the moment stock flipped, a cached verdict may be 30 days old.
+    const iDetect = expr.indexOf('detectionSeller');
+    if (iDetect > -1) {
+      assert.ok(iLive < iDetect, 'a live read still outranks the detection-time read');
+      assert.ok(iDetect < iCached, 'the detection-time read must outrank the cache');
+    }
   });
 
   test('the overrule is still logged when the buy box disagrees with the cache', () => {

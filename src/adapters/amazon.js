@@ -1210,7 +1210,24 @@ class AmazonAdapter extends BaseAdapter {
     // carries the cached price forward. When the priority lane finally read the pinned offer,
     // poll-adapter compared the good number against the bad one and published a -61% "price
     // drop" that never happened, on a product that had never been on sale.
-    return { name, price, inStock: price != null, pricePinned: price != null && !!flagged };
+    // THE SELLER COMES BACK IN THE SAME PAYLOAD — keep it.
+    //
+    // Dropping it cost a real restock. On 2026-09-28 this lane detected B0H77VZBX4 in stock at
+    // $27.99, held a payload whose pinned offer named its seller, discarded that name, and let
+    // delivery re-fetch the same endpoint ~1s later. That second read produced nothing, delivery
+    // fell through to the AOD scrape — which structurally cannot name Amazon — and the alert was
+    // suppressed against a marketplace seller from a different offer.
+    //
+    // Measured 2026-09-28 against the live endpoint: an Amazon-sold pinned offer returns
+    // `seller_name: "Amazon.ca"`. So this field is the authoritative answer, available for free at
+    // the exact moment stock flips, and the re-read only ever existed because it was thrown away.
+    //
+    // Scoped to the FLAGGED pinned offer only. `listings[0]` is "top offer" and may be any
+    // marketplace seller — the same trap already documented above for price provenance.
+    const seller = flagged && flagged.seller_name ? String(flagged.seller_name).trim() : null;
+    return {
+      name, price, inStock: price != null, pricePinned: price != null && !!flagged, seller,
+    };
   }
 
   /**
@@ -1432,6 +1449,11 @@ class AmazonAdapter extends BaseAdapter {
       url: cached.url || `https://www.amazon.ca/dp/${target}`,
       lastSeen: now,
       _watchlist: true,
+      // The buy-box seller AT THE MOMENT STOCK FLIPPED, carried so delivery never has to re-read
+      // it and lose the race that suppressed B0H77VZBX4. Only ever set from the FLAGGED pinned
+      // offer; null means "we did not learn one", never "third party".
+      _buyBoxSeller: data.seller || cached._buyBoxSeller || null,
+      _buyBoxSellerAt: data.seller ? now : cached._buyBoxSellerAt,
     };
     products[target] = product;
     this._knownProducts.set(target, product);
