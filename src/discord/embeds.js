@@ -269,6 +269,31 @@ function buildAlertEmbed(event, tier) {
         { name: 'One Click Checkout', value: `[ATCx1](${atcBase}1) | [ATCx2](${atcBase}2)`, inline: false },
         { name: 'One Click Checkout', value: `[ATCx3](${atcBase}3) | [ATCx12](${atcBase}12)`, inline: false },
       );
+
+      // The SAME links, pinned to the offer this alert actually fired on.
+      //
+      // The links above carry only the ASIN, so Amazon adds whatever is sitting in the buy box
+      // at the moment someone CLICKS — which can be a different seller entirely from the one
+      // that triggered the alert. That is the seller gate ("sold by Amazon only") defeated one
+      // layer further out: this adapter spends real effort proving the pinned offer is Amazon's
+      // before it sends, and then hands over a link that does not name that offer. A scalper who
+      // takes the buy box in the seconds between alert and click gets the sale.
+      //
+      // Added ALONGSIDE rather than replacing, because the two fail in opposite directions and
+      // both failures are worth having available: a stale OLID hard-errors on Amazon's side,
+      // while a bare ASIN silently falls back to the buy box. A human wants the fallback; an
+      // automated buyer wants the precision.
+      //
+      // Percent-encoded for the reason spelled out on the Offer Id field above — an OLID is
+      // base64 and a raw `+` decodes to a space, resolving a DIFFERENT offer.
+      if (offerId) {
+        const pinned = `https://www.amazon.ca/gp/aws/cart/add.html?OfferListingId.1=${encodeURIComponent(offerId)}&Quantity.1=`;
+        embed.addFields({
+          name: 'One Click Checkout (this offer)',
+          value: `[ATCx1](${pinned}1) | [ATCx2](${pinned}2) | [ATCx3](${pinned}3)`,
+          inline: false,
+        });
+      }
     } else if (product._variantId && product.url) {
       try {
         const origin = new URL(product.url).origin;
