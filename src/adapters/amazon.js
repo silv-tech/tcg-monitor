@@ -2320,6 +2320,30 @@ class AmazonAdapter extends BaseAdapter {
     this._priorityTick = (this._priorityTick || 0) + 1;
     const toSighted = !bridgeDown && this._priorityTick % 4 === 0;
 
+    // DIVIDE THE WORK WITH THE BRIDGE INSTEAD OF DUPLICATING IT.
+    //
+    // Both lanes were chasing the same blind ASINs, so the hottest product got two fast checks
+    // and the rest got none. Measured 2026-09-28: B0H77VZBX4 restocked three times in 72 minutes
+    // in windows under 65s, and the fix is to narrow the BRIDGE onto the hot few — which leaves
+    // the remaining blind ASINs with nothing unless this lane picks them up.
+    //
+    // So prefer blind ASINs the bridge has NOT just read. `_bridgeCheckedAt` is written on every
+    // bridge attempt, so this tracks whatever the extension is actually covering right now — the
+    // operator can change `ASINs per cycle` and the split re-balances with no server change and
+    // nothing to keep in sync. If the bridge is down, `bridgeDown` above has already given this
+    // lane the whole blind set anyway.
+    const BRIDGE_FRESH_MS = 90 * 1000;
+    if (!bridgeDown && !toSighted) {
+      const uncovered = blind.filter(a => (now - (this._bridgeCheckedAt.get(a) || 0)) > BRIDGE_FRESH_MS);
+      // Only when SOME are uncovered. If the bridge is reading them all, there is nothing to
+      // divide and this lane goes back to plain rotation rather than idling.
+      if (uncovered.length > 0) {
+        const t = uncovered[this._blindCursor % uncovered.length];
+        this._blindCursor = ((this._blindCursor || 0) + 1) % uncovered.length;
+        return t;
+      }
+    }
+
     if (toSighted) {
       const t = sighted[this._sightedCursor % sighted.length];
       this._sightedCursor = ((this._sightedCursor || 0) + 1) % sighted.length;

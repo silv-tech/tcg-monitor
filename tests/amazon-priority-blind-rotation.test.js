@@ -120,3 +120,55 @@ describe('the measured effect on B0H77VZBX4', () => {
       `expected ~192s per blind ASIN, got ${Math.round(seconds)}s`);
   });
 });
+
+describe('the paid lane covers what the bridge is NOT covering', () => {
+  // Both lanes used to chase the same blind ASINs. Once the bridge is narrowed onto the two or
+  // three that actually restock — the fix for the sub-65s windows measured on 2026-09-28 — the
+  // remaining blind ASINs have no cover at all unless this lane takes them.
+
+  const fresh = (a, asins, agoMs = 0) =>
+    asins.forEach(x => a._bridgeCheckedAt.set(x, Date.now() - agoMs));
+
+  test('an ASIN the bridge just read is skipped in favour of one it did not', () => {
+    const a = adapter({ bridgeAgeMs: 1000 });
+    fresh(a, ['BL1', 'BL2']);              // the narrowed bridge batch
+    const seq = run(a, 12).filter(x => x.startsWith('BL'));
+    assert.ok(seq.length > 0, 'the lane must still be doing blind work');
+    assert.ok(!seq.includes('BL1') && !seq.includes('BL2'),
+      'bridge-covered ASINs must not also eat paid slots');
+    assert.ok(seq.includes('BL3'), 'the uncovered ones must be picked up');
+  });
+
+  test('a STALE bridge read is not treated as cover', () => {
+    // 90s is the cutoff. Older than that and the bridge is no longer keeping it fresh.
+    const a = adapter({ bridgeAgeMs: 1000 });
+    fresh(a, ['BL1'], 5 * 60 * 1000);
+    const seq = run(a, 40);
+    assert.ok(seq.includes('BL1'), 'a five-minute-old bridge read covers nothing');
+  });
+
+  test('if the bridge covers EVERYTHING, the lane still rotates rather than idling', () => {
+    // Nothing to divide. Doing nothing here would waste the budget entirely.
+    const a = adapter({ bridgeAgeMs: 1000 });
+    fresh(a, BLIND);
+    const seq = run(a, 20);
+    assert.ok(seq.filter(x => x.startsWith('BL')).length > 0,
+      'full bridge coverage must not silence the paid lane');
+  });
+
+  test('BRIDGE DOWN still overrides the split entirely', () => {
+    // The emergency path wins: fresh bridge reads are meaningless once it has stopped pushing.
+    const a = adapter({ bridgeAgeMs: 10 * 60 * 1000 });
+    fresh(a, ['BL1', 'BL2']);
+    const seq = run(a, 20);
+    assert.ok(seq.every(x => x.startsWith('BL')), 'all slots to blind when the bridge is down');
+    assert.ok(seq.includes('BL1'), 'including the ones the dead bridge last touched');
+  });
+
+  test('sighted ASINs still get their slot', () => {
+    const a = adapter({ bridgeAgeMs: 1000 });
+    fresh(a, ['BL1', 'BL2']);
+    const seq = run(a, 40);
+    assert.ok(seq.some(x => x.startsWith('S')), 'the 1-in-4 sighted tick must survive the split');
+  });
+});
