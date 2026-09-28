@@ -23,6 +23,7 @@ const alertLimiter = require('./alert-limiter');
 const { HIGH_VALUE_TYPES } = require('./alert-limiter');
 const { recordAlertLatency } = require('../core/proxy');
 const state = require('../core/state');
+const checkoutFeed = require('../core/checkout-feed');
 const { getRestockHistory, findCrossRetailerMatches, getLastCheck, getPriceHistory, getOfferListingId, cacheOfferListingId, getSellerCache, getSellerCacheAgeMs, cacheSellerInfo } = state;
 
 // A cached seller verdict younger than this is trusted rather than re-read. Set ABOVE
@@ -737,6 +738,48 @@ class DeliveryQueue {
         seller: event._seller, source: src, type: event.type, watchlist: !!p._watchlist,
       }).catch(() => {});
       return;
+    }
+
+    /**
+     * AUTO-CHECKOUT TRIGGER.
+     *
+     * Published HERE and nowhere earlier, deliberately. Everything above has already run: the
+     * identity gate (so we are not buying a dart board listed under a Pokemon name), the no-stock
+     * check, and the third-party seller gate. Publishing before any of those would hand the
+     * extension a trigger this file was in the middle of deciding to suppress — and an alert
+     * costs an apology while a purchase costs money.
+     *
+     * FIRE AND FORGET, AND IT CANNOT THROW. Its caller chain reaches processQueue, where an
+     * exception skips markSent(event) and the alert is then retried for ever. That failure mode
+     * is already documented twice in this file and has been paid for once. publish() is written
+     * to swallow everything, and this try/catch is the second layer.
+     *
+     * RESTOCK only. A price drop on something already in stock is a human decision; an auto-buyer
+     * firing on PRICE_CHANGE would buy things nobody was waiting for.
+     */
+    if (!event._scanTier && event.type === 'RESTOCK' && event.product?.inStock) {
+      try {
+        const p = event.product;
+        const isAmazon = p.retailerId === 'amazon';
+        if (isAmazon && p.sku) {
+          checkoutFeed.publish({
+            asin: p.sku,
+            // Alert-time OLID first: resolved closest to the moment of truth, and the only thing
+            // that pins the buy to the offer this alert fired on.
+            offerId: event._offerListingId || p._offerId || null,
+            price: p.price,
+            title: p.name,
+            seller: event._seller || null,
+            // "Confirmed Amazon", not "was allowed to send". The alert path deliberately fails
+            // OPEN on an unknown seller; spending money on one is a different decision, and the
+            // extension is given the fact rather than the verdict so it can refuse on its own.
+            sellerVerified: !!event._seller && !event._thirdPartySeller,
+            url: p.url,
+          });
+        }
+      } catch (err) {
+        logger.warn(`checkout trigger not published: ${err.message}`);
+      }
     }
 
     const { product } = event;

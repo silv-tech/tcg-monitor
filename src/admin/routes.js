@@ -12,6 +12,7 @@ const delivery = require('../discord/delivery');
 const { runScan } = require('../core/scan');
 const { getBudgetStatus } = require('../utils/scraper-api');
 const imageFetch = require('../utils/image-fetch');
+const checkoutFeed = require('../core/checkout-feed');
 
 const router = express.Router();
 
@@ -147,6 +148,90 @@ router.post('/ingest/ebgames/image', express.raw({ limit: '8mb', type: '*/*' }),
   logger.debug(`EB Games: cached image ${req.body.length}b for ${src.slice(0, 60)}`);
   return res.json({ ok: true, bytes: req.body.length });
 });
+
+/**
+ * Auto-checkout — the live trigger feed.
+ *
+ * The extension holds this open and is answered the instant an Amazon restock is dispatched.
+ * It is the latency path for the whole auto-buy feature, so it does as little as possible.
+ *
+ * A GET on purpose, and not only out of habit: the write limiter is 30 requests/minute/IP, and a
+ * client that reconnects every 25s all day must not spend that budget — the results endpoint
+ * needs it.
+ *
+ * `since` is the client's cursor. Passing the cursor from the previous response is what makes a
+ * reconnect lossless; passing 0 replays whatever is still in the buffer. The response always
+ * carries the current cursor, including on an empty timeout, so a client that was away longer
+ * than the buffer still resynchronises instead of silently refetching old triggers for ever.
+ */
+router.get('/checkout/next', async (req, res) => {
+  const since = Number(req.query.since) || 0;
+  const waitMs = Number(req.query.wait) || 25000;
+
+  // If the client disconnects mid-park (tab closed, worker evicted, laptop slept), release the
+  // waiter rather than leaving a timer and a dead response object behind for 25 seconds.
+  let done = false;
+  const finish = (body) => {
+    if (done) return;
+    done = true;
+    res.json(body);
+  };
+  req.on('close', () => { done = true; });
+
+  try {
+    const { cursor, items } = await checkoutFeed.wait(since, waitMs);
+    if (items.length > 0) {
+      logger.info(`Checkout feed: delivered ${items.length} trigger(s) `
+        + `(${items.map(i => i.asin).join(', ')}) cursor=${cursor}`);
+    }
+    return finish({ ok: true, cursor, items });
+  } catch (err) {
+    logger.warn(`Checkout feed: wait failed: ${err.message}`);
+    return finish({ ok: false, cursor: since, items: [], error: err.message });
+  }
+});
+
+/**
+ * Auto-checkout — what the extension did about it.
+ *
+ * Purely a log. Nothing here feeds back into monitoring or delivery: a checkout outcome must
+ * never be able to change stock state, or a failed purchase would start rewriting the catalogue.
+ *
+ * The outcome vocabulary is closed so the log stays greppable, and anything unrecognised is
+ * recorded as `other` rather than rejected — losing the record of a real purchase because its
+ * status string was unexpected would be the worse failure.
+ */
+const CHECKOUT_OUTCOMES = new Set([
+  'ordered', 'submitted', 'ready_for_review', 'skipped', 'out_of_stock',
+  'price_too_high', 'wrong_identity', 'unverified_seller', 'blocked', 'failed',
+]);
+
+router.post('/checkout/result', express.json({ limit: '64kb' }), (req, res) => {
+  const b = req.body || {};
+  const asin = typeof b.asin === 'string' ? b.asin.trim().slice(0, 20) : '';
+  if (!asin) return res.status(400).json({ error: 'asin is required' });
+
+  const outcome = CHECKOUT_OUTCOMES.has(b.outcome) ? b.outcome : 'other';
+  const detail = typeof b.detail === 'string' ? b.detail.slice(0, 300) : '';
+  const price = Number.isFinite(b.price) ? b.price : null;
+  const ms = Number.isFinite(b.elapsedMs) ? Math.round(b.elapsedMs) : null;
+  const version = req.get('x-aco-version') || '?';
+
+  const line = `Checkout v${version}: ${asin} — ${outcome}`
+    + `${price != null ? ` @ $${price}` : ''}`
+    + `${ms != null ? ` in ${ms}ms` : ''}`
+    + `${detail ? ` — ${detail}` : ''}`;
+
+  // An actual purchase is the one thing here worth waking someone up for.
+  if (outcome === 'ordered') logger.warn(`ORDER PLACED — ${line}`);
+  else if (outcome === 'failed' || outcome === 'blocked') logger.warn(line);
+  else logger.info(line);
+
+  return res.json({ ok: true });
+});
+
+/** Auto-checkout — feed health, for the extension's status line and for debugging latency. */
+router.get('/checkout/stats', (req, res) => res.json({ ok: true, ...checkoutFeed.stats() }));
 
 /**
  * What the seller gate withheld.

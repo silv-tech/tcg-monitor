@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "TCG Monitor — Amazon checkout",
+  "version": "0.1.0",
+  "description": "Buys a watched Amazon.ca product the moment the monitor reports it back in stock.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "tabs", "scripting", "alarms", "sidePanel"],
+  "host_permissions": [
+    "https://www.amazon.ca/*",
+    "https://amazon.ca/*",
+    "https://www.nocturnemonitors.com/*",
+    "https://*.up.railway.app/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "TCG Monitor — Amazon checkout" }
+}
