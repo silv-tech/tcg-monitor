@@ -167,3 +167,73 @@ describe('parseBuyboxSlice', () => {
     assert.strictEqual(d._canBuy, false);
   });
 });
+
+describe('#availability can be a SCRIPT block — measured on live OOS pages 2026-09-28', () => {
+  // B0H77VZBX4 and B0G3CV6Z9D, fetched from a real amazon.ca session: with no buy box, Amazon
+  // reuses id="availability" for a script, so .text() returned
+  //   P.when("A", "load").execute("aod-assets-loaded", function(A){ function logAssets...
+  // The literal string below is that shape. Neither page had #outOfStock either, so the ONLY
+  // honest out-of-stock signal on them is the absent price.
+  const AOD_SCRIPT = '<div id="availability"><script type="text/javascript">'
+    + 'P.when("A", "load").execute("aod-assets-loaded", function(A){ function logAssets(){} });'
+    + '</script></div>';
+
+  test('a script-only availability is not mistaken for stock text', () => {
+    const d = parseBuyboxSlice('<span id="productTitle">Pokemon TCG</span>' + AOD_SCRIPT);
+    assert.strictEqual(d.inStock, false, 'no price block means out of stock');
+    assert.strictEqual(d.price, null);
+  });
+
+  test('THE DANGEROUS CASE: a price block on an unavailable listing still gets vetoed', () => {
+    // This is why the veto has to survive a script blob. Amazon does render a price on some
+    // unavailable listings; if the availability text is JavaScript the veto silently never fires
+    // and we alert on a product nobody can buy.
+    const d = parseBuyboxSlice(
+      '<span id="productTitle">Pokemon TCG</span>'
+      + '<div id="corePrice_feature_div"><span class="a-offscreen">$27.99</span></div>'
+      + '<div id="availability"><script>P.when("A").execute("aod-assets-loaded");</script>'
+      + '<span>Currently unavailable.</span></div>'
+    );
+    assert.strictEqual(d.inStock, false, 'the real text must still be found past the script');
+  });
+
+  test('the script text itself can never satisfy the veto either way', () => {
+    // Guard against "fixing" this by loosening UNAVAILABLE until JS happens to match it.
+    const d = parseBuyboxSlice(
+      '<span id="productTitle">Pokemon TCG</span>'
+      + '<div id="corePrice_feature_div"><span class="a-offscreen">$34.99</span></div>'
+      + AOD_SCRIPT
+      + '<div id="add-to-cart-button" data-tcg-present="1"></div>'
+    );
+    assert.strictEqual(d.inStock, true, 'a priced, buyable listing is in stock');
+    assert.strictEqual(d.pricePinned, true);
+  });
+
+  test('the real in-stock shape from B0BZJWNBRZ parses correctly', () => {
+    // Measured the same run: $34.99, "Only 2 left in stock.", cart and buy-now both present.
+    const d = parseBuyboxSlice(
+      '<input type="hidden" id="ASIN" value="B0BZJWNBRZ">'
+      + '<span id="productTitle">Pokemon Ampharos ex/Lucario ex Battle Deck</span>'
+      + '<div id="corePrice_feature_div"><span class="a-offscreen">$34.99</span></div>'
+      + '<div id="availability"><span>Only 2 left in stock.</span></div>'
+      + '<div id="add-to-cart-button" data-tcg-present="1"></div>'
+      + '<div id="buy-now-button" data-tcg-present="1"></div>'
+    );
+    assert.strictEqual(d.inStock, true);
+    assert.strictEqual(d.price, 34.99);
+    assert.strictEqual(d.pricePinned, true, 'cart present => the price is authoritative');
+    assert.strictEqual(d.asin, 'B0BZJWNBRZ');
+    assert.strictEqual(d.name, 'Pokemon Ampharos ex/Lucario ex Battle Deck');
+  });
+
+  test('"Only N left in stock" is never read as unavailable', () => {
+    // It contains "in stock" but the UNAVAILABLE regex looks for "out of stock" — pinning that
+    // these do not collide, since a low-stock restock is the exact case the client cares about.
+    const d = parseBuyboxSlice(
+      '<span id="productTitle">P</span>'
+      + '<div id="corePrice_feature_div"><span class="a-offscreen">$9.99</span></div>'
+      + '<div id="availability"><span>Only 2 left in stock.</span></div>'
+    );
+    assert.strictEqual(d.inStock, true);
+  });
+});

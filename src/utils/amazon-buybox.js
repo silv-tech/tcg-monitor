@@ -121,7 +121,15 @@ function parseBuyboxSlice(slice) {
     if (price != null) break;
   }
 
-  const availabilityText = $('#availability').first().text().replace(/\s+/g, ' ').trim();
+  // MEASURED 2026-09-28 on live OOS pages (B0H77VZBX4, B0G3CV6Z9D): when a listing has no buy
+  // box, Amazon reuses `id="availability"` for a SCRIPT block, so `.text()` returns JavaScript
+  // source — `P.when("A", "load").execute("aod-assets-loaded", ...)` — not "Currently
+  // unavailable". Left alone that silently kills the veto below: JS never matches UNAVAILABLE, so
+  // an unavailable listing that still renders a price block reads as IN STOCK and alerts. Those
+  // two ASINs were safe only because they had no price block either, which is luck, not logic.
+  const availabilityEl = $('#availability').first().clone();
+  availabilityEl.find('script, style').remove();
+  const availabilityText = availabilityEl.text().replace(/\s+/g, ' ').trim();
   const unavailable = $('#outOfStock').length > 0 || UNAVAILABLE.test(availabilityText);
   const canBuy = $('#add-to-cart-button').length > 0 || $('#buy-now-button').length > 0;
 
