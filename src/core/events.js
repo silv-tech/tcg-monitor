@@ -49,8 +49,18 @@ function detectEvents(oldProduct, newProduct) {
     return events;
   }
 
-  // Restock
-  if (!oldProduct.inStock && newProduct.inStock) {
+  // Restock.
+  //
+  // `_restockAfterDip` is the second way in, and it exists because the first one silently lost a
+  // real restock. poll-adapter holds an unconfirmed sell-out by keeping the row IN STOCK until a
+  // second read agrees — so a hand-picked ASIN that sells out and returns inside that window never
+  // transitions here, and never alerts. Measured 2026-09-28 on B0H2JVZYZZ: we read it in stock
+  // eight seconds BEFORE the competitor alerted and still sent nothing, because the stored row had
+  // never been allowed to say out of stock.
+  //
+  // The flag is set only on a watchlist row, only when a dip was actually observed, and is cleared
+  // the same poll it fires — so it cannot re-raise on the next one.
+  if ((!oldProduct.inStock || newProduct._restockAfterDip) && newProduct.inStock) {
     events.push({
       type: EVENT_TYPES.RESTOCK,
       product: newProduct,
