@@ -185,6 +185,12 @@ router.get('/health', async (req, res) => {
       status: !last ? 'never' : (Date.now() - last < BRIDGE_STALE_MS ? 'ok' : 'stale'),
       lastPushAt: last || null,
       ageSeconds: last ? Math.round((Date.now() - last) / 1000) : null,
+      // How many ASINs the free search-tile lane cannot see. This is the number the bridge's
+      // whole cadence argument rests on, and it used to live only inside a sort comparator — so a
+      // leftover half-batch cap throttled blind coverage with nothing to show it. If
+      // `blindPriority` ever approaches the extension's batch size, the batch is no longer
+      // covering the blind set in one cycle and the cadence claim is stale.
+      ...(typeof amazon.getBridgeBlindCounts === 'function' ? amazon.getBridgeBlindCounts() : {}),
     };
   }
 

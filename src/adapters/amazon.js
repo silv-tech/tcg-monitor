@@ -2209,16 +2209,64 @@ class AmazonAdapter extends BaseAdapter {
     // instead of drifting out of date. With ~8 blind ASINs a batch covers them in one cycle:
     // 8 x ~2.85s + 20s ≈ 43s per ASIN, at concurrency 1, for zero credits.
     const byStaleness = (a, b) => a.checkedAt - b.checkedAt;
-    hot.sort((a, b) => (b.blind - a.blind) || byStaleness(a, b));
     rest.sort(byStaleness);
 
-    // Half, rounded up, so a batch of 1 still reaches the priority set at all.
-    const take = hot.slice(0, Math.min(hot.length, Math.ceil(n / 2)));
+    // BLIND PRIORITY IS UNCAPPED. The half-batch cap below predates blind-first and, left over
+    // it, silently reintroduced the bug: with n=12 the priority set got 6 slots, so if more than
+    // 6 priority ASINs are blind the surplus fell to a SLOWER rotation than the sighted ones —
+    // and the blind set is the only reason this lane exists. Capping it means the cadence quietly
+    // depends on a number nobody is watching.
+    //
+    // Uncapping is safe because the blind set is self-limiting: an ASIN is blind only while the
+    // free search-tile lane cannot see it, and the moment a tile reports stock it drops out of
+    // this group on the very next poll. It cannot grow to swallow the batch the way an uncapped
+    // *priority* list could.
+    const blindHot = hot.filter(i => i.blind).sort(byStaleness);
+    const sightedHot = hot.filter(i => !i.blind).sort(byStaleness);
+
+    const take = blindHot.slice(0, n);
+    let room = n - take.length;
+
+    // Of whatever is LEFT, sighted priority keeps its half (rounded up, so a batch of 1 still
+    // reaches the priority set at all) and the tail gets the other half — the original cap's
+    // bargain, now applied only to the part of the batch the blind set did not claim. Priority
+    // still outranks the tail: the client pays for those ASINs, and a blind TAIL row must not
+    // displace a priority one.
+    const sightedShare = Math.ceil(room / 2);
+    const sighted = sightedHot.slice(0, sightedShare);
+    room -= sighted.length;
+    const tail = rest.slice(0, room);
+
     // Backfill from whichever side has spare rows, so a short list on either side never returns
-    // an under-full batch and waste a cycle.
-    return take.concat(rest.slice(0, n - take.length))
-      .concat(hot.slice(take.length))
+    // an under-full batch and wastes a cycle.
+    return take
+      .concat(sighted)
+      .concat(tail)
+      .concat(sightedHot.slice(sighted.length))
+      .concat(rest.slice(tail.length))
       .slice(0, n);
+  }
+
+  /**
+   * How many tracked ASINs the free search-tile lane currently cannot see.
+   *
+   * This is the number the whole bridge design turns on, and until now it existed only inside one
+   * sort comparator — so a cap that throttled blind coverage was invisible from outside. Surfaced
+   * on /api/health so the cadence can be checked against reality instead of against a comment.
+   */
+  getBridgeBlindCounts() {
+    // Same scope rule and same blindness test as getBridgeBatch, so this can never report a set
+    // the batch does not actually use.
+    const priority = new Set(this._priorityAsins);
+    let blindPriority = 0;
+    let blindTotal = 0;
+    for (const [asin, product] of this._knownProducts) {
+      if (product && product.name && !isInScopeName(product.name)) continue;
+      if (product && !product._stockUnobserved) continue;
+      blindTotal++;
+      if (priority.has(asin)) blindPriority++;
+    }
+    return { blindPriority, blindTotal, priorityTotal: priority.size };
   }
 
   /**

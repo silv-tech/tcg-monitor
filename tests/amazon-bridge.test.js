@@ -185,6 +185,44 @@ describe('getBridgeBatch', () => {
     assert.strictEqual(a._bridgeCheckedAt.has('B0NOTTRACK'), false);
   });
 
+  test('MORE blind priority ASINs than half the batch — all still covered', () => {
+    // The regression this pins. A leftover `Math.ceil(n / 2)` cap gave the priority set 6 of 12
+    // slots, so a 7th blind priority ASIN fell to a SLOWER rotation than sighted ones — in the
+    // one lane that exists specifically to cover blind ASINs. Caught live 2026-09-28 by reading
+    // the production queue, not by a test, which is why this one exists.
+    const blind = Array.from({ length: 9 }, (_, i) => `B0BLIND${String(i).padStart(4, '0')}`);
+    const a = adapter({ priorityAsins: blind });
+    blind.forEach(x => known(a, x, { _stockUnobserved: true }));
+    for (let i = 0; i < 40; i++) known(a, `B0TAIL${String(i).padStart(5, '0')}`);
+
+    const batch = a.getBridgeBatch(12).map(i => i.asin);
+    for (const x of blind) {
+      assert.ok(batch.includes(x), `${x} is blind and priority — it must be in every batch`);
+    }
+  });
+
+  test('the tail is still not starved', () => {
+    // Uncapping blind must not resurrect the problem the cap was written for.
+    const blind = ['B0BLIND0001', 'B0BLIND0002'];
+    const a = adapter({ priorityAsins: blind });
+    blind.forEach(x => known(a, x, { _stockUnobserved: true }));
+    for (let i = 0; i < 40; i++) known(a, `B0TAIL${String(i).padStart(5, '0')}`);
+    const batch = a.getBridgeBatch(12).map(i => i.asin);
+    assert.ok(batch.filter(x => x.startsWith('B0TAIL')).length >= 5,
+      'the catalogue must still advance while only 2 ASINs are blind');
+  });
+
+  test('blind counts are reportable, and match what the batch uses', () => {
+    const a = adapter({ priorityAsins: ['B0BLIND0001', 'B0SIGHTED1'] });
+    known(a, 'B0BLIND0001', { _stockUnobserved: true });
+    known(a, 'B0SIGHTED1', { inStock: true });
+    known(a, 'B0TAILBLND', { _stockUnobserved: true });
+    const c = a.getBridgeBlindCounts();
+    assert.strictEqual(c.blindPriority, 1);
+    assert.strictEqual(c.blindTotal, 2);
+    assert.strictEqual(c.priorityTotal, 2);
+  });
+
   test('BLIND ASINs come first — this is the whole point of the bridge', () => {
     // Measured in production 2026-09-28: of 24 priority ASINs, 16 are visible to the free
     // search-tile lane and already detected in ~6s. The other 8 are invisible — Amazon drops an
