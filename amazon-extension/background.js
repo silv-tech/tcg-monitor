@@ -19,10 +19,20 @@
 const DEFAULTS = {
   baseUrl: '',
   apiKey: '',
-  batchSize: 12,      // ASINs requested per cycle
-  concurrency: 1,     // simultaneous fetches. Start at one. See the README.
-  gapMs: 900,         // base pause between reads inside a batch (jittered up to 2x in page.js)
-  cycleDelaySec: 20,  // pause between cycles
+  // MEASURED 2026-09-28. The first live run used 12 / 900ms / 20s, which is one fetch every ~5.0s
+  // sustained (154 fetches in 764s). Amazon served a captcha after ~13 minutes and the bridge
+  // backed off for 60. That trade is far worse than it looks: 13 minutes on and 60 off is 18%
+  // uptime, so a 68s cadence becomes an EFFECTIVE ~378s — barely better than the 432s paid lane
+  // this whole lane exists to beat. A slower bridge that never blocks beats a fast one that does.
+  //
+  // These defaults target ~1 fetch per 15s, a third of the rate that was refused, giving a ~118s
+  // cycle. Batch is 8 rather than 12 because only the BLIND ASINs need this lane at all — the
+  // rest are already read by the free search-tile lane in ~6s, so those four slots were buying
+  // nothing and spending the request budget that got us blocked.
+  batchSize: 8,       // the blind set; observed blindPriority was 8 of 24
+  concurrency: 1,     // simultaneous fetches. Keep at one — see the README.
+  gapMs: 3500,        // base pause between reads inside a batch (jittered up to 2x in page.js)
+  cycleDelaySec: 60,  // pause between cycles
   enabled: false,     // OFF until configured — deliberately
 };
 
@@ -181,6 +191,17 @@ async function watchdog() {
   // and the documented cold start (an empty work queue) makes content.js sleep 60s, so the first
   // push could never land. Enabling the bridge now stamps lastPushAt, so this measures silence
   // since we started, not silence since the epoch.
+  // Nothing has EVER pushed in this browser session. `Date.now() - 0` is ~56 years, so the old
+  // line both fired the restart and printed "no push for 1790604555s" — an epoch timestamp
+  // wearing the costume of an age. Observed live 2026-09-28 at 14:09:15: it destructively
+  // re-navigated the tab one minute after start and killed the first in-flight batch. The comment
+  // above already claimed enabling stamped this value; nothing did. Seed it here instead, so the
+  // watchdog measures silence since the worker woke rather than silence since 1970.
+  if (!lastPushAt) {
+    await chrome.storage.local.set({ lastPushAt: Date.now() });
+    return;
+  }
+
   if (Date.now() - lastPushAt > limit) {
     record({ note: `no push for ${Math.round((Date.now() - lastPushAt) / 1000)}s — restarting the tab` });
     await ensureTab(true);
