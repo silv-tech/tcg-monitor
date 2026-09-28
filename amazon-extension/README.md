@@ -56,21 +56,42 @@ than the Pokemon Center bridge on every axis, on purpose.
 ### What the defaults actually cost
 
 At 12 per cycle, 1 concurrent, a 900ms base gap (jittered to ~1.35s average) and a 20s pause
-between cycles, one cycle is about **54 seconds** — assuming ~1.5s to fetch a 400KB-1.5MB page,
-which is the one number here that has **not** been measured.
+between cycles, one cycle is about **35 seconds** — the slice dropped from ~134KB to ~4.2KB per
+product on 2026-09-28, which took the per-page fetch down with it.
 
-The priority set takes at most **half** of each batch, so with the current 10 priority ASINs:
+### The batch goes to the BLIND ASINs first
+
+This is the whole point, and it is easy to get wrong. Of the 24 priority ASINs, **16 are already
+visible to the free search-tile lane and we detect those in ~6s — faster than the competitor.**
+Re-reading them in the browser buys nothing. The other **8 are invisible**: Amazon drops an ASIN
+from `/s` when it has no offer, which is exactly the state a restock comes *out* of, so those are
+covered only by the paid round-robin at **432s per ASIN** (24 ASINs x 18s effective; the observed
+gap in live logs was 433s). Every missed alert came from that set.
+
+So `getBridgeBatch` sorts **blind first**, then priority, then staleness:
 
 | set | cadence |
 |---|---|
-| the 10 priority ASINs | re-read roughly every **90s**, free — against 180s on the paid lane |
+| the ~8 blind priority ASINs | every **~43s**, free — against 432s on the paid lane |
+| the other 16 priority ASINs | already ~6s via the free search-tile lane |
 | the remaining ~770 | a full pass in roughly **2 hours** |
 
-That half-and-half split is deliberate and is enforced in `getBridgeBatch`. Uncapped
-priority-first looks obviously right and quietly starves the catalogue: 10 priority ASINs in a
-batch of 12 leaves two slots, so the other ~770 advance two at a time — a six-hour pass. The tail
-is not uncovered in the meantime; the free ASIN-search sweep still runs and reaches ~96.5% of
-tracked ASINs. The bridge is what reaches the rest, and what makes every price authoritative.
+Blindness is read per-poll from `_stockUnobserved` (and from a missing row), **not** configured.
+That matters: which ASINs are invisible changes as listings come and go, and a hardcoded list
+would be wrong within days without anything failing loudly.
+
+An earlier version capped priority at **half** the batch to stop the catalogue starving. That cap
+produced ~220s per priority ASIN at 24 ASINs — it was arithmetic for the 10 ASINs we had when it
+was written. Blind-first fixes it without needing the cap, because the blind set is small: the
+tail still advances every cycle, and it is not uncovered in the meantime either — the free ASIN
+search sweep reaches ~96.5% of tracked ASINs. The bridge is what reaches the rest, and what makes
+every price authoritative.
+
+### Why a fast free trigger is safe
+
+`delivery.js` runs a paid verify on **every** RESTOCK before it alerts. The bridge is a trigger,
+not a verdict: the "sold by Amazon" gate downstream is unchanged, and confirmation costs 5 credits
+per *alert* (~250/day), not per poll.
 
 ## How it works
 
