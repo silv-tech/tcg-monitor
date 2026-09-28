@@ -64,6 +64,12 @@ async function cycle() {
   const work = await send({ type: 'amz-work' });
   if (!work) { await sleep(ERROR_BACKOFF_MS); return cycle(); }          // worker asleep or reloading
   if (!work.enabled) { await sleep(60000); return cycle(); }
+  // The worker refuses work while a challenge backoff is live, and it owns that deadline because
+  // it survives this page being torn down. Honour it rather than re-deriving it here.
+  if (work.blockedFor > 0) {
+    await sleep(Math.min(work.blockedFor, 5 * 60 * 1000));
+    return cycle();
+  }
   if (!work.items || work.items.length === 0) { await sleep(60000); return cycle(); }
 
   const { records, blocked, misses, summary } = await readInPage(
@@ -73,8 +79,15 @@ async function cycle() {
   if (records && records.length > 0) await send({ type: 'amz-results', records });
 
   if (blocked) {
-    await send({ type: 'amz-note', text: `blocked (${blocked}) — pausing ${CHALLENGE_BACKOFF_MS / 60000}min` });
-    await sleep(CHALLENGE_BACKOFF_MS);
+    // `blockedForMs` is what makes this survive a reload: the worker writes a deadline to storage
+    // and then refuses work until it passes. The local sleep is now only a courtesy so this page
+    // does not spin; it is no longer what enforces the pause.
+    await send({
+      type: 'amz-note',
+      text: `blocked (${blocked}) — pausing ${CHALLENGE_BACKOFF_MS / 60000}min`,
+      blockedForMs: CHALLENGE_BACKOFF_MS,
+    });
+    await sleep(Math.min(CHALLENGE_BACKOFF_MS, 5 * 60 * 1000));
     return cycle();
   }
   if (misses > 0 && (!records || records.length === 0)) {

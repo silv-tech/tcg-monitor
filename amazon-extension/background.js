@@ -118,6 +118,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const c = await cfg();
       if (!c.enabled) return sendResponse({ items: [], enabled: false });
+
+      // A CHALLENGE BACKOFF MUST OUTLIVE THE PAGE THAT EARNED IT.
+      //
+      // It used to be an in-memory `await sleep()` inside content.js, so reloading the extension,
+      // restarting the bridge tab or an MV3 worker eviction all silently erased it. Observed live
+      // 2026-09-28: Amazon served a captcha at 14:22:46, the user reloaded the extension to pick
+      // up new settings, and the bridge was fetching again SEVEN minutes later instead of sixty —
+      // straight back at a site that had just challenged it, which is how a soft challenge earns
+      // a hard one. The deadline lives in storage now, and the worker refuses work until it
+      // passes, so the pause survives everything short of clearing extension data.
+      const { blockedUntil = 0 } = await chrome.storage.local.get({ blockedUntil: 0 });
+      const waitMs = blockedUntil - Date.now();
+      if (waitMs > 0) {
+        return sendResponse({
+          items: [], enabled: true, blockedFor: waitMs,
+          concurrency: c.concurrency, cycleDelaySec: c.cycleDelaySec, gapMs: c.gapMs,
+        });
+      }
+
       const work = await fetchWork();
       sendResponse({
         ...work, enabled: true,
@@ -132,6 +151,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg && msg.type === 'amz-note') {
     record({ note: msg.text });
+    // A block is the one note that carries state. Persist the deadline HERE rather than trusting
+    // the content script to sleep it off — see the note in the amz-work handler.
+    if (msg.blockedForMs > 0) {
+      chrome.storage.local.set({ blockedUntil: Date.now() + msg.blockedForMs });
+    }
     sendResponse({ ok: true });
     return true;
   }
