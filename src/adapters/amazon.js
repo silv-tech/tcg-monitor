@@ -107,6 +107,12 @@ const ASIN_BATCH_SIZE = Number(process.env.AMAZON_ASIN_BATCH_SIZE) || 20;      /
 // ASINs per FREE priority /s request. Sized to the /s result grid (~40 items) rather than to
 // ASIN_BATCH_SIZE, which paces the paid sweep: the priority list must fit in ONE request so no
 // ASIN loses freshness, and asking for more ASINs than the grid returns cannot work anyway.
+// How long the browser bridge may be silent before the paid lane assumes it is not covering the
+// blind set. Deliberately short: a cycle is ~119s, so two missed cycles means something is wrong,
+// and the cost of being wrong is only that the paid lane spends its EXISTING budget entirely on
+// blind ASINs for a while. Being late to notice, by contrast, is how a restock is missed.
+const BRIDGE_ASSUMED_DOWN_MS = 4 * 60 * 1000;
+
 const PRIORITY_FREE_BATCH = Number(process.env.AMAZON_PRIORITY_FREE_BATCH) || 40;
 const ASIN_BATCHES_PER_POLL = Number(process.env.AMAZON_ASIN_BATCHES_PER_POLL) || 1; // +N /s req/poll
 
@@ -243,6 +249,9 @@ class AmazonAdapter extends BaseAdapter {
     this._priorityAsins = (config.priorityAsins || []).map(String);
     this._priorityOffersIntervalMs = (config.timing && config.timing.priorityOffersIntervalMs) || 18000;
     this._priorityCursor = 0;   // round-robin position over _priorityAsins (PAID offers lane)
+    this._priorityTick = 0;     // ticks of the paid lane, for the blind/sighted weighting
+    this._blindCursor = 0;      // rotation over the ASINs the free tile lane cannot see
+    this._sightedCursor = 0;    // rotation over the ones it can
     this._priorityFreeCursor = 0; // chunk position for the FREE /s lane; one chunk unless >40 ASINs
     this._lastPriorityOffersAt = 0;
     this._priorityOffersDay = null; // YYYY-MM-DD window for the priority lane's own daily cap
@@ -1378,8 +1387,7 @@ class AmazonAdapter extends BaseAdapter {
       return;
     }
 
-    const target = this._priorityAsins[this._priorityCursor % this._priorityAsins.length];
-    this._priorityCursor = (this._priorityCursor + 1) % this._priorityAsins.length;
+    const target = this._nextPriorityTarget(now);
     if (!target) return;
 
     this._lastPriorityOffersAt = now;
@@ -2245,6 +2253,64 @@ class AmazonAdapter extends BaseAdapter {
       .concat(sightedHot.slice(sighted.length))
       .concat(rest.slice(tail.length))
       .slice(0, n);
+  }
+
+  /**
+   * Which priority ASIN the PAID lane checks next.
+   *
+   * It used to be a flat round-robin over all of them, and that is what cost us B0H77VZBX4 at
+   * 14:25 on 2026-09-28: 24 ASINs x 18s is 432s per ASIN, so a restock that lasted minutes fell
+   * between two checks. The competitor alerted; we did not.
+   *
+   * But 16 of those 24 are SIGHTED — the free search-tile lane reads them every ~6s — so a paid
+   * slot spent on one buys almost no latency. It buys freshness of seller and price, which
+   * matters, just not every 432s. The 8 BLIND ones are the only ASINs where a paid poll is the
+   * difference between catching a restock and missing it, because nothing else can see them.
+   *
+   * Weighting 3 ticks in 4 to the blind set takes them from 432s to ~192s at IDENTICAL credit
+   * cost — the lane fires just as often, it just stops re-reading what we already know. Sighted
+   * ASINs still come round every ~19 minutes, which is ample for price and seller drift.
+   *
+   * When the browser bridge is DOWN the blind set has no other cover at all, so the lane gives
+   * them everything: 8 x 18s = ~144s. That is the guarantee that a captcha can no longer open a
+   * hole — the exact hole the 14:25 restock fell through.
+   */
+  _nextPriorityTarget(now = Date.now()) {
+    const all = this._priorityAsins;
+    if (!all || all.length === 0) return null;
+
+    const blind = [];
+    const sighted = [];
+    for (const asin of all) {
+      const p = this._knownProducts.get(asin);
+      (!p || p._stockUnobserved ? blind : sighted).push(asin);
+    }
+
+    // Nothing is blind (or everything is): the split has nothing to say, so behave exactly as the
+    // flat rotation did. This is also the path every existing test exercises.
+    if (blind.length === 0 || sighted.length === 0) {
+      const t = all[this._priorityCursor % all.length];
+      this._priorityCursor = (this._priorityCursor + 1) % all.length;
+      return t;
+    }
+
+    // The bridge is the blind set's only other cover. Treat "no push recently" as down rather
+    // than asking whether it is *blocked*: an evicted worker, a closed laptop and a captcha all
+    // leave the same hole, and only the silence is observable from here.
+    const bridgeDown = !this._lastBridgePushAt
+      || (now - this._lastBridgePushAt) > BRIDGE_ASSUMED_DOWN_MS;
+
+    this._priorityTick = (this._priorityTick || 0) + 1;
+    const toSighted = !bridgeDown && this._priorityTick % 4 === 0;
+
+    if (toSighted) {
+      const t = sighted[this._sightedCursor % sighted.length];
+      this._sightedCursor = ((this._sightedCursor || 0) + 1) % sighted.length;
+      return t;
+    }
+    const t = blind[this._blindCursor % blind.length];
+    this._blindCursor = ((this._blindCursor || 0) + 1) % blind.length;
+    return t;
   }
 
   /**
