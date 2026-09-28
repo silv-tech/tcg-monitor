@@ -16,6 +16,11 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert');
 
+// Arming is now EXPLICIT: `decide` requires `armedGlobally === true` rather than merely "not
+// false", because a failed config read yields `{}` and the kill switch must not fail open. Every
+// test that is not about the kill switch therefore has to arm on purpose — which is the contract.
+const ARMED_ON = { armedGlobally: true };
+
 const g = require('../amazon-aco-extension/guards');
 
 const TRIGGER = { asin: 'B0TESTASIN', offerId: 'OLID123', price: 86.03, sellerVerified: true, at: Date.now() };
@@ -23,7 +28,7 @@ const ARMED = { asin: 'B0TESTASIN', quantity: 1, maxPrice: 100 };
 
 describe('decide', () => {
   test('a clean trigger on an armed item buys', () => {
-    assert.deepStrictEqual(g.decide(TRIGGER, ARMED), { buy: true, reason: 'ok' });
+    assert.deepStrictEqual(g.decide(TRIGGER, ARMED, ARMED_ON), { buy: true, reason: 'ok' });
   });
 
   test('the kill switch outranks a perfectly good trigger', () => {
@@ -33,16 +38,16 @@ describe('decide', () => {
   });
 
   test('a different ASIN never buys', () => {
-    assert.strictEqual(g.decide({ ...TRIGGER, asin: 'B0OTHER0000' }, ARMED).buy, false);
+    assert.strictEqual(g.decide({ ...TRIGGER, asin: 'B0OTHER0000' }, ARMED, ARMED_ON).buy, false);
   });
 
   test('ASIN matching ignores case and whitespace but nothing else', () => {
-    assert.strictEqual(g.decide({ ...TRIGGER, asin: ' b0testasin ' }, ARMED).buy, true);
-    assert.strictEqual(g.decide({ ...TRIGGER, asin: 'B0TESTASI' }, ARMED).buy, false, 'a prefix is not a match');
+    assert.strictEqual(g.decide({ ...TRIGGER, asin: ' b0testasin ' }, ARMED, ARMED_ON).buy, true);
+    assert.strictEqual(g.decide({ ...TRIGGER, asin: 'B0TESTASI' }, ARMED, ARMED_ON).buy, false, 'a prefix is not a match');
   });
 
   test('a stale trigger never buys', () => {
-    const d = g.decide({ ...TRIGGER, at: Date.now() - 5 * 60 * 1000 }, ARMED);
+    const d = g.decide({ ...TRIGGER, at: Date.now() - 5 * 60 * 1000 }, ARMED, ARMED_ON);
     assert.strictEqual(d.buy, false);
     assert.match(d.reason, /stale/);
   });
@@ -51,55 +56,55 @@ describe('decide', () => {
     // Treating an unreadable `at` as "not stale" removes the only thing standing between the
     // server's whole replay buffer and the card.
     for (const bad of [undefined, null, 'yesterday', NaN, {}]) {
-      const d = g.decide({ ...TRIGGER, at: bad }, ARMED);
+      const d = g.decide({ ...TRIGGER, at: bad }, ARMED, ARMED_ON);
       assert.strictEqual(d.buy, false, `at=${JSON.stringify(bad)} must refuse`);
       assert.match(d.reason, /timestamp/);
     }
   });
 
   test('an UNVERIFIED seller refuses by default', () => {
-    const d = g.decide({ ...TRIGGER, sellerVerified: false }, ARMED);
+    const d = g.decide({ ...TRIGGER, sellerVerified: false }, ARMED, ARMED_ON);
     assert.strictEqual(d.buy, false);
     assert.strictEqual(d.reason, 'seller not verified');
   });
 
   test('an unverified seller CAN be opted into, per item', () => {
     assert.strictEqual(
-      g.decide({ ...TRIGGER, sellerVerified: false }, { ...ARMED, allowUnverifiedSeller: true }).buy, true);
+      g.decide({ ...TRIGGER, sellerVerified: false }, { ...ARMED, allowUnverifiedSeller: true }, ARMED_ON).buy, true);
   });
 
   test('sellerVerified must be exactly true — no truthy strings', () => {
-    assert.strictEqual(g.decide({ ...TRIGGER, sellerVerified: 'yes' }, ARMED).buy, false);
-    assert.strictEqual(g.decide({ ...TRIGGER, sellerVerified: 1 }, ARMED).buy, false);
+    assert.strictEqual(g.decide({ ...TRIGGER, sellerVerified: 'yes' }, ARMED, ARMED_ON).buy, false);
+    assert.strictEqual(g.decide({ ...TRIGGER, sellerVerified: 1 }, ARMED, ARMED_ON).buy, false);
   });
 
   test('NO max price is an open chequebook — refuse', () => {
     for (const bad of [undefined, null, 0, -5, 'lots', NaN]) {
-      assert.strictEqual(g.decide(TRIGGER, { ...ARMED, maxPrice: bad }).buy, false, `maxPrice ${bad}`);
+      assert.strictEqual(g.decide(TRIGGER, { ...ARMED, maxPrice: bad }, ARMED_ON).buy, false, `maxPrice ${bad}`);
     }
   });
 
   test('over the ceiling never buys — the scalper relist case', () => {
-    const d = g.decide({ ...TRIGGER, price: 400 }, ARMED);
+    const d = g.decide({ ...TRIGGER, price: 400 }, ARMED, ARMED_ON);
     assert.strictEqual(d.buy, false);
     assert.match(d.reason, /over max/);
   });
 
   test('exactly at the ceiling buys', () => {
-    assert.strictEqual(g.decide({ ...TRIGGER, price: 100 }, ARMED).buy, true);
+    assert.strictEqual(g.decide({ ...TRIGGER, price: 100 }, ARMED, ARMED_ON).buy, true);
   });
 
   test('a MISSING price refuses — absence is not permission', () => {
     for (const bad of [undefined, null, 0, -1, 'free']) {
-      assert.strictEqual(g.decide({ ...TRIGGER, price: bad }, ARMED).buy, false, `price ${bad}`);
+      assert.strictEqual(g.decide({ ...TRIGGER, price: bad }, ARMED, ARMED_ON).buy, false, `price ${bad}`);
     }
   });
 
   test('garbage in never buys and never throws', () => {
     for (const bad of [null, undefined, 'x', 42, [], {}]) {
-      assert.doesNotThrow(() => g.decide(bad, ARMED));
-      assert.strictEqual(g.decide(bad, ARMED).buy, false);
-      assert.strictEqual(g.decide(TRIGGER, bad).buy, false);
+      assert.doesNotThrow(() => g.decide(bad, ARMED, ARMED_ON));
+      assert.strictEqual(g.decide(bad, ARMED, ARMED_ON).buy, false);
+      assert.strictEqual(g.decide(TRIGGER, bad, ARMED_ON).buy, false);
     }
   });
 });
@@ -260,5 +265,45 @@ describe('challenge detection', () => {
   test('Amazon\'s own out-of-stock landing is recognised', () => {
     assert.strictEqual(g.isOutOfStockUrl('https://www.amazon.ca/checkout/entry/oos?asin=x'), true);
     assert.strictEqual(g.isOutOfStockUrl('https://www.amazon.ca/checkout/p/123/spc'), false);
+  });
+});
+
+describe('the guards fail CLOSED when their own inputs are malformed', () => {
+  // This file's stated contract is that every ambiguous case resolves to "don't buy". These pin
+  // the two places where a malformed INPUT — rather than a malformed trigger — used to slip past.
+
+  test('an ABSENT global arm is not consent', () => {
+    // A config read that fails yields `{}`, leaving armedGlobally undefined. The old check was
+    // `=== false`, so undefined waved a purchase straight through. Every other test in this file
+    // had to be changed to arm on purpose, which is how far the fail-open reached.
+    assert.strictEqual(g.decide(TRIGGER, ARMED, {}).buy, false, 'undefined must not buy');
+    assert.strictEqual(g.decide(TRIGGER, ARMED).buy, false, 'no opts at all must not buy');
+    assert.strictEqual(g.decide(TRIGGER, ARMED, { armedGlobally: 'yes' }).buy, false,
+      'a truthy non-true value is a config bug, not an arm');
+    assert.strictEqual(g.decide(TRIGGER, ARMED, { armedGlobally: 1 }).buy, false);
+    assert.strictEqual(g.decide(TRIGGER, ARMED, ARMED_ON).buy, true, 'explicit true still buys');
+  });
+
+  test('verifyCheckoutPage refuses when the intent carries no ceiling', () => {
+    // The last-moment guard used to skip its ENTIRE price check when maxPrice was NaN — strongest
+    // when its input was sound, absent when it was not, which is backwards.
+    const page = { asin: 'B0TESTASIN', lineItemCount: 1, price: 41.99 };
+    for (const bad of [undefined, null, NaN, 0, -5, 'abc']) {
+      const v = g.verifyCheckoutPage(page, { asin: 'B0TESTASIN', maxPrice: bad, offerPinned: true });
+      assert.strictEqual(v.ok, false, `maxPrice=${String(bad)} must refuse`);
+    }
+    const good = g.verifyCheckoutPage(page, { asin: 'B0TESTASIN', maxPrice: 59.99, offerPinned: true });
+    assert.strictEqual(good.ok, true, 'a real ceiling still passes');
+  });
+
+  test('an unreadable total still refuses when the offer is not pinned', () => {
+    // Unchanged behaviour, pinned here because the refactor moved the branch it lives in.
+    const page = { asin: 'B0TESTASIN', lineItemCount: 1, price: null };
+    assert.strictEqual(
+      g.verifyCheckoutPage(page, { asin: 'B0TESTASIN', maxPrice: 59.99, offerPinned: false }).ok,
+      false);
+    assert.strictEqual(
+      g.verifyCheckoutPage(page, { asin: 'B0TESTASIN', maxPrice: 59.99, offerPinned: true }).ok,
+      true, 'a pinned offer determines the total even when we cannot read it');
   });
 });

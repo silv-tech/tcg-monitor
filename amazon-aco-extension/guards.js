@@ -26,7 +26,11 @@ function decide(trigger, armed, opts = {}) {
 
   // The kill switch outranks everything, including a perfectly good trigger. It is the control a
   // human reaches for when something is visibly going wrong, so nothing may override it.
-  if (opts.armedGlobally === false) return { buy: false, reason: 'disarmed' };
+  // EXPLICITLY true, not "merely not false". A config read that fails and yields `{}` leaves
+  // `armedGlobally` undefined, and `=== false` would wave that straight through to a purchase —
+  // the kill switch failing open is the one failure this file cannot have. Arming is a thing a
+  // human does on purpose; absence of that is not consent.
+  if (opts.armedGlobally !== true) return { buy: false, reason: 'disarmed' };
 
   if (!trigger || typeof trigger !== 'object') return { buy: false, reason: 'no trigger' };
   if (!armed || typeof armed !== 'object') return { buy: false, reason: 'not armed' };
@@ -199,9 +203,17 @@ function verifyCheckoutPage(page, intent) {
    * held that offer's price against the ceiling. Without a pinned offer there is nothing
    * determining what is being charged, so it refuses.
    */
+  // A MISSING CEILING REFUSES. `decide()` already demands one, so reaching here without it means
+  // something upstream is malformed — and this function is described as the last moment a mistake
+  // is free. An earlier shape skipped the whole price check when `max` was NaN, which made the
+  // final guard silently strongest when its input was sound and absent when it was not.
   const max = Number(intent.maxPrice);
+  if (!Number.isFinite(max) || max <= 0) {
+    return { ok: false, reason: 'no usable max price on the intent' };
+  }
+
   const price = Number(page.price);
-  if (Number.isFinite(max)) {
+  {
     // `price > 0`, not just finite: Number(null) is 0, which is finite and would take this
     // branch and then compare 0 against the ceiling — passing every unreadable page.
     if (Number.isFinite(price) && price > 0) {

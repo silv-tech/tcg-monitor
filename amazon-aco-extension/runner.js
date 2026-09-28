@@ -126,6 +126,37 @@
    * to: a POST whose action path ends in `/place-order`. That is how the competitor's shipping
    * build finds it, and it is the only approach that survives their markup churn.
    */
+  /**
+   * What this page ACTUALLY contains, for when a read fails.
+   *
+   * The whole checkout read hangs on selectors that have never been run against a live Amazon
+   * checkout — nobody on this project can load one to check. "checkout never rendered its line
+   * items" is a true statement that identifies nothing, and it is what the operator would have
+   * been left holding after the first real run.
+   *
+   * The browser bridge learned this the expensive way: reporting WHICH selectors matched turns a
+   * guessing game into one line that names the broken selector. Same trick here. Counts only —
+   * never page text, because a checkout page carries an address and an order total.
+   */
+  function probe() {
+    const counts = {};
+    const SEEN = {
+      lineitem: '.lineitem-container',
+      dpLinks: 'a[href*="/dp/"]',
+      dataAsin: '[data-asin]',
+      submits: 'input[type="submit"], button[type="submit"]',
+      forms: 'form',
+      gridForm: 'form[action*="place-order"]',
+      priceCells: '#subtotals-marketplace-table td, [class*="grand-total"], .a-color-price',
+    };
+    for (const [k, sel] of Object.entries(SEEN)) {
+      try { counts[k] = document.querySelectorAll(sel).length; } catch { counts[k] = -1; }
+    }
+    const present = Object.entries(counts).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${k}=${n}`);
+    return present.length ? present.join(' ') : 'none of the known selectors matched';
+  }
+
   function findPlaceOrder() {
     for (const el of document.querySelectorAll('input[type="submit"], button[type="submit"]')) {
       const form = el.form;
@@ -154,7 +185,7 @@
       return { outcome: 'blocked', detail: 'challenge — needs a human' };
     }
     if (state !== 'spc') {
-      return { outcome: 'failed', detail: `not the checkout page (${state})` };
+      return { outcome: 'failed', detail: `not the checkout page (${state}) [${probe()}]` };
     }
 
     try {
@@ -165,7 +196,9 @@
 
     // Wait for Amazon's own content. Deliberately NOT satisfied by anything we put in the URL.
     const rendered = await until(() => readCheckoutAsins() || findPlaceOrder());
-    if (!rendered) return { outcome: 'failed', detail: 'checkout never rendered its line items' };
+    if (!rendered) {
+      return { outcome: 'failed', detail: `checkout never rendered its line items [${probe()}]` };
+    }
 
     const asins = readCheckoutAsins();
     const page = {
