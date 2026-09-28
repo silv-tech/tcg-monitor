@@ -2229,7 +2229,24 @@ class AmazonAdapter extends BaseAdapter {
     // free search-tile lane cannot see it, and the moment a tile reports stock it drops out of
     // this group on the very next poll. It cannot grow to swallow the batch the way an uncapped
     // *priority* list could.
-    const blindHot = hot.filter(i => i.blind).sort(byStaleness);
+    // HOTTEST FIRST inside the blind set.
+    //
+    // Measured 2026-09-28: B0H77VZBX4 restocked at 14:25:09, 15:29:47 and 15:37:39 — three times
+    // in 72 minutes — and each window lasted UNDER 65 SECONDS (the 15:37 restock was gone by the
+    // 15:38:44 paid check). No lane running at 119s can catch that; it can straddle the whole
+    // window, which is exactly what happened twice.
+    //
+    // The bridge's real constraint is REQUESTS PER SECOND, not ASINs: Amazon challenged us at one
+    // fetch per 5.0s, and the safe rate is about one per 15s. Spreading that across 8 ASINs buys
+    // 119s each. Spending it on the 2-3 that actually restock buys ~25-37s each, at identical
+    // traffic. So the batch is ordered by how recently an ASIN was last seen IN STOCK, and the
+    // operator narrows `ASINs per cycle` to concentrate the same budget on them.
+    //
+    // `_lastInStockAt` is the right signal because it is evidence, not configuration: an ASIN that
+    // restocks often rises on its own and a dead one sinks, with nothing to maintain.
+    const hotness = (i) => this._lastInStockAt.get(i.asin) || 0;
+    const blindHot = hot.filter(i => i.blind)
+      .sort((a, b) => (hotness(b) - hotness(a)) || byStaleness(a, b));
     const sightedHot = hot.filter(i => !i.blind).sort(byStaleness);
 
     const take = blindHot.slice(0, n);

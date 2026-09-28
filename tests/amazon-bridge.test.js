@@ -223,6 +223,51 @@ describe('getBridgeBatch', () => {
     assert.strictEqual(c.priorityTotal, 2);
   });
 
+  test('the HOTTEST blind ASIN leads the batch', () => {
+    // Measured 2026-09-28: B0H77VZBX4 restocked three times in 72 minutes and every window was
+    // under 65 seconds. At 8 ASINs the bridge runs at 119s and can straddle a whole window — it
+    // did, twice. The fix is not more traffic (Amazon challenged us at 1 fetch/5.0s) but the same
+    // traffic spent on the ASINs that actually restock, so a narrowed batch must take those.
+    const a = adapter({ priorityAsins: ['B0COLD00001', 'B0HOT000001', 'B0WARM00001'] });
+    ['B0COLD00001', 'B0HOT000001', 'B0WARM00001'].forEach(x => known(a, x, { _stockUnobserved: true }));
+    a._lastInStockAt.set('B0HOT000001', Date.now());
+    a._lastInStockAt.set('B0WARM00001', Date.now() - 60 * 60 * 1000);
+    // B0COLD00001 has never been seen in stock at all.
+    assert.deepStrictEqual(
+      a.getBridgeBatch(3).map(i => i.asin),
+      ['B0HOT000001', 'B0WARM00001', 'B0COLD00001'],
+    );
+  });
+
+  test('a NARROW batch still takes the hot ASIN, not an arbitrary one', () => {
+    // The whole point: with `ASINs per cycle` cut to 2, the two that restock must be the two read.
+    const a = adapter({ priorityAsins: ['B0A00000001', 'B0B00000002', 'B0HOT000001', 'B0HOT000002'] });
+    ['B0A00000001', 'B0B00000002', 'B0HOT000001', 'B0HOT000002']
+      .forEach(x => known(a, x, { _stockUnobserved: true }));
+    a._lastInStockAt.set('B0HOT000001', Date.now());
+    a._lastInStockAt.set('B0HOT000002', Date.now() - 1000);
+    const batch = a.getBridgeBatch(2).map(i => i.asin);
+    assert.deepStrictEqual(batch, ['B0HOT000001', 'B0HOT000002']);
+  });
+
+  test('hotness never outranks BLINDNESS', () => {
+    // A sighted ASIN that restocks constantly is already read every ~6s by the free tile lane.
+    // Letting its heat pull it ahead of a blind one would undo the reason this lane exists.
+    const a = adapter({ priorityAsins: ['B0SIGHTHOT1', 'B0BLINDCOLD'] });
+    known(a, 'B0SIGHTHOT1', { inStock: true });
+    known(a, 'B0BLINDCOLD', { _stockUnobserved: true });
+    a._lastInStockAt.set('B0SIGHTHOT1', Date.now());
+    assert.strictEqual(a.getBridgeBatch(4)[0].asin, 'B0BLINDCOLD');
+  });
+
+  test('ASINs never seen in stock still get read, just last', () => {
+    // A brand-new watchlist ASIN has no history. It must not be starved out by hot ones.
+    const a = adapter({ priorityAsins: ['B0NEVERSEEN', 'B0HOT000001'] });
+    ['B0NEVERSEEN', 'B0HOT000001'].forEach(x => known(a, x, { _stockUnobserved: true }));
+    a._lastInStockAt.set('B0HOT000001', Date.now());
+    assert.ok(a.getBridgeBatch(4).map(i => i.asin).includes('B0NEVERSEEN'));
+  });
+
   test('BLIND ASINs come first — this is the whole point of the bridge', () => {
     // Measured in production 2026-09-28: of 24 priority ASINs, 16 are visible to the free
     // search-tile lane and already detected in ~6s. The other 8 are invisible — Amazon drops an
