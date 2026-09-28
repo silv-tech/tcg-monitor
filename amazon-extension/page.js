@@ -33,16 +33,35 @@
    * tests live. Re-deriving "in stock" in here would be a second copy of the rule that Amazon's
    * layout changes could silently drift out of step with.
    */
+  //
+  // MEASURED against live amazon.ca pages on 2026-09-28, not guessed. The first draft of this
+  // list was written blind and would have failed on the very first run:
+  //
+  //   selector                              bytes    .a-offscreen[0]
+  //   #corePrice_feature_div                 2,537    "$21.31"   <- correct
+  //   #corePriceDisplay_desktop_feature_div 17,919    ""         <- empty AND fat
+  //   #apex_desktop                         86,037    ""         <- empty AND enormous
+  //   #offer-display-features               26,741    -          <- fat, nothing we read
+  //
+  // Those three cost ~131KB per product and yield NOTHING. At 12 products a batch that is a
+  // 1.6MB POST against a 100KB global body limit (admin/server.js) — every push would have been
+  // rejected 413, and because a failed push never advances `_bridgeCheckedAt`, the same 12 ASINs
+  // would be re-read for ever: maximum traffic on the user's IP, zero data. Dropping them takes
+  // the slice to ~4.2KB and the batch to ~50KB, comfortably inside the limit, with no server
+  // change at all.
+  //
+  // `#ASIN` is added because it is Amazon's OWN statement of what this page sells, in 62 bytes.
+  // `/dp/` redirects for merged and variant ASINs, so without it a slice for one product can be
+  // filed under another — and the ingest side can only check that an ASIN is *tracked*, not that
+  // it is the right one.
   const SLICE = [
+    '#ASIN',
     '#productTitle',
     '#corePrice_feature_div',
-    '#corePriceDisplay_desktop_feature_div',
-    '#apex_desktop',
     '#availability',
     '#outOfStock',
     '#merchant-info',
     '#sellerProfileTriggerId',
-    '#offer-display-features',
     '#add-to-cart-button',
     '#buy-now-button',
   ];
@@ -105,14 +124,28 @@
   function looksBlocked(html, res) {
     if (res && (res.status === 503 || res.status === 429)) return true;
     if (!html) return true;
-    if (html.length >= 100000) return false;
-    return /validateCaptcha|images-amazon\.com\/captcha|Enter the characters you see below|not a robot/i.test(html);
+    if (html.length < 100000) {
+      return /validateCaptcha|images-amazon\.com\/captcha|Enter the characters you see below|not a robot/i.test(html);
+    }
+    // A BIG body with no product title is a block, not a miss.
+    //
+    // Returning false here meant any interstitial served at 100KB+ became a `miss`, which backs
+    // off for 2 MINUTES and — because a miss never advances `_bridgeCheckedAt` — re-reads the
+    // same ASINs for ever. A soft challenge would have become a hot loop against the exact
+    // retailer we are trying not to annoy. A real product page always carries #productTitle.
+    return !/id="productTitle"/.test(html);
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function readOne(item) {
-    const res = await fetch(item.url, { credentials: 'include', redirect: 'follow' });
+    // referrerPolicy is NOT cosmetic. The bridge tab sits on `amazon.ca/?tcgbridge=1`, and a
+    // same-origin fetch sends the FULL referrer by default — so every read would carry
+    // `Referer: https://www.amazon.ca/?tcgbridge=1`, a unique string binding thousands of daily
+    // requests into one obviously-automated cluster. 'origin' sends just the host.
+    const res = await fetch(item.url, {
+      credentials: 'include', redirect: 'follow', referrerPolicy: 'origin',
+    });
     const html = await res.text();
     if (looksBlocked(html, res)) {
       return { blocked: res.status === 503 || res.status === 429 ? `HTTP ${res.status}` : `captcha (${html.length}b)` };
@@ -165,7 +198,10 @@
   }
 
   // Exported for tests only. A content script has no `module`, so the guard below runs instead.
-  if (typeof module !== 'undefined') { module.exports = { extractSlice, looksBlocked, probe, SLICE }; return; }
+  // Test-only export. Guarded on the ABSENCE OF A DOM, not on `module` — this file runs in the
+  // page's MAIN world, where any Amazon bundle that leaves `window.module` defined would make it
+  // export and return without ever registering its listener, silently and non-deterministically.
+  if (typeof window === 'undefined') { module.exports = { extractSlice, looksBlocked, probe, SLICE }; return; }
 
   // Inert outside the dedicated bridge tab — the user shops on this site.
   if (new URLSearchParams(location.search).get('tcgbridge') !== '1') return;

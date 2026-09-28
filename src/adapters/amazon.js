@@ -2188,12 +2188,28 @@ class AmazonAdapter extends BaseAdapter {
         asin,
         url: `https://www.amazon.ca/dp/${asin}`,
         checkedAt: this._bridgeCheckedAt.get(asin) || 0,
+        // 1 when the free search-tile lane cannot see this ASIN's stock — either it reported
+        // nothing usable (`_stockUnobserved`) or there is no row at all. These are the ones the
+        // bridge exists for.
+        blind: (!product || product._stockUnobserved) ? 1 : 0,
       };
       (priority.has(asin) ? hot : rest).push(item);
     }
 
+    // BLIND FIRST. This is the whole point of the bridge.
+    //
+    // Measured 2026-09-28: of 24 priority ASINs, 16 are visible to the free search-tile lane and
+    // already detected in ~6s — faster than the competitor. The other 8 are invisible, because
+    // Amazon drops an ASIN from /s when it has no offer, and those are covered ONLY by the paid
+    // round-robin at ~432s. That is where every missed alert came from: they alerted 38 times on
+    // B0H77VZBX4 in a day and we caught 4.
+    //
+    // So the bridge reads what the free lane CANNOT, not simply "the priority list". Blindness is
+    // read per-poll from `_stockUnobserved` rather than configured, so the set follows reality
+    // instead of drifting out of date. With ~8 blind ASINs a batch covers them in one cycle:
+    // 8 x ~2.85s + 20s ≈ 43s per ASIN, at concurrency 1, for zero credits.
     const byStaleness = (a, b) => a.checkedAt - b.checkedAt;
-    hot.sort(byStaleness);
+    hot.sort((a, b) => (b.blind - a.blind) || byStaleness(a, b));
     rest.sort(byStaleness);
 
     // Half, rounded up, so a batch of 1 still reaches the priority set at all.
@@ -2306,10 +2322,30 @@ class AmazonAdapter extends BaseAdapter {
       // cannot inject a product no scope rule has ever seen.
       if (!this._knownProducts.has(asin)) { rejected++; continue; }
 
+      // HEAD-OF-LINE BLOCKING. Stamp the attempt BEFORE it can fail. `getBridgeBatch` orders by
+      // staleness, and previously only a successful parse advanced the clock — so an ASIN that
+      // can never be read (deleted listing, permanent redirect, a slice the parser rejects) stayed
+      // the stalest row forever and was re-picked every single batch. Three such ASINs halve the
+      // cadence for everything else, which is exactly the latency this bridge exists to remove.
+      // An unreadable ASIN now costs one slot per cycle, not a slot in every cycle.
+      this._bridgeCheckedAt.set(asin, now);
+
       const data = parseBuyboxSlice(slice);
       // A slice with no title is INCONCLUSIVE — we did not really read the page. That must never
       // become an out-of-stock write; the row is left exactly as it was.
       if (!data) { rejected++; continue; }
+
+      // The page must agree about which product it is. Amazon answers a dead /dp/ with a REDIRECT
+      // to a different ASIN rather than a 404, so a tab pointed at a delisted product returns a
+      // perfectly valid buy box belonging to something else. Without this check that slice is
+      // written under the requested ASIN and can raise a real alert for a product that never
+      // restocked. `null` means the page carried no `#ASIN` — inconclusive, not a mismatch, so
+      // it is allowed through on the same fail-open reasoning as a missing seller.
+      if (data.asin && data.asin !== asin) {
+        logger.warn(`Amazon: bridge — REJECT ${asin}: page says ${data.asin} (redirect?)`);
+        rejected++;
+        continue;
+      }
 
       const before = this._knownProducts.get(asin) || {};
       if (before.inStock !== data.inStock || (data.price && before.price !== data.price)) changed++;

@@ -26,7 +26,13 @@ const cheerio = require('cheerio');
  * Amazon says "unavailable" in words, in several places, and a page can carry a stale price
  * alongside any of them. Each of these is decisive on its own.
  */
-const UNAVAILABLE = /currently unavailable|we don't know when or if this item will be back|temporarily out of stock|non disponible actuellement/i;
+// Amazon says "unavailable" in several ways, and a page can carry a stale price alongside any of
+// them. Two of these were wrong in the first draft and both fail towards a FALSE RESTOCK:
+//   - bare "out of stock" was missing entirely (amazon-verify.js has always had it)
+//   - the French was "non disponible actuellement"; Amazon renders "Actuellement indisponible",
+//     and since the bridge fetches with credentials the operator's own language cookie decides
+//     the locale — a French profile would have turned the whole catalogue into false restocks.
+const UNAVAILABLE = /currently unavailable|out of stock|sold out|we don't know when or if this item will be back|temporarily out of stock|actuellement indisponible|non disponible|rupture de stock|épuisé/i;
 
 /**
  * Prices on amazon.ca render as "$86.03", "CDN$ 86.03" or "CDN$86.03" — and, in the French
@@ -100,7 +106,11 @@ function parseBuyboxSlice(slice) {
   // some other offer (used, other sellers, a bundle) and is exactly the unscoped kind that
   // poisoned B0H78BB9TY.
   let price = null;
-  for (const sel of ['#corePrice_feature_div', '#corePriceDisplay_desktop_feature_div', '#apex_desktop']) {
+  // ONLY `#corePrice_feature_div`. Measured on a live in-stock amazon.ca page 2026-09-28:
+  // it yields "$21.31" correctly, while `#corePriceDisplay_desktop_feature_div` and
+  // `#apex_desktop` both return an EMPTY first `.a-offscreen` — and are 18KB and 86KB
+  // respectively. They are no longer extracted at all (see page.js SLICE).
+  for (const sel of ['#corePrice_feature_div']) {
     const block = $(sel).first();
     if (block.length === 0) continue;
     // `.a-offscreen` is the screen-reader copy of the rendered price and is the one node that
@@ -126,11 +136,20 @@ function parseBuyboxSlice(slice) {
 
   return {
     name,
+    // The ASIN the PAGE says it is, from the hidden `#ASIN` input (62 bytes, measured present on
+    // every /dp/ page 2026-09-28). Amazon redirects a dead /dp/ to a different product rather
+    // than 404ing, so without this a redirect files one product's buy box under another's ASIN —
+    // and the bridge feeds a paid alert source. null when absent: the caller decides whether an
+    // unverifiable read is usable.
+    asin: parseAsin($),
     price,
     inStock,
-    // On a /dp/ page the buy box IS the pinned offer, so a price from those blocks is
-    // authoritative — the one thing the free search path can never claim.
-    pricePinned: price != null,
+    // Authoritative ONLY when the page also shows a purchase control. `#corePrice_feature_div`
+    // can render on a page with no buy box at all, and an unscoped price flagged `pricePinned`
+    // beats the real one in comparison and manufactures a fake price drop — the B0H78BB9TY
+    // failure this module's header claims to prevent. `_offersToData` is strict in the same way:
+    // it requires the API's own pinned flag rather than inferring pinned-ness from position.
+    pricePinned: price != null && canBuy,
     seller: parseSeller($),
     // Kept for the log line only. Never a verdict input: see the note above about why a fetched
     // page legitimately lacks the button.
@@ -138,4 +157,15 @@ function parseBuyboxSlice(slice) {
   };
 }
 
-module.exports = { parseBuyboxSlice, parsePrice, parseSeller, sellerFromPhrase };
+/**
+ * The ASIN the page declares for itself: `<input type="hidden" id="ASIN" value="B0...">`.
+ * Also accepts `#ASIN` rendered as an element with the value as an attribute, and the
+ * `data-asin` form, because Amazon uses all three across layouts.
+ */
+function parseAsin($) {
+  const el = $('#ASIN').first();
+  const raw = (el.attr('value') || el.attr('data-asin') || el.text() || '').trim();
+  return /^[A-Z0-9]{10}$/.test(raw) ? raw : null;
+}
+
+module.exports = { parseBuyboxSlice, parsePrice, parseSeller, sellerFromPhrase, parseAsin };

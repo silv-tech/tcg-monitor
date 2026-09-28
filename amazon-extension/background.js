@@ -32,11 +32,21 @@ const DEFAULTS = {
 const TAB_URL = 'https://www.amazon.ca/?tcgbridge=1';
 const TAB_MATCH = 'https://www.amazon.ca/*tcgbridge=1*';
 
-const log = [];
-function record(entry) {
-  log.unshift({ at: new Date().toISOString(), ...entry });
-  log.length = Math.min(log.length, 30);
-  chrome.storage.local.set({ pushLog: log });
+/**
+ * The activity log lives in storage, not in a module array.
+ *
+ * An MV3 service worker is evicted after ~30s idle and a module-level array resets with it — so
+ * the first entry after any restart used to overwrite the entire history with one line. That
+ * matters here more than usual: the deployment guide makes this log the ENTIRE selector
+ * verification procedure ("send me that line verbatim"). The one diagnostic channel the rollout
+ * depends on was self-erasing.
+ */
+async function record(entry) {
+  try {
+    const { pushLog = [] } = await chrome.storage.local.get({ pushLog: [] });
+    pushLog.unshift({ at: new Date().toISOString(), ...entry });
+    await chrome.storage.local.set({ pushLog: pushLog.slice(0, 50) });
+  } catch { /* never let logging break the loop */ }
 }
 
 async function cfg() {
@@ -164,7 +174,14 @@ async function watchdog() {
   if (!c.enabled) return;
   const { lastPushAt = 0 } = await chrome.storage.local.get({ lastPushAt: 0 });
   const limit = Math.max(75 * 60 * 1000, (c.cycleDelaySec * 1000 + 120000) * 3);
-  if (lastPushAt === 0 || Date.now() - lastPushAt > limit) {
+  // `lastPushAt === 0` deliberately does NOT trigger a restart any more.
+  //
+  // It used to, and that was a cold-start livelock: before the first push ever lands the alarm
+  // fires every 60s and destructively re-navigates the bridge tab, killing the in-flight batch —
+  // and the documented cold start (an empty work queue) makes content.js sleep 60s, so the first
+  // push could never land. Enabling the bridge now stamps lastPushAt, so this measures silence
+  // since we started, not silence since the epoch.
+  if (Date.now() - lastPushAt > limit) {
     record({ note: `no push for ${Math.round((Date.now() - lastPushAt) / 1000)}s — restarting the tab` });
     await ensureTab(true);
   }

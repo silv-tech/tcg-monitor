@@ -40,9 +40,13 @@ function known(a, asin, over = {}) {
 }
 
 const TITLE = (n) => `<span id="productTitle">${n}</span>`;
+// The cart marker is part of a real in-stock slice, and `pricePinned` now requires it: the price
+// block can render on a page with no buy box, and an unscoped price flagged authoritative
+// manufactures a fake price drop.
 const slice = (name, priceText, availText = 'In Stock') => TITLE(name)
   + (priceText ? `<div id="corePrice_feature_div"><span class="a-price"><span class="a-offscreen">${priceText}</span></span></div>` : '')
   + `<div id="availability"><span>${availText}</span></div>`
+  + (priceText ? '<div id="add-to-cart-button" data-tcg-present="1"></div>' : '')
   + '<div id="merchant-info">Ships from and sold by Amazon.ca.</div>';
 
 describe('getBridgeBatch', () => {
@@ -126,6 +130,93 @@ describe('getBridgeBatch', () => {
     const batch = b.getBridgeBatch(12);
     assert.strictEqual(batch.length, 12, 'one ordinary ASIN, batch still full');
     assert.strictEqual(new Set(batch.map((i) => i.asin)).size, 12, 'and no ASIN read twice');
+  });
+
+  test('a REDIRECTED page is rejected, not filed under the requested ASIN', async () => {
+    // Amazon answers a dead /dp/ with a redirect to a different product, not a 404. The slice
+    // that comes back is a perfectly valid in-stock buy box — belonging to something else.
+    const a = adapter({});
+    known(a, 'B0REQUEST1', { inStock: false });
+    const r = await a.ingestBrowserReads([{
+      asin: 'B0REQUEST1',
+      slice: '<input type="hidden" id="ASIN" value="B0SOMETHIN">' + slice('Other product', '$41.99'),
+    }]);
+    assert.strictEqual(r.accepted, 0);
+    assert.strictEqual(r.rejected, 1);
+    assert.strictEqual(a._knownProducts.get('B0REQUEST1').inStock, false,
+      'a redirect must never flip the requested ASIN in stock');
+  });
+
+  test('a MATCHING #ASIN is accepted', async () => {
+    const a = adapter({});
+    known(a, 'B0MATCHIN1', { inStock: false });
+    const r = await a.ingestBrowserReads([{
+      asin: 'B0MATCHIN1',
+      slice: '<input type="hidden" id="ASIN" value="B0MATCHIN1">' + slice('Real product', '$41.99'),
+    }]);
+    assert.strictEqual(r.accepted, 1);
+    assert.strictEqual(a._knownProducts.get('B0MATCHIN1').inStock, true);
+  });
+
+  test('a slice with NO #ASIN is still accepted — unverifiable is not wrong', async () => {
+    // Fail open, as everywhere else in this system: absence of the field is absence of evidence,
+    // and treating it as a mismatch would silence every page whose layout drops the input.
+    const a = adapter({});
+    known(a, 'B0NOASINTG', { inStock: false });
+    const r = await a.ingestBrowserReads([{ asin: 'B0NOASINTG', slice: slice('P', '$9.99') }]);
+    assert.strictEqual(r.accepted, 1);
+  });
+
+  test('an UNREADABLE ASIN does not block the queue forever', async () => {
+    // getBridgeBatch orders by staleness. If only a successful parse advanced the clock, an ASIN
+    // that can never be read stays the stalest row and is re-picked in every batch — three of
+    // them halve the cadence for everything else.
+    const a = adapter({});
+    known(a, 'B0UNREADAB', { inStock: false });
+    const r = await a.ingestBrowserReads([{ asin: 'B0UNREADAB', slice: '<div>nothing usable</div>' }]);
+    assert.strictEqual(r.rejected, 1, 'still rejected — it must not write stock');
+    assert.ok(a._bridgeCheckedAt.get('B0UNREADAB') > 0, 'but the attempt was recorded');
+  });
+
+  test('an UNTRACKED asin never grows the checked-at map', async () => {
+    // Otherwise a bad or hostile push allocates unbounded server-side state.
+    const a = adapter({});
+    await a.ingestBrowserReads([{ asin: 'B0NOTTRACK', slice: slice('X', '$1.00') }]);
+    assert.strictEqual(a._bridgeCheckedAt.has('B0NOTTRACK'), false);
+  });
+
+  test('BLIND ASINs come first — this is the whole point of the bridge', () => {
+    // Measured in production 2026-09-28: of 24 priority ASINs, 16 are visible to the free
+    // search-tile lane and already detected in ~6s. The other 8 are invisible — Amazon drops an
+    // ASIN from /s when it has no offer — so they are covered ONLY by the paid round-robin at
+    // ~432s. Every missed alert came from that set: the competitor alerted B0H77VZBX4 38 times in
+    // a day, we caught 4. The bridge must read what the free lane CANNOT.
+    const a = adapter({ priorityAsins: ['B0SEEN000001', 'B0BLIND00001'] });
+    known(a, 'B0SEEN000001');                                  // tile reports stock fine
+    known(a, 'B0BLIND00001', { _stockUnobserved: true });       // tile tells us nothing
+    known(a, 'B0TAIL000001');
+    // Freshest-first would put the blind one last; blindness must outrank staleness.
+    a._bridgeCheckedAt.set('B0BLIND00001', Date.now());
+    a._bridgeCheckedAt.set('B0SEEN000001', 0);
+    assert.strictEqual(a.getBridgeBatch(10)[0].asin, 'B0BLIND00001');
+  });
+
+  test('a row MISSING from the catalogue counts as blind', () => {
+    // 6 of the 24 priority ASINs had no state row at all — invisible to every free lane.
+    const a = adapter({ priorityAsins: ['B0GHOST00001', 'B0SEEN000001'] });
+    known(a, 'B0SEEN000001');
+    a._knownProducts.set('B0GHOST00001', undefined);
+    const batch = a.getBridgeBatch(10);
+    assert.ok(batch.length >= 1);
+    assert.strictEqual(batch[0].asin, 'B0GHOST00001', 'no row = the free lane cannot see it');
+  });
+
+  test('blindness does not override the priority/tail split', () => {
+    // A blind TAIL row must not jump ahead of the priority set — the client pays for those.
+    const a = adapter({ priorityAsins: ['B0PRIORITY0'] });
+    known(a, 'B0PRIORITY0');
+    known(a, 'B0TAILBLIND', { _stockUnobserved: true });
+    assert.strictEqual(a.getBridgeBatch(10)[0].asin, 'B0PRIORITY0');
   });
 
   test('the batch size is clamped, so a bad n cannot request the whole catalogue', () => {

@@ -162,10 +162,40 @@ router.get('/suppressions', async (req, res) => {
 });
 
 // Health check
+// A browser bridge that stops pushing is INVISIBLE: the server keeps polling its paid lanes and
+// every retailer still reports healthy, so nothing degrades except the latency the bridge exists
+// to remove — exactly the failure that let a competitor out-alert us 44 to 4 in a day. Surface
+// the last push so a dead extension is a number on the status page, not something to notice
+// weeks later from missed alerts. Threshold is generous: one batch is ~45s, so 10 minutes of
+// silence means the browser is closed, asleep, or blocked — never merely slow.
+const BRIDGE_STALE_MS = 10 * 60 * 1000;
+
 router.get('/health', async (req, res) => {
   const health = await checkHealth();
   const allHealthy = health.every(r => r.healthy);
-  res.json({ status: allHealthy ? 'ok' : 'degraded', retailers: health });
+
+  const amazon = scheduler.getAdapter('amazon');
+  let bridge;
+  if (amazon && typeof amazon.getBridgeBatch === 'function') {
+    const last = amazon._lastBridgePushAt || 0;
+    bridge = {
+      // `never` is deliberately distinct from `stale`: never means the extension has not been
+      // installed or authenticated since boot, stale means it was working and stopped. Those
+      // have different fixes and must not look the same.
+      status: !last ? 'never' : (Date.now() - last < BRIDGE_STALE_MS ? 'ok' : 'stale'),
+      lastPushAt: last || null,
+      ageSeconds: last ? Math.round((Date.now() - last) / 1000) : null,
+    };
+  }
+
+  // The bridge does NOT drag the overall status down. It is a latency accelerator, not a source
+  // of truth — the paid lanes still cover every ASIN — and a red health check that pages someone
+  // because a laptop shut its lid would train everyone to ignore this endpoint.
+  res.json({
+    status: allHealthy ? 'ok' : 'degraded',
+    retailers: health,
+    ...(bridge ? { amazonBridge: bridge } : {}),
+  });
 });
 
 // List retailers (base + Redis overrides merged)
